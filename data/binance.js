@@ -6,12 +6,14 @@
  *   2. 否则请求 Binance（直连，或设置 HTTPS_PROXY/HTTP_PROXY 时走代理）→ 写入本地缓存
  *   3. 网络失败但有旧缓存 → 回退旧缓存并告警（离线也能跑）
  *
- * 缓存目录：data/cache/{SYMBOL}_{INTERVAL}_{LIMIT}.json
- *   长历史（getHistory）：data/cache/{SYMBOL}_{INTERVAL}_h{COUNT}.json
+ * 缓存目录：data/cache/{SYMBOL}_{INTERVAL}_{LIMIT}_perp.json
+ *   长历史（getHistory）：data/cache/{SYMBOL}_{INTERVAL}_h{COUNT}_perp.json
  * 缓存过期：默认 4 小时（可用环境变量 BIAS_CACHE_TTL_HOURS 覆盖），
  *           且不超过对应 K 线周期（日=24h，周=7d）。
  * 代理：默认直连；仅当设置 HTTPS_PROXY / HTTP_PROXY（http 代理）时才走代理。
  *       （服务器无需代理直接可用；本地需代理时 export HTTPS_PROXY=http://127.0.0.1:7890）
+ * 数据源：统一使用 Binance 永续合约（fapi）K 线 —— 监控对象是 USDT 永续，
+ *       BTC/ETH 等传统合约永续与现货结构几乎一致，杠杆代币/商品永续只在 fapi 存在。
  *
  * K 线格式（统一）：
  *   { time, open, high, low, close, closeTime }
@@ -22,12 +24,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ProxyAgent } from "undici";
+import { ProxyAgent, request } from "undici";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = join(__dirname, "cache");
 
-const BASES = ["https://api.binance.com", "https://data-api.binance.vision"]; // 公开行情端点
+const PERP_BASES = ["https://fapi.binance.com", "https://fapi.binance.vision"]; // 公开永续合约行情端点
 const TIMEOUT_MS = 10_000;
 
 // 代理仅由环境变量显式开启（只认 http/https 代理，避免 socks 冲突）；未设置则直连
@@ -50,7 +52,7 @@ function mapKline(k) {
 }
 
 function cacheFile(symbol, interval, limit) {
-  return join(CACHE_DIR, `${symbol}_${interval}_${limit}.json`);
+  return join(CACHE_DIR, `${symbol}_${interval}_${limit}_perp.json`);
 }
 
 function readCache(file) {
@@ -139,7 +141,13 @@ export async function getHistory(symbol, interval, count) {
   }
 }
 
-/** 依次尝试 代理 → 直连（无代理则直接直连）、多个端点 */
+/**
+ * 从 Binance 永续合约（fapi）拉取 K 线：代理 → 直连（无代理直接直连）、多端点轮询。
+ * 统一使用永续数据：监控对象是 USDT 永续，杠杆代币/商品永续只在 fapi 存在；
+ * BTC/ETH 等传统合约永续与现货结构几乎一致，直接用永续保证数据源一致。
+ * 注意：必须用 undici.request 而非 fetch —— undici 8.10 的 fetch + ProxyAgent 存在
+ * UND_ERR_INVALID_ARG 兼容 bug，request API 正常。
+ */
 async function fetchFromBinance(symbol, interval, limit, startTime = null, endTime = null) {
   const modes = PROXY
     ? [
@@ -148,15 +156,19 @@ async function fetchFromBinance(symbol, interval, limit, startTime = null, endTi
       ]
     : [{ name: "direct", opts: {} }];
   let lastErr;
-  for (const base of BASES) {
+  for (const base of PERP_BASES) {
     for (const mode of modes) {
       try {
         const st = startTime == null ? "" : `&startTime=${startTime}`;
         const et = endTime == null ? "" : `&endTime=${endTime}`;
-        const url = `${base}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}${st}${et}`;
-        const res = await fetch(url, { ...mode.opts, signal: AbortSignal.timeout(TIMEOUT_MS) });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const url = `${base}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}${st}${et}`;
+        const { statusCode, body } = await request(url, {
+          ...mode.opts,
+          headersTimeout: TIMEOUT_MS,
+          bodyTimeout: TIMEOUT_MS,
+        });
+        if (statusCode !== 200) throw new Error(`HTTP ${statusCode}`);
+        const data = JSON.parse(await body.text());
         if (!Array.isArray(data)) throw new Error("响应格式异常");
         return data.map(mapKline);
       } catch (e) {

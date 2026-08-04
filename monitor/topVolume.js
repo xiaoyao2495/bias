@@ -3,8 +3,9 @@
  *
  * 数据源：Binance Futures 公开行情（fapi）。
  * 一次拉取全部 24h ticker（/fapi/v1/ticker/24hr），
- * 过滤 USDT 永续（symbol 以 USDT 结尾，天然排除当季/次季交割合约），
+ * 过滤 USDT 永续（symbol 以 USDT 结尾），
  * 按 24h 成交额（quoteVolume，单位 USDT）降序取 Top N。
+ * 不做额外过滤：含杠杆代币（如 SNDK/SOXL/KORU）按成交量参与排序（用户指定）。
  *
  * 网络策略：默认直连；仅当设置了 HTTPS_PROXY / HTTP_PROXY（http 代理）时才走代理。
  * 服务器（国外）无需代理直接可用；本地需代理时 export HTTPS_PROXY=http://127.0.0.1:7890。
@@ -26,7 +27,7 @@ const PROXY = /^https?:\/\//i.test(PROXY_ENV) ? PROXY_ENV : "";
 const proxyAgent = PROXY ? new ProxyAgent(PROXY) : null;
 
 /**
- * 获取 Binance USDT 永续 24h 成交额 Top N。
+ * 获取 Binance USDT 永续 24h 成交额 Top N（含杠杆代币，纯成交量排序）。
  * @param {number} [n=15] 返回数量
  * @returns {Promise<Array<{symbol: string, quoteVolume: number, lastPrice: number}>>}
  */
@@ -34,11 +35,11 @@ export async function getTopVolumeSymbols(n = 15) {
   const tickers = await fetchTicker24h();
   const usdtPerps = tickers
     .filter((t) => t.symbol.endsWith("USDT"))
-    .sort((a, b) => b.quoteVolume - a.quoteVolume);
+    .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume));
   return usdtPerps.slice(0, n).map((t) => ({
     symbol: t.symbol,
-    quoteVolume: t.quoteVolume,
-    lastPrice: t.lastPrice,
+    quoteVolume: Number(t.quoteVolume),
+    lastPrice: Number(t.lastPrice),
   }));
 }
 
