@@ -46,7 +46,7 @@ function log(...args) {
 }
 
 // 模块加载即打点：诊断 pm2 进程是否真正加载/进入了该脚本
-log(`[runMonitor] 模块加载（argv1=${process.argv[1] || "(无)"}，cwd=${process.cwd()}）`);
+log(`[runMonitor] 模块加载（argv1=${process.argv[1] || "(无)"}，pm_exec_path=${process.env.pm_exec_path || "(无)"}，cwd=${process.cwd()}）`);
 
 const TOP_N = 15;
 const ICON = { BULLISH: "🟢", BEARISH: "🔴", NEUTRAL: "⚪" };
@@ -197,10 +197,11 @@ function now() {
   });
 }
 
-// CLI 入口：basename 匹配（Windows 下 pm2 可能传绝对/相对路径、大小写不同，
-// pathToFileURL + import.meta.url 精确相等在 pm2 fork 模式下可能失败 → 进程静默退出）
-if (process.argv[1] && /runMonitor\.js$/i.test(process.argv[1])) {
-  log(`[runMonitor] CLI 入口命中（argv1=${process.argv[1]}）`);
+// CLI 入口：pm2 fork 模式下 argv[1] 是 pm2 容器脚本（ProcessContainerFork.js），
+// 真正的入口脚本在 process.env.pm_exec_path；普通命令行运行才用 argv[1]。
+const entry = process.env.pm_exec_path || process.argv[1] || "";
+if (/runMonitor\.js$/i.test(entry)) {
+  log(`[runMonitor] CLI 入口命中（entry=${entry}）`);
   const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
   const dryRun = process.argv.includes("--dry");
   const once = process.argv.includes("--once");
