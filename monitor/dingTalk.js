@@ -14,9 +14,12 @@
 const KEYWORD = "检测-";
 const TIMEOUT_MS = 10_000;
 
-/** 读取 webhook（未配置则抛错，避免静默失败） */
+/** 读取 webhook（未配置则抛错，避免静默失败）。
+ *  防御：从聊天/文档复制 URL 时容易带上 markdown 反引号（`）或尾部空白，
+ *  自动剥离首尾反引号与空白，避免非法 URL 导致推送静默失败。 */
 export function getWebhook() {
-  const hook = process.env.DINGTALK_WEBHOOK;
+  let hook = (process.env.DINGTALK_WEBHOOK || "").trim();
+  hook = hook.replace(/^`+|`+$/g, "");
   if (!hook) {
     throw new Error('未配置 DINGTALK_WEBHOOK 环境变量。运行前先: export DINGTALK_WEBHOOK="https://oapi.dingtalk.com/robot/send?access_token=..."');
   }
