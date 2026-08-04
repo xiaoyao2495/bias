@@ -6,10 +6,7 @@
  *   → compareState → 状态变化则推钉钉 → saveState → 睡到下一个对齐点
  *
  * 调度（北京时间）：
- *   16:00-24:00 → 每 10 分钟对齐检测一次（盯盘时段，响应快）
- *   其余时间    → 每 30 分钟对齐检测一次（低频，省资源）
- *   pm2 cron_restart 无法表达复合频率，故由进程内部 setTimeout 自调度，
- *   pm2 只负责保活（autorestart: true）。
+ *   全天每 10 分钟对齐检测一次（pm2 只负责保活，进程内自调度）。
  *
  * 推送策略：
  *   首轮（state.json 无记录）→ 推送一次全览（15 合约当前状态）
@@ -112,15 +109,14 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
 
 /**
  * 距下一个对齐点（北京时间）的等待毫秒数。
- * 16:00-24:00 → 每 10 分钟对齐；其余 → 每 30 分钟对齐。
+ * 全天每 10 分钟对齐检测一次。
  * 用 UTC 字段 + 8h 偏移模拟北京时间，与服务器时区无关。
  * @param {Date} [now] 测试可注入
  */
 export function nextDelayMs(now = new Date()) {
   const bj = new Date(now.getTime() + BJ_OFFSET_MS);
   const mins = bj.getUTCHours() * 60 + bj.getUTCMinutes() + bj.getUTCSeconds() / 60 + bj.getUTCMilliseconds() / 60000;
-  const inPeak = mins >= 16 * 60 && mins < 24 * 60; // [16:00, 24:00)
-  const step = inPeak ? 10 : 30;
+  const step = 10; // 全天统一每 10 分钟对齐
   const nextSlot = Math.floor(mins / step) * step + step; // 严格大于当前的对齐点
   return Math.max((nextSlot - mins) * 60_000, 1000); // 至少 1 秒，避免忙循环
 }
