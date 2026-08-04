@@ -28,7 +28,22 @@ import { getTopVolumeSymbols } from "../monitor/topVolume.js";
 import { analyzeSymbols } from "../monitor/biasMonitor.js";
 import { loadState, saveState, compareState } from "../monitor/state.js";
 import { sendMarkdown } from "../monitor/dingTalk.js";
-import { pathToFileURL } from "node:url";
+import { appendFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const LOG_FILE = join(__dirname, "..", "monitor", "log.txt");
+
+/** 文件日志：Windows 上 pm2 的 out/err 日志空白，写文件便于在服务器上排查 */
+function log(...args) {
+  const ts = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+  const line = `[${ts}] ${args.join(" ")}`;
+  try {
+    appendFileSync(LOG_FILE, line + "\n");
+  } catch {}
+  console.error(line);
+}
 
 const TOP_N = 15;
 const ICON = { BULLISH: "🟢", BEARISH: "🔴", NEUTRAL: "⚪" };
@@ -43,7 +58,10 @@ const BJ_OFFSET_MS = 8 * 3600_000;
  */
 export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {}) {
   const list = symbols && symbols.length ? symbols : (await getTopVolumeSymbols(topN)).map((t) => t.symbol);
-  const results = await analyzeSymbols(list);
+  log(`[runMonitor] 开始，合约数=${list.length}: ${list.join(",")}`);
+  const results = await analyzeSymbols(list, { onProgress: (n, t) => log(`[runMonitor] 分析进度 ${n}/${t}`) });
+  const failed = results.filter((r) => r.error).length;
+  log(`[runMonitor] 分析完成：成功 ${results.length - failed} / ${results.length}`);
   const prevState = loadState();
   const isFirstRun = Object.keys(prevState).length === 0;
   const nextState = {};
@@ -74,15 +92,16 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
   if (!dryRun) {
     if (isFirstRun) {
       await sendMarkdown(buildOverview(overview), "4H Bias Monitor");
-      console.error(`[runMonitor] 首轮全览已推送（${overview.length} 合约）`);
+      log(`[runMonitor] 首轮全览已推送（${overview.length} 合约）`);
     } else {
       for (const item of changed) {
         await sendMarkdown(buildChanged(item), `${item.symbol} Bias`);
-        console.error(`[runMonitor] 已推送 ${item.symbol}（${item.changes.join(",")}）`);
+        log(`[runMonitor] 已推送 ${item.symbol}（${item.changes.join(",")}）`);
       }
-      console.error(`[runMonitor] 完成: ${changed.length} 变化 / ${overview.length} 合约`);
+      log(`[runMonitor] 本轮完成: ${changed.length} 变化 / ${overview.length} 合约`);
     }
     saveState(nextState);
+    log(`[runMonitor] 状态已保存（${Object.keys(nextState).length} 合约）`);
   }
 
   return { firstRun: isFirstRun, changed, overview };
@@ -116,12 +135,12 @@ export async function startMonitorLoop({ symbols, intervalMs } = {}) {
   for (;;) {
     const delay = intervalMs ?? nextDelayMs();
     const next = new Date(Date.now() + delay);
-    console.error(`[monitor] 下次检测: ${next.toISOString()}（${Math.round(delay / 60000)} 分钟后）`);
+    log(`[monitor] 下次检测: ${next.toISOString()}（${Math.round(delay / 60000)} 分钟后）`);
     await sleep(delay);
     try {
       await runMonitor({ symbols });
     } catch (e) {
-      console.error(`[monitor] 本轮失败: ${e.message}，继续下一轮`);
+      log(`[monitor] 本轮失败: ${e.message}，继续下一轮`);
     }
   }
 }
@@ -190,6 +209,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       }
     })
     .catch((e) => {
+      log(`[runMonitor] 失败: ${e.message}`);
       console.error(`[runMonitor] 失败: ${e.message}`);
       process.exit(1);
     });
