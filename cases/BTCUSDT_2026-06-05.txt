@@ -1,0 +1,120 @@
+================================
+
+BTCUSDT 4H Daily Bias
+
+Time: 2026-06-05
+
+Structure:
+EXTERNAL_BEARISH
+
+Sequence:
+LL → HH → HL → LH → LL
+
+Direction:
+Bearish
+
+Liquidity Target:
+
+Primary Buy Draw:
+PWH 78080
+
+Buy Side:
+EQH 82137.26
+PWH 78080
+PDH 64764.32
+
+Sell Side:
+PDL 61383.56
+PWL 72512.49
+EQL 76108
+
+Primary Sell Draw:
+PWL 72512.49
+
+Range Type:
+IMPULSE_BEARISH
+
+Range:
+61383.56 - 74275.66
+Equilibrium:
+67829.61
+Location:
+Discount
+
+Context:
+LATE_IMPULSE
+
+PD Array:
+
+Primary:
+Bearish FVG 71800.73-72290
+Location:
+PREMIUM
+Status:
+VALID
+
+Alternative:
+Bearish FVG 69548.13-69733
+Bearish FVG 68146.3-69324.65
+Bearish OB 74092
+Bearish OB 77621.75
+Bearish OB 73616
+Bearish OB 74024
+Bearish FVG 66373.18-66656.48
+Bearish FVG 65860-66076
+Bearish FVG 64540.3-65251
+
+Market Bias:
+🔴 BEARISH
+
+Structure Status:
+✅ VALID
+
+Effective Bias:
+🔴 BEARISH
+
+Draw Target:
+PDL 61383.56
+
+Alternative:
+-
+
+Reason:
+Previous Day Low
+
+Execution:
+WAIT
+
+
+Invalidation:
+
+Break Protected High 74275.66 [STRUCTURE_PROTECTED_HIGH · LH_BEFORE_DISPLACEMENT]
+
+Bias Explanation:
+
+1. Structure:
+   LH + LL confirmed — EXTERNAL_BEARISH
+
+2. Liquidity:
+   Sell-side below: PDL 61383.56 (Previous Day Low)
+
+3. Location:
+   Price in DISCOUNT — LATE_IMPULSE
+   near range target — avoid chasing (WAIT)
+
+4. PD Array:
+   Bearish FVG 71800.73-72290 — PREMIUM, VALID
+
+5. Invalidation:
+   Protected High 74275.66 — break = bias invalidated [LH_BEFORE_DISPLACEMENT]
+
+Scenario:
+
+BEARISH_CONTINUATION
+
+Confidence:
+
+MEDIUM
+
+
+================================

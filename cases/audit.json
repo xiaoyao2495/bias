@@ -1,0 +1,566 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "date": "2025-07-14",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "NEUTRAL",
+      "type": "RANGE",
+      "sequence": "HL → HH → HL → LH → HL",
+      "protectedLow": null,
+      "protectedHigh": null
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": null,
+      "alternatives": [],
+      "note": null
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "116900.05 - 118200",
+      "current": 119086.64,
+      "location": "PREMIUM",
+      "context": "UNKNOWN",
+      "rangeType": "RECENT",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": null,
+      "note": "同向顺位无 VALID 执行区域（可能全在逆位或已填充）"
+    },
+    "finalBias": {
+      "bias": "NEUTRAL",
+      "effectiveBias": "NEUTRAL",
+      "execution": "NONE",
+      "invalidation": null
+    },
+    "scenarioCheck": {
+      "state": "RANGE",
+      "label": "RANGE",
+      "htfDirection": "BULLISH"
+    },
+    "confidenceCheck": {
+      "level": "LOW",
+      "score": 0,
+      "checks": {
+        "structureConfirmed": false,
+        "protectedValid": true,
+        "liquidityClear": false,
+        "locationValid": false,
+        "pdArrayAligned": false
+      }
+    },
+    "humanReview": false
+  },
+  {
+    "symbol": "BTCUSDT",
+    "date": "2025-10-06",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "BULLISH",
+      "type": "EXTERNAL_BULLISH",
+      "sequence": "HH → HL → HH → HL → HH",
+      "protectedLow": 121510,
+      "protectedHigh": null
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": "PWH 125708.42",
+      "alternatives": [
+        "PDH 125708.42"
+      ],
+      "note": null
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "121510 - 125708.42",
+      "current": 123482.31,
+      "location": "DISCOUNT",
+      "context": "LATE_IMPULSE",
+      "rangeType": "IMPULSE_BULLISH",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": "BULLISH_FVG 120515.89 (DISCOUNT, VALID)",
+      "note": "Primary 为 FVG，FVG/OB 优先级待人工确认（风险 3）"
+    },
+    "finalBias": {
+      "bias": "BULLISH",
+      "effectiveBias": "BULLISH",
+      "execution": "WAIT",
+      "invalidation": "BREAK_PROTECTED_LOW 121510 [HL_BEFORE_DISPLACEMENT]"
+    },
+    "scenarioCheck": {
+      "state": "TREND_CONTINUATION",
+      "label": "BULLISH_CONTINUATION",
+      "htfDirection": "BULLISH"
+    },
+    "confidenceCheck": {
+      "level": "HIGH",
+      "score": 95,
+      "checks": {
+        "structureConfirmed": true,
+        "protectedValid": true,
+        "liquidityClear": true,
+        "locationValid": false,
+        "pdArrayAligned": true
+      }
+    },
+    "humanReview": false
+  },
+  {
+    "symbol": "BTCUSDT",
+    "date": "2026-06-05",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "BEARISH",
+      "type": "EXTERNAL_BEARISH",
+      "sequence": "LL → HH → HL → LH → LL",
+      "protectedLow": null,
+      "protectedHigh": 74275.66
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": "PDL 61383.56",
+      "alternatives": [],
+      "note": null
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "61383.56 - 74275.66",
+      "current": 63885.99,
+      "location": "DISCOUNT",
+      "context": "LATE_IMPULSE",
+      "rangeType": "IMPULSE_BEARISH",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": "BEARISH_FVG 72290 (PREMIUM, VALID)",
+      "note": "Primary 为 FVG，FVG/OB 优先级待人工确认（风险 3）"
+    },
+    "finalBias": {
+      "bias": "BEARISH",
+      "effectiveBias": "BEARISH",
+      "execution": "WAIT",
+      "invalidation": "BREAK_PROTECTED_HIGH 74275.66 [LH_BEFORE_DISPLACEMENT]"
+    },
+    "scenarioCheck": {
+      "state": "TREND_CONTINUATION",
+      "label": "BEARISH_CONTINUATION",
+      "htfDirection": "BEARISH"
+    },
+    "confidenceCheck": {
+      "level": "HIGH",
+      "score": 90,
+      "checks": {
+        "structureConfirmed": true,
+        "protectedValid": true,
+        "liquidityClear": true,
+        "locationValid": false,
+        "pdArrayAligned": true
+      }
+    },
+    "humanReview": false
+  },
+  {
+    "symbol": "BTCUSDT",
+    "date": "2025-11-17",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "BEARISH",
+      "type": "INTERNAL_BEARISH",
+      "sequence": "LH → LL → LH → LL → LH",
+      "protectedLow": null,
+      "protectedHigh": 104085.01
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": "EXTERNAL_LOW 94012.45",
+      "alternatives": [
+        "PWL 93005.55",
+        "PDL 93005.55"
+      ],
+      "note": "Primary 为外部结构位，人工确认是否更应重视 PWH/PWL（风险 2）"
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "94012.45 - 104085.01",
+      "current": 94261.44,
+      "location": "DISCOUNT",
+      "context": "LATE_IMPULSE",
+      "rangeType": "IMPULSE_BEARISH",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": "BEARISH_FVG 102553.63 (PREMIUM, VALID)",
+      "note": "Primary 为 FVG，FVG/OB 优先级待人工确认（风险 3）"
+    },
+    "finalBias": {
+      "bias": "BEARISH",
+      "effectiveBias": "BEARISH",
+      "execution": "WAIT",
+      "invalidation": "BREAK_PROTECTED_HIGH 104085.01 [LH_BEFORE_DISPLACEMENT]"
+    },
+    "scenarioCheck": {
+      "state": "TREND_CONTINUATION",
+      "label": "BEARISH_CONTINUATION",
+      "htfDirection": "BEARISH"
+    },
+    "confidenceCheck": {
+      "level": "HIGH",
+      "score": 95,
+      "checks": {
+        "structureConfirmed": true,
+        "protectedValid": true,
+        "liquidityClear": true,
+        "locationValid": false,
+        "pdArrayAligned": true
+      }
+    },
+    "humanReview": false
+  },
+  {
+    "symbol": "BTCUSDT",
+    "date": "2026-04-26",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "NEUTRAL",
+      "type": "RANGE",
+      "sequence": "HH → HL → LH → HL → LH",
+      "protectedLow": null,
+      "protectedHigh": null
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": null,
+      "alternatives": [],
+      "note": null
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "77264.08 - 77885.35",
+      "current": 77625,
+      "location": "PREMIUM",
+      "context": "UNKNOWN",
+      "rangeType": "RECENT",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": null,
+      "note": "同向顺位无 VALID 执行区域（可能全在逆位或已填充）"
+    },
+    "finalBias": {
+      "bias": "NEUTRAL",
+      "effectiveBias": "NEUTRAL",
+      "execution": "NONE",
+      "invalidation": null
+    },
+    "scenarioCheck": {
+      "state": "RANGE",
+      "label": "RANGE",
+      "htfDirection": "BULLISH"
+    },
+    "confidenceCheck": {
+      "level": "LOW",
+      "score": 0,
+      "checks": {
+        "structureConfirmed": false,
+        "protectedValid": true,
+        "liquidityClear": false,
+        "locationValid": false,
+        "pdArrayAligned": false
+      }
+    },
+    "humanReview": false
+  },
+  {
+    "symbol": "BTCUSDT",
+    "date": "2025-10-12",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "BEARISH",
+      "type": "EXTERNAL_BEARISH",
+      "sequence": "LL → LH → LL → LH → LL",
+      "protectedLow": null,
+      "protectedHigh": 122550
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": "PDL 109561.59",
+      "alternatives": [
+        "INTERNAL_LOW 102000"
+      ],
+      "note": null
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "102000 - 122550",
+      "current": 110644.4,
+      "location": "DISCOUNT",
+      "context": "LATE_IMPULSE",
+      "rangeType": "IMPULSE_BEARISH",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": "BEARISH_FVG 120916.44 (PREMIUM, VALID)",
+      "note": "Primary 为 FVG，FVG/OB 优先级待人工确认（风险 3）"
+    },
+    "finalBias": {
+      "bias": "BEARISH",
+      "effectiveBias": "BEARISH",
+      "execution": "WAIT",
+      "invalidation": "BREAK_PROTECTED_HIGH 122550 [LH_BEFORE_DISPLACEMENT]"
+    },
+    "scenarioCheck": {
+      "state": "REVERSAL_ATTEMPT",
+      "label": "BEARISH_REVERSAL_ATTEMPT",
+      "htfDirection": "BULLISH"
+    },
+    "confidenceCheck": {
+      "level": "MEDIUM",
+      "score": 50,
+      "checks": {
+        "structureConfirmed": true,
+        "protectedValid": true,
+        "liquidityClear": true,
+        "locationValid": false,
+        "pdArrayAligned": true
+      }
+    },
+    "humanReview": false
+  },
+  {
+    "symbol": "ETHUSDT",
+    "date": "2025-08-13",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "BULLISH",
+      "type": "EXTERNAL_BULLISH",
+      "sequence": "HH → HL → HH → HL → HH",
+      "protectedLow": 4166.77,
+      "protectedHigh": null
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": "PDH 4639.7",
+      "alternatives": [],
+      "note": null
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "4166.77 - 4366.46",
+      "current": 4590.52,
+      "location": "PREMIUM",
+      "context": "LATE_IMPULSE",
+      "rangeType": "IMPULSE_BULLISH",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": "BULLISH_FVG 4053.01 (DISCOUNT, VALID)",
+      "note": "Primary 为 FVG，FVG/OB 优先级待人工确认（风险 3）"
+    },
+    "finalBias": {
+      "bias": "BULLISH",
+      "effectiveBias": "BULLISH",
+      "execution": "WAIT",
+      "invalidation": "BREAK_PROTECTED_LOW 4166.77 [HL_BEFORE_DISPLACEMENT]"
+    },
+    "scenarioCheck": {
+      "state": "TREND_CONTINUATION",
+      "label": "BULLISH_CONTINUATION",
+      "htfDirection": "BULLISH"
+    },
+    "confidenceCheck": {
+      "level": "HIGH",
+      "score": 95,
+      "checks": {
+        "structureConfirmed": true,
+        "protectedValid": true,
+        "liquidityClear": true,
+        "locationValid": false,
+        "pdArrayAligned": true
+      }
+    },
+    "humanReview": false
+  },
+  {
+    "symbol": "ETHUSDT",
+    "date": "2026-02-05",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "BEARISH",
+      "type": "INTERNAL_BEARISH",
+      "sequence": "HH → LL → LH → LL → LH",
+      "protectedLow": null,
+      "protectedHigh": 2396.62
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": "EXTERNAL_LOW 2110",
+      "alternatives": [
+        "PDL 2076.68"
+      ],
+      "note": "Primary 为外部结构位，人工确认是否更应重视 PWH/PWL（风险 2）"
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "2110 - 2396.62",
+      "current": 2148.26,
+      "location": "DISCOUNT",
+      "context": "LATE_IMPULSE",
+      "rangeType": "IMPULSE_BEARISH",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": "BEARISH_FVG 2668.2 (PREMIUM, VALID)",
+      "note": "Primary 为 FVG，FVG/OB 优先级待人工确认（风险 3）"
+    },
+    "finalBias": {
+      "bias": "BEARISH",
+      "effectiveBias": "BEARISH",
+      "execution": "WAIT",
+      "invalidation": "BREAK_PROTECTED_HIGH 2396.62 [LH_BEFORE_DISPLACEMENT]"
+    },
+    "scenarioCheck": {
+      "state": "TREND_CONTINUATION",
+      "label": "BEARISH_CONTINUATION",
+      "htfDirection": "BEARISH"
+    },
+    "confidenceCheck": {
+      "level": "HIGH",
+      "score": 95,
+      "checks": {
+        "structureConfirmed": true,
+        "protectedValid": true,
+        "liquidityClear": true,
+        "locationValid": false,
+        "pdArrayAligned": true
+      }
+    },
+    "humanReview": false
+  },
+  {
+    "symbol": "ETHUSDT",
+    "date": "2026-06-05",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "BEARISH",
+      "type": "EXTERNAL_BEARISH",
+      "sequence": "LL → LH → LL → LH → LL",
+      "protectedLow": null,
+      "protectedHigh": 1893.07
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": "PDL 1717.28",
+      "alternatives": [],
+      "note": null
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "1717.28 - 1893.07",
+      "current": 1770.77,
+      "location": "DISCOUNT",
+      "context": "LATE_IMPULSE",
+      "rangeType": "IMPULSE_BEARISH",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": "BEARISH_FVG 1966.69 (PREMIUM, VALID)",
+      "note": "Primary 为 FVG，FVG/OB 优先级待人工确认（风险 3）"
+    },
+    "finalBias": {
+      "bias": "BEARISH",
+      "effectiveBias": "BEARISH",
+      "execution": "WAIT",
+      "invalidation": "BREAK_PROTECTED_HIGH 1893.07 [LH_BEFORE_DISPLACEMENT]"
+    },
+    "scenarioCheck": {
+      "state": "TREND_CONTINUATION",
+      "label": "BEARISH_CONTINUATION",
+      "htfDirection": "BEARISH"
+    },
+    "confidenceCheck": {
+      "level": "HIGH",
+      "score": 90,
+      "checks": {
+        "structureConfirmed": true,
+        "protectedValid": true,
+        "liquidityClear": true,
+        "locationValid": false,
+        "pdArrayAligned": true
+      }
+    },
+    "humanReview": false
+  },
+  {
+    "symbol": "ETHUSDT",
+    "date": "2026-06-10",
+    "structureCheck": {
+      "status": "PASS",
+      "direction": "BULLISH",
+      "type": "INTERNAL_BULLISH",
+      "sequence": "LL → LH → HL → HH → HL",
+      "protectedLow": 1604,
+      "protectedHigh": null
+    },
+    "liquidityCheck": {
+      "status": "PASS",
+      "primaryDraw": "EXTERNAL_HIGH 1893.07",
+      "alternatives": [
+        "PDH 1696.88",
+        "INTERNAL_HIGH 1721.93",
+        "PWH 2021.5",
+        "EQH 2157.5"
+      ],
+      "note": "Primary 为外部结构位，人工确认是否更应重视 PWH/PWL（风险 2）"
+    },
+    "locationCheck": {
+      "status": "PASS",
+      "range": "1604 - 1721.93",
+      "current": 1639.52,
+      "location": "DISCOUNT",
+      "context": "DISCOUNT_VALID",
+      "rangeType": "IMPULSE_BULLISH",
+      "note": null
+    },
+    "pdArrayCheck": {
+      "status": "PASS",
+      "primary": "BULLISH_FVG 1570.06 (DISCOUNT, VALID)",
+      "note": "Primary 为 FVG，FVG/OB 优先级待人工确认（风险 3）"
+    },
+    "finalBias": {
+      "bias": "BULLISH",
+      "effectiveBias": "BULLISH",
+      "execution": "READY",
+      "invalidation": "BREAK_PROTECTED_LOW 1604 [HL_BEFORE_DISPLACEMENT]"
+    },
+    "scenarioCheck": {
+      "state": "REVERSAL_ATTEMPT",
+      "label": "BULLISH_REVERSAL_ATTEMPT",
+      "htfDirection": "BEARISH"
+    },
+    "confidenceCheck": {
+      "level": "LOW",
+      "score": 20,
+      "checks": {
+        "structureConfirmed": true,
+        "protectedValid": true,
+        "liquidityClear": true,
+        "locationValid": true,
+        "pdArrayAligned": true
+      }
+    },
+    "humanReview": false
+  }
+]

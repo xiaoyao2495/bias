@@ -1,0 +1,122 @@
+================================
+
+ETHUSDT 4H Daily Bias
+
+Time: 2026-06-10
+
+Structure:
+INTERNAL_BULLISH
+
+Sequence:
+LL → LH → HL → HH → HL
+
+Direction:
+Bullish
+
+Liquidity Target:
+
+Primary Buy Draw:
+PWH 2021.5
+
+Buy Side:
+EQH 2157.5
+PWH 2021.5
+PDH 1696.88
+
+Sell Side:
+PWL 1505.68
+PDL 1614.02
+EQL 2091.48
+
+Primary Sell Draw:
+PWL 1505.68
+
+Range Type:
+IMPULSE_BULLISH
+
+Range:
+1604 - 1721.93
+Equilibrium:
+1662.97
+Location:
+Discount
+
+Context:
+DISCOUNT_VALID
+
+PD Array:
+
+Primary:
+Bullish FVG 1570.06-1585
+Location:
+DISCOUNT
+Status:
+VALID
+
+Alternative:
+Bullish FVG 1600.51-1608.39
+Bullish FVG 1638-1670.94
+Bullish OB 1547.05
+Bullish OB 1604
+Bullish OB 1956.04
+Bullish OB 1816.92
+Bullish OB 1645
+
+Market Bias:
+🟢 BULLISH
+
+Structure Status:
+✅ VALID
+
+Effective Bias:
+🟢 BULLISH
+
+Draw Target:
+EXTERNAL_HIGH 1893.07
+
+Alternative:
+PDH 1696.88
+INTERNAL_HIGH 1721.93
+PWH 2021.5
+EQH 2157.5
+
+Reason:
+External swing high (HTF objective)
+
+Execution:
+READY
+
+
+Invalidation:
+
+Break Protected Low 1604 [STRUCTURE_PROTECTED_LOW · HL_BEFORE_DISPLACEMENT]
+
+Bias Explanation:
+
+1. Structure:
+   HH + HL confirmed — INTERNAL_BULLISH
+
+2. Liquidity:
+   Buy-side above: EXTERNAL_HIGH 1893.07 (External swing high (HTF objective))
+   Alternatives: PDH 1696.88, INTERNAL_HIGH 1721.93 …
+
+3. Location:
+   Price in DISCOUNT — DISCOUNT_VALID
+   valid discount zone (READY for longs)
+
+4. PD Array:
+   Bullish FVG 1570.06-1585 — DISCOUNT, VALID
+
+5. Invalidation:
+   Protected Low 1604 — break = bias invalidated [HL_BEFORE_DISPLACEMENT]
+
+Scenario:
+
+BULLISH_REVERSAL_ATTEMPT
+
+Confidence:
+
+HIGH
+
+
+================================

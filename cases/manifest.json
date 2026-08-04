@@ -1,0 +1,130 @@
+{
+  "version": "V2.5",
+  "purpose": "真实案例库：对照 ICT 2022 人工判断验证 Daily Bias Engine。verified=false 表示待人工逐例审计。",
+  "generatedAt": "2026-08-04",
+  "engineVersion": "V2.5（Bias Decision Layer：Opportunity = Confidence × planR，Tradeability / Decision）+ V2.4（Bias Quality：planR / outcome-R / MAE / MFE，方向正确性与盈亏质量分离）+ V2.3（Confidence 成功概率评分）+ V2.2（Historical Bias Scanner）+ V2.1（Bias Explanation Chain）+ V2.0（HTF Bias Audit & Confidence）+ V1.9（Location Context）+ V1.8（Impulse Range）+ V1.6（PD Array Audit）+ V1.5（Liquidity Audit）+ V1.4.1（Protected Validation）",
+  "howToReplay": "node scripts/replayCase.js <SYMBOL> <ISO_TIME> --save",
+  "cases": [
+    {
+      "id": "BTC_Bull_01",
+      "symbol": "BTCUSDT",
+      "replayTime": "2025-07-14T00:00:00Z",
+      "marketState": "上涨趋势中段高位（7 月 105k→123k，8 月初 124k 见顶）",
+      "report": "cases/BTCUSDT_2025-07-14.txt",
+      "engineOutput": { "structure": "RANGE", "rangeType": "RECENT", "location": "PREMIUM", "bias": "NEUTRAL", "execution": "NONE", "scenario": "RANGE", "confidence": "LOW" },
+      "verified": false,
+      "notes": "4H 结构当天为 RANGE（回退近端区间）。NEUTRAL 合理。HTF BULLISH，但 4H 无方向 → RANGE。Confidence LOW（硬门槛未过）。"
+    },
+    {
+      "id": "BTC_Bull_02",
+      "symbol": "BTCUSDT",
+      "replayTime": "2025-10-06T00:00:00Z",
+      "marketState": "强多趋势（9 月底→10 月 6 日拉升至 125k，接近 ATH 126k）",
+      "report": "cases/BTCUSDT_2025-10-06.txt",
+      "engineOutput": { "structure": "EXTERNAL_BULLISH", "rangeType": "IMPULSE_BULLISH", "location": "DISCOUNT", "bias": "BULLISH", "draw": "PWH 125708", "execution": "WAIT", "scenario": "BULLISH_CONTINUATION", "confidence": "HIGH" },
+      "verified": false,
+      "notes": "V1.9 已解决：Impulse Range 121510-125708 收窄后价格落 DISCOUNT，但距高点仅 53%（<60%）→ Context LATE_IMPULSE → WAIT（不追高）。PWH 125708 目标距离 2226 点（1.8%），R:R 差。V2.0：4H BULLISH 与 HTF BULLISH 同向 → TREND_CONTINUATION；LATE_IMPULSE 使 location 不 valid → Confidence MEDIUM（2/3）。"
+    },
+    {
+      "id": "BTC_Bear_01",
+      "symbol": "BTCUSDT",
+      "replayTime": "2026-06-05T00:00:00Z",
+      "marketState": "大熊趋势中段（6 月崩盘至 58k，6-05 价 ~60k）",
+      "report": "cases/BTCUSDT_2026-06-05.txt",
+      "engineOutput": { "structure": "EXTERNAL_BEARISH", "rangeType": "IMPULSE_BEARISH", "location": "DISCOUNT", "bias": "BEARISH", "draw": "PDL 61383", "execution": "WAIT", "scenario": "BEARISH_CONTINUATION", "confidence": "HIGH" },
+      "verified": false,
+      "notes": "大熊：Bias BEARISH（不再 NEUTRAL），价格在 Discount → WAIT（等溢价回撤进空）。符合 ICT。V2.0：4H 与 HTF 同向 BEARISH → TREND_CONTINUATION；LATE_IMPULSE → MEDIUM。"
+    },
+    {
+      "id": "BTC_Bear_02",
+      "symbol": "BTCUSDT",
+      "replayTime": "2025-11-17T00:00:00Z",
+      "marketState": "大熊趋势中段（11 月崩盘，价 ~94k）",
+      "report": "cases/BTCUSDT_2025-11-17.txt",
+      "engineOutput": { "structure": "INTERNAL_BEARISH", "rangeType": "IMPULSE_BEARISH", "location": "DISCOUNT", "bias": "BEARISH", "draw": "EXTERNAL_LOW 94012", "execution": "WAIT", "scenario": "BEARISH_CONTINUATION", "confidence": "HIGH" },
+      "verified": false,
+      "notes": "与 BTC_Bear_01 相同结论。V2.0：TREND_CONTINUATION（4H=HTF=BEARISH）。"
+    },
+    {
+      "id": "BTC_Range_01",
+      "symbol": "BTCUSDT",
+      "replayTime": "2026-04-26T00:00:00Z",
+      "marketState": "横盘区间（3-5 月 65k-79k 大区间，4-26 价 ~78k 区间顶部）",
+      "report": "cases/BTCUSDT_2026-04-26.txt",
+      "engineOutput": { "structure": "RANGE", "rangeType": "RECENT", "location": "PREMIUM", "bias": "NEUTRAL", "execution": "NONE", "scenario": "RANGE", "confidence": "LOW" },
+      "verified": false,
+      "notes": "横盘 NEUTRAL 合理。HTF BULLISH 但 4H 无方向 → RANGE。"
+    },
+    {
+      "id": "BTC_Reversal_01",
+      "symbol": "BTCUSDT",
+      "replayTime": "2025-10-12T00:00:00Z",
+      "marketState": "顶部反转（10 月初 ATH 126k 后转空，价 ~113k）",
+      "report": "cases/BTCUSDT_2025-10-12.txt",
+      "engineOutput": { "structure": "EXTERNAL_BEARISH", "rangeType": "IMPULSE_BEARISH", "location": "DISCOUNT", "bias": "BEARISH", "draw": "PDL 109561", "execution": "WAIT", "scenario": "BEARISH_REVERSAL_ATTEMPT", "confidence": "MEDIUM" },
+      "verified": false,
+      "notes": "V1.9：空头在 Discount → LATE_IMPULSE → WAIT（等溢价回撤进空）。用户已确认接受此行为。V2.0：4H BEARISH 但 HTF（月线兜底）BULLISH → REVERSAL_ATTEMPT（顶部反转语义正确）。"
+    },
+    {
+      "id": "ETH_Bull_01",
+      "symbol": "ETHUSDT",
+      "replayTime": "2025-08-13T00:00:00Z",
+      "marketState": "大牛趋势中段（8 月 3354→4957，8-13 价 ~4664）",
+      "report": "cases/ETHUSDT_2025-08-13.txt",
+      "engineOutput": { "structure": "EXTERNAL_BULLISH", "rangeType": "IMPULSE_BULLISH", "location": "PREMIUM", "bias": "BULLISH", "draw": "PDH 4639.7", "execution": "WAIT", "scenario": "BULLISH_CONTINUATION", "confidence": "HIGH" },
+      "verified": false,
+      "notes": "牛市高位：Bias BULLISH + WAIT。V2.0 BOS 修正关键案例：1D 严格 swing 判 LL+LH=BEARISH（V 型反转滞后），但价格已突破最后高点 3737 → HTF 修正为 BULLISH → TREND_CONTINUATION（大牛中段语义正确）。"
+    },
+    {
+      "id": "ETH_Bear_01",
+      "symbol": "ETHUSDT",
+      "replayTime": "2026-02-05T00:00:00Z",
+      "marketState": "大熊趋势中段（2 月崩盘至 1748，2-05 价 ~1961）",
+      "report": "cases/ETHUSDT_2026-02-05.txt",
+      "engineOutput": { "structure": "INTERNAL_BEARISH", "rangeType": "IMPULSE_BEARISH", "location": "DISCOUNT", "bias": "BEARISH", "draw": "EXTERNAL_LOW 2110", "execution": "WAIT", "scenario": "BEARISH_CONTINUATION", "confidence": "HIGH" },
+      "verified": false,
+      "notes": "V2.0：4H=HTF=BEARISH → TREND_CONTINUATION。"
+    },
+    {
+      "id": "ETH_Bear_02",
+      "symbol": "ETHUSDT",
+      "replayTime": "2026-06-05T00:00:00Z",
+      "marketState": "大熊趋势中段（6 月崩盘至 1506，6-05 价 ~1570）",
+      "report": "cases/ETHUSDT_2026-06-05.txt",
+      "engineOutput": { "structure": "EXTERNAL_BEARISH", "rangeType": "IMPULSE_BEARISH", "location": "DISCOUNT", "bias": "BEARISH", "draw": "PDL 1717", "execution": "WAIT", "scenario": "BEARISH_CONTINUATION", "confidence": "HIGH" },
+      "verified": false,
+      "notes": "V2.0：4H=HTF=BEARISH → TREND_CONTINUATION。"
+    },
+    {
+      "id": "ETH_Bull_02",
+      "symbol": "ETHUSDT",
+      "replayTime": "2026-06-10T00:00:00Z",
+      "marketState": "大熊后 4H 反弹转多（6-10 价 ~1570，结构内部转多）",
+      "report": "cases/ETHUSDT_2026-06-10.txt",
+      "engineOutput": { "structure": "INTERNAL_BULLISH", "rangeType": "IMPULSE_BULLISH", "location": "DISCOUNT", "bias": "BULLISH", "draw": "EXTERNAL_HIGH 1893", "execution": "READY", "scenario": "BULLISH_REVERSAL_ATTEMPT", "confidence": "LOW" },
+      "verified": false,
+      "notes": "底部反弹最典型案例：Bullish + Discount + BSL → BULLISH + READY（可找多）。V2.0：大熊市中的 4H 反弹，HTF BEARISH → REVERSAL_ATTEMPT（语义正确）；DISCOUNT_VALID + Liquidity + PD Array 全中 → Confidence HIGH（3/3）。"
+    }
+  ],
+  "findings": [
+    "F1【V1.3 已解决】Bias 只看 Structure，Location 只影响 Execution（READY/WAIT）。大牛/大熊趋势中段不再输出 NEUTRAL。",
+    "F2【已修复】replay 分页方向 bug（只能取 1000 根）→ endTime 向前翻页。",
+    "F3【已修复】EQH/EQL 历史污染（EQL 116128 假等低点）→ 150 根 4H 回看窗口。",
+    "F4【已升级 V1.8】dealingRange → Impulse Range：Bullish=最近 HH+其前最近 LOW（IMPULSE_BULLISH），Bearish=最近 LL+其前最近 HIGH（IMPULSE_BEARISH），NEUTRAL/无效推动回退 RECENT。",
+    "F5【V1.8 已解决】原极值法（EXTERNAL_RANGE 用段内极值）在长历史中会包进几个月前的高低点（ETH 1385-4956）→ 现在取最近推动波段（ETH 2026-06-10：1604-1721.93）。",
+    "F13【V1.8 结果】10 例重放全部 rangeType 转为 IMPULSE_*，Risk 1（Range 跨度 >100%）REVIEW 清零。重点案例：BTC 2026-06-05 60000-126199 → 61383.56-74275.66（仍 DISCOUNT/WAIT ✓）；ETH 2026-06-10 1385-4956 → 1604-1721.93（DISCOUNT/READY ✓）。行为变化 2 例需人工确认：① BTC 2025-10-06（牛市顶部）PREMIUM/WAIT → DISCOUNT/READY；② BTC 2025-10-12（顶部反转）PREMIUM/READY → DISCOUNT/WAIT。",
+    "F14【V1.9 结果】Location Context 上线：BULLISH 距目标 <60% 区间 → LATE_IMPULSE（WAIT），否则 DISCOUNT_VALID（READY）；BEARISH 对称（PREMIUM_VALID）。阈值 25% 会漏掉 BTC 2025-10-06（距高点 53%）→ 人工裁定采用 60%。10 例结果：BTC 2025-10-06 → LATE_IMPULSE/WAIT ✓（用户问题 1 解决）；BTC 2025-10-12 → LATE_IMPULSE/WAIT ✓（用户确认可接受）；ETH 2026-06-10 → DISCOUNT_VALID/READY ✓；BTC 2025-11-17 → LATE_IMPULSE/WAIT ✓。其余 6 例 execution 不变。",
+    "F15【V2.0 结果】HTF Bias Audit & Confidence 上线：① Scenario State（TREND_CONTINUATION/REVERSAL_ATTEMPT/RANGE/TRANSITION，4H 与 HTF 方向对照，HTF=1D→1W→1M 逐级兜底）；② Bias Confidence（硬门槛 structure 确认+保护位 VALID，3 项加分 Liquidity/Location/PD Array → 3 分 HIGH/2 分 MEDIUM/≤1 分 LOW）。③ HTF 方向 BOS 实时修正：严格 swing 在 V 型反转处滞后（ETH 2025-08-13 1D 判 LL+LH=BEARISH，但价格已突破最后高点 3737）→ 价格突破最后 swing 高/低点即修正方向。10 例验证：ETH 08-13 由 BEARISH 修正为 BULLISH → TREND_CONTINUATION（其余 9 例不变）；BTC 2025-10-12 顶部反转 → BEARISH_REVERSAL_ATTEMPT（4H BEARISH vs HTF BULLISH，语义正确）；ETH 2026-06-10 熊市反弹 → BULLISH_REVERSAL_ATTEMPT + Confidence HIGH（3/3）；其余趋势中段案例 → *_CONTINUATION + MEDIUM（LATE_IMPULSE 使 location 不 valid）。4H Daily Bias 层完成，可作独立 HTF 分析器使用（不进入 V2 Entry）。",
+    "F16【V2.1 结果】Bias Explanation Chain 上线：新增 engine/explanation.js，把已算出的组件翻译成 5 段人类可读解释链（Structure/Liquidity/Location/PD Array/Invalidation），替代报告旧 Reason 区块，只翻译不重算、不改判定。示例（ETH 2025-08-13）：Structure 'HH + HL confirmed — EXTERNAL_BULLISH'；Liquidity 'Buy-side above: PDH 4639.7 (Previous Day High)'；Location 'Price in PREMIUM — LATE_IMPULSE / near range target — avoid chasing (WAIT)'；PD Array 'Bullish FVG 4053.01-4166.22 — DISCOUNT, VALID'；Invalidation 'Protected Low 4166.77 — break = bias invalidated'。10 例快照已重跑，Scenario/Confidence 不变。下一步建议 V2.2 Historical Bias Scanner（过去一年每日 Bias 状态扫描验证质量）。",
+    "F17【V2.2 结果】Historical Bias Scanner 上线（scanner/evaluator.js + historicalScanner.js + statistics.js + scripts/scanBias.js，4h=5000 根缓存）。对 BTC/ETH 2025 全年各 360 个样本（step 6 根 4H ≈ 每日 1 样本）做三问验证，判定口径：WIN=未来 30 根 4H 内先触及 Draw 或 ±5%，LOSS=先触及保护位，NEUTRAL 不计入 accuracy。① Bias Accuracy：BTC BULLISH 65.6%（63W/33L）vs BEARISH 55.7%；ETH BULLISH 65.2% vs BEARISH 56.7% —— 方向本身有统计优势，且 BULLISH 明显优于 BEARISH。② Scenario 有意义：BTC BULLISH CONTINUATION 71.7% > REVERSAL_ATTEMPT 64.5%、BEARISH 68% > 58.8%；ETH BEARISH 62.3% > 56.5%（但 ETH BULLISH REVERSAL_ATTEMPT 77.8% > CONTINUATION 69.4%，牛市里反转尝试反而胜率高，需注意）。③【核心发现】Confidence 有效性 FAIL：BTC BULLISH HIGH 38.9% / MEDIUM 76.1% / LOW 28.6%，BEARISH HIGH 42.9% / MEDIUM 70.8% / LOW 11.1%；ETH BULLISH HIGH 43.5% / MEDIUM 81.3%，BEARISH HIGH 25% / MEDIUM 71.2% —— HIGH 成功率反而低于 MEDIUM（LOW 依然最低），当前规则评分（3 项加分越多分越高）与实际胜率负相关，HIGH 分往往来自 LATE_IMPULSE 追高场景。需 V2.3 Bias Optimization 重调 Confidence 规则（如 HIGH 应叠加 HTF 同向、DISCOUNT_VALID 而非 LATE_IMPULSE）。④ Execution：WAIT 72.7%（BTC）/76.3%（ETH）明显优于 READY 34%/40.6% —— '不追高'逻辑得到验证。⑤ 多窗口 7/14/30 根差异不大（60-66%）。样本库：scanner/reports/{BTC,ETH}USDT_samples.json + stats.txt。下一步建议 V2.3：按统计结果重调 Confidence（重点解决 HIGH<MEDIUM 反转）。",
+    "F18【V2.3 结果】Bias Confidence 重构为成功概率评分（engine/confidence.js）。V2.3.1 假设版（Liquidity/Location/PD Array 各加分、LATE_IMPULSE 罚分 MAX MEDIUM）经 V2.3.3 单变量分析（BTC+ETH 2025 双标的、控制目标距离分桶）被推翻：LATE_IMPULSE 胜率 72.7%/76.3% 远高于 DISCOUNT_VALID 30.4%/28.6% 与 PREMIUM_VALID 22.2%/20.7%（趋势惯性最强而非晚期追高）；PD array aligned 66.3-68% vs 未对齐近 0%（最强正因子）；CONTINUATION 66.1-70% > REVERSAL 48.2-55.4%。终版权重：Base（CONT +25 / REV +5 / TRANS +10）+ HTF Alignment（+15/-10）+ PD aligned +25 + Liquidity +10 + 位置因子（LATE_IMPULSE +15 / VALID 回撤位 -10）+ 近目标 <2% +5，输出 score(0-100)+level+factors，HIGH≥75 / MEDIUM≥40。双标的扫描验证目标达成：BTC BULLISH HIGH 81.3%/MEDIUM 56.8%/LOW 27.3%、BEARISH 76.2%/54.5%/18.2%；ETH BULLISH 78.7%/71.1%/20%、BEARISH 72.1%/57.1%/21.1% —— HIGH>60% 且 HIGH>MEDIUM>LOW 全部单调成立（旧版 HIGH<MEDIUM 反转问题解决）。10 例重放：REVERSAL_ATTEMPT 不默认 HIGH（BTC 2025-10-12 → MEDIUM 50、ETH 2026-06-10 → LOW 20）✓；趋势中段 CONTINUATION + LATE_IMPULSE → HIGH 90-95 ✓；NEUTRAL → LOW 0 ✓。注：LATE_IMPULSE 高分衡量的是 Bias 方向惯性（未来 N 根触及目标），与 V1.9 执行层不追高（WAIT）是两个维度，不冲突。下一步建议 V2.4：更多标的/多窗口交叉验证，或人工审计最终确认权重。",
+    "F19【V2.4 结果】Bias Quality 上线（方向正确性 ≠ 盈亏质量）。evaluator.js 增加 planR（理论盈亏比=|Draw−Entry|/Risk）、每窗口 outcome-R（WIN→实际幅度/风险，LOSS→−1，NEUTRAL→收盘相对风险）、MAE/MFE（窗口内最大逆行/顺行 %）；新增 scanner/quality.js 按 Confidence 分组输出质量表（stats.txt 追加 Quality 区块）。BTC/ETH 2025 双标的扫描（窗口 30 根 4H）核心发现：①HIGH 方向最准（BTC acc 78.9% / ETH 75.6%）但 planR 最低（0.34/0.35）——LATE_IMPULSE 目标近、理论空间小；②LOW 方向最差（21.2%/20.5%）但 planR 最高（1.50/1.54）——远离目标空间大但方向常错；③MEDIUM 折中（acc 55.7%/64.4%，planR 0.85/0.78）；④所有组 medMAE ≥ medMFE（BTC ~3.1% vs ~3.0%，ETH 4.4-6.6% vs 4.4-5.1%），路径质量无顺行优势，且 HIGH 组 ETH medMAE 6.6% 远大于 MFE 4.6%。结论：Bias Confidence 高只预示方向准（未来 N 根触及目标），不预示按当前价入场值得交易（planR 普遍 <1）；'值得交易'需结合 Execution Quality（回撤入场放大 R），属后续 V3 Entry Engine 范畴。这与 V2.3 定版一致：Confidence 只代表方向可信度，两维度正式分离。下一步建议 V3 Entry Engine（或先扩样本验证 MEDIUM 组的 R 优势）。",
+    "F20【V2.5 结果】Bias Decision Layer 上线（engine/decision.js，4H 层最终决策）。V2.4 最大发现是 HIGH 不是交易信号（方向准 78.9% 但 planR 0.34）——用户需要最终决策层回答'那到底怎么看？'。实现：Opportunity = Confidence score × Space（planR/2 归一化到 0-1），Tradeability = HIGH(≥60)/MEDIUM(≥35)/LOW，决策优先级：方向不可信（LOW confidence）> 空间不足（planR<0.5 → NO_TRADE）> 等回撤（planR<1 → WAIT_FOR_RETRACEMENT）> 值得找入场（WATCH_FOR_ENTRY）。NEUTRAL → WAIT。修复：engine 传入的 invalidation 是对象 {type, price}，buildDecision 原按数字处理导致 planR NaN → 统一提取 price。验证：BTC 2025-10-06（HIGH 90 + planR 1.13）→ Opportunity 54 / Tradeability MEDIUM / WATCH_FOR_ENTRY ✓（方向强且空间够，等回撤改善 R 后找入场，V1.9 WAIT 与 V2.5 决策一致）；ETH 2026-06-10（LOW 20 + planR 7.14）→ NO_TRADE（方向不可信优先于大空间，避免优化垃圾机会）✓。4H 层完整链形成：Structure → Bias → Scenario → Confidence → Quality → Decision。不改动已有 Bias / Confidence / Quality，兼容数字与对象两种 invalidation。下一步 V3 Entry Engine：先知道什么 Bias 值得找入场，再优化入场。",
+    "F7【V1.3 结果】10 例重放：4 例 BULLISH（其中 2 例 READY）、4 例 BEARISH（其中 1 例 READY：顶部反转）、2 例 NEUTRAL（横盘）。V1.3 核心验证通过：熊市不再 Neutral、牛市顶部不追高（WAIT）、Location 只影响执行。",
+    "F8【下一步】PD Array（OB/FVG）参与 bias 前的准备：目前只展示。可在 V2 让 FVG/OB 用于确认推动段或作为回撤参考。",
+    "F9【V1.4 结果】Invalidation 升级为结构保护位：BULLISH=最后一个 HH 之前的 LOW（source=HL_BEFORE_DISPLACEMENT / EXTERNAL_STRUCTURE_LOW），BEARISH=最后一个 LL 之前的 HIGH（对称）。示例：BTC 2025-10-06 保护低点 121510（价 125k）；BTC 2025-11-17 保护高点 104085（价 94k）；ETH 2026-06-10 保护低点 1604（回放价 1639.52）。",
+    "F10【V1.4.1 已解决并更正】原记录疑 ETH 2026-06-10 价 1570 已破保护位 1604 —— 经核实回放价实为 1639.52 > 1604，结构 VALID，bias BULLISH+READY 正确。V1.4.1 新增 validateProtectedStructure：price 穿透保护位（BULLISH price<=protectedLow / BEARISH price>=protectedHigh）→ structureStatus=INVALIDATED，effectiveBias=NEUTRAL，execution=NONE，原始 bias 保留供审计。当前 10 例回放时点结构均 VALID；INVALIDATED 路径由单测覆盖。",
+    "F11【V1.5 结果】Liquidity Audit 完成：rankLiquidityTargets 按 ICT 优先级（Bullish: External High>PWH>PDH>EQH>Internal High；Bearish 对称）输出 primary（type/price/priority/reason）+ alternatives（按距离近→远）。目标过滤：只保留在 bias 方向一侧的目标。10 例主目标：BTC 2025-11-17 EXTERNAL_LOW 94012（外部低点优先）、BTC 2025-10-06 PWH 125708（外部高点已突破被过滤）、ETH 2026-06-10 EXTERNAL_HIGH 1893（最近外部高点）、顶部反转 BTC 2025-10-12 PDL 109561（下方最近目标）。",
+    "F12【V1.6 结果】PD Array Audit 完成：FVG/OB 增加 direction/age/location/status(OPEN-FILLED)；rankPDArray 按执行区域排名（同向+顺位→VALID Primary，同向+逆位→COUNTER_LOCATION，反向→Ignore），不参与 bias。10 例验证：ETH 2026-06-10 → Primary Bullish FVG 1570-1585（DISCOUNT，VALID，score 90）✓；BTC 2025-10-06 牛市顶部所有 bullish FVG 均在 PREMIUM → Primary 空（符合顶部不提供折扣执行区）；NEUTRAL 案例全部 Ignore。下一步：V2 Entry Model（5m/Sweep/MSS/Displacement/FVG Entry/Risk）或先对 10 例做一轮人工审计。"
+  ]
+}

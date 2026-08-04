@@ -1,0 +1,120 @@
+================================
+
+ETHUSDT 4H Daily Bias
+
+Time: 2026-02-05
+
+Structure:
+INTERNAL_BEARISH
+
+Sequence:
+HH → LL → LH → LL → LH
+
+Direction:
+Bearish
+
+Liquidity Target:
+
+Primary Buy Draw:
+PWH 3045.78
+
+Buy Side:
+EQH 3368.82
+PWH 3045.78
+PDH 2295.74
+
+Sell Side:
+PDL 2076.68
+PWL 2222
+EQL 3278
+
+Primary Sell Draw:
+PWL 2222
+
+Range Type:
+IMPULSE_BEARISH
+
+Range:
+2110 - 2396.62
+Equilibrium:
+2253.31
+Location:
+Discount
+
+Context:
+LATE_IMPULSE
+
+PD Array:
+
+Primary:
+Bearish FVG 2644.43-2668.2
+Location:
+PREMIUM
+Status:
+VALID
+
+Alternative:
+Bearish FVG 2551.26-2609.85
+Bearish OB 2827.59
+Bearish FVG 2473.77-2510.01
+Bearish OB 2438.98
+Bearish OB 2377.99
+Bearish OB 2317.65
+Bearish OB 2293.99
+Bearish FVG 2194.71-2221.47
+
+Market Bias:
+🔴 BEARISH
+
+Structure Status:
+✅ VALID
+
+Effective Bias:
+🔴 BEARISH
+
+Draw Target:
+EXTERNAL_LOW 2110
+
+Alternative:
+PDL 2076.68
+
+Reason:
+External swing low (HTF objective)
+
+Execution:
+WAIT
+
+
+Invalidation:
+
+Break Protected High 2396.62 [STRUCTURE_PROTECTED_HIGH · LH_BEFORE_DISPLACEMENT]
+
+Bias Explanation:
+
+1. Structure:
+   LH + LL confirmed — INTERNAL_BEARISH
+
+2. Liquidity:
+   Sell-side below: EXTERNAL_LOW 2110 (External swing low (HTF objective))
+   Alternatives: PDL 2076.68
+
+3. Location:
+   Price in DISCOUNT — LATE_IMPULSE
+   near range target — avoid chasing (WAIT)
+
+4. PD Array:
+   Bearish FVG 2644.43-2668.2 — PREMIUM, VALID
+
+5. Invalidation:
+   Protected High 2396.62 — break = bias invalidated [LH_BEFORE_DISPLACEMENT]
+
+Scenario:
+
+BEARISH_CONTINUATION
+
+Confidence:
+
+MEDIUM
+
+
+================================

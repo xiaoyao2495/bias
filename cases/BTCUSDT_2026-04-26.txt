@@ -1,0 +1,98 @@
+================================
+
+BTCUSDT 4H Daily Bias
+
+Time: 2026-04-26
+
+Structure:
+RANGE
+
+Sequence:
+HH → HL → LH → HL → LH
+
+Direction:
+Neutral
+
+Liquidity Target:
+
+Primary Buy Draw:
+PWH 78333
+
+Buy Side:
+PWH 78333
+PDH 77885.35
+EQH 67562.93
+
+Sell Side:
+EQL 70466
+PWL 70566.99
+PDL 77140.23
+
+Primary Sell Draw:
+PWL 70566.99
+
+Range Type:
+RECENT
+
+Range:
+77264.08 - 77885.35
+Equilibrium:
+77574.71
+Location:
+Premium
+
+Context:
+UNKNOWN
+
+PD Array:
+
+Primary:
+-
+
+Market Bias:
+⚪ NEUTRAL
+
+Structure Status:
+✅ VALID
+
+Effective Bias:
+⚪ NEUTRAL
+
+Draw Target:
+-
+
+Execution:
+NONE
+
+
+Invalidation:
+
+-
+
+Bias Explanation:
+
+1. Structure:
+   Structure not confirmed (HH/HL or LH/LL missing)
+
+2. Liquidity:
+   -
+
+3. Location:
+   Price in PREMIUM
+
+4. PD Array:
+   No direction — no execution zone
+
+5. Invalidation:
+   -
+
+Scenario:
+
+RANGE
+
+Confidence:
+
+LOW
+
+
+================================

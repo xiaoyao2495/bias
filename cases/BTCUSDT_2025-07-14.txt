@@ -1,0 +1,98 @@
+================================
+
+BTCUSDT 4H Daily Bias
+
+Time: 2025-07-14
+
+Structure:
+RANGE
+
+Sequence:
+HL → HH → HL → LH → HL
+
+Direction:
+Neutral
+
+Liquidity Target:
+
+Primary Buy Draw:
+PWH 119488
+
+Buy Side:
+PDH 119488
+PWH 119488
+EQH 108528.5
+
+Sell Side:
+EQL 107245
+PWL 107429.57
+PDL 117224.79
+
+Primary Sell Draw:
+PWL 107429.57
+
+Range Type:
+RECENT
+
+Range:
+116900.05 - 118200
+Equilibrium:
+117550.02
+Location:
+Premium
+
+Context:
+UNKNOWN
+
+PD Array:
+
+Primary:
+-
+
+Market Bias:
+⚪ NEUTRAL
+
+Structure Status:
+✅ VALID
+
+Effective Bias:
+⚪ NEUTRAL
+
+Draw Target:
+-
+
+Execution:
+NONE
+
+
+Invalidation:
+
+-
+
+Bias Explanation:
+
+1. Structure:
+   Structure not confirmed (HH/HL or LH/LL missing)
+
+2. Liquidity:
+   -
+
+3. Location:
+   Price in PREMIUM
+
+4. PD Array:
+   No direction — no execution zone
+
+5. Invalidation:
+   -
+
+Scenario:
+
+RANGE
+
+Confidence:
+
+LOW
+
+
+================================

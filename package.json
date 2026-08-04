@@ -1,0 +1,16 @@
+{
+  "name": "daily-bias-engine",
+  "version": "1.0.0",
+  "description": "ICT 2022 4H Daily Bias Engine V1 - 只回答：现在市场更适合找多头还是空头机会",
+  "type": "module",
+  "scripts": {
+    "analyze": "node scripts/analyze.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.13.0"
+  },
+  "dependencies": {
+    "undici": "^8.10.0"
+  }
+}

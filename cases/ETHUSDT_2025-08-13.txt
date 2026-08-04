@@ -1,0 +1,121 @@
+================================
+
+ETHUSDT 4H Daily Bias
+
+Time: 2025-08-13
+
+Structure:
+EXTERNAL_BULLISH
+
+Sequence:
+HH → HL → HH → HL → HH
+
+Direction:
+Bullish
+
+Liquidity Target:
+
+Primary Buy Draw:
+PWH 4332.6
+
+Buy Side:
+PDH 4639.7
+PWH 4332.6
+EQH 3771
+
+Sell Side:
+PWL 3490.73
+EQL 3677.65
+PDL 4219.04
+
+Primary Sell Draw:
+PWL 3490.73
+
+Range Type:
+IMPULSE_BULLISH
+
+Range:
+4166.77 - 4366.46
+Equilibrium:
+4266.61
+Location:
+Premium
+
+Context:
+LATE_IMPULSE
+
+PD Array:
+
+Primary:
+Bullish FVG 4053.01-4166.22
+Location:
+DISCOUNT
+Status:
+VALID
+
+Alternative:
+Bullish FVG 4226.23-4242.87
+Bullish FVG 4254.54-4266.66
+Bullish FVG 4259.38-4267.41
+Bullish OB 3564.19
+Bullish OB 3607.54
+Bullish OB 4170.02
+Bullish OB 4190
+Bullish FVG 4332.32-4440.38
+Bullish FVG 4480.66-4504.54
+Bullish OB 4256.92
+
+Market Bias:
+🟢 BULLISH
+
+Structure Status:
+✅ VALID
+
+Effective Bias:
+🟢 BULLISH
+
+Draw Target:
+PDH 4639.7
+
+Alternative:
+-
+
+Reason:
+Previous Day High
+
+Execution:
+WAIT
+
+
+Invalidation:
+
+Break Protected Low 4166.77 [STRUCTURE_PROTECTED_LOW · HL_BEFORE_DISPLACEMENT]
+
+Bias Explanation:
+
+1. Structure:
+   HH + HL confirmed — EXTERNAL_BULLISH
+
+2. Liquidity:
+   Buy-side above: PDH 4639.7 (Previous Day High)
+
+3. Location:
+   Price in PREMIUM — LATE_IMPULSE
+   near range target — avoid chasing (WAIT)
+
+4. PD Array:
+   Bullish FVG 4053.01-4166.22 — DISCOUNT, VALID
+
+5. Invalidation:
+   Protected Low 4166.77 — break = bias invalidated [HL_BEFORE_DISPLACEMENT]
+
+Scenario:
+
+BULLISH_CONTINUATION
+
+Confidence:
+
+MEDIUM
+
+
+================================

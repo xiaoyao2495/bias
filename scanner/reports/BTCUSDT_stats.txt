@@ -1,0 +1,53 @@
+BTCUSDT 4H Bias Historical Result
+====================================================
+
+扫描: 2025-01-01 ~ 2025-12-31（step 6 根 4H ≈ 每日 1 样本）
+样本: 360（BULLISH 108 / BEARISH 105 / NEUTRAL 147）
+判定: WIN=触及 Draw 或 ±5%，LOSS=触及保护位；NEUTRAL 不计入 accuracy
+
+--- 1. Bias Accuracy（窗口 30 根 4H ≈ 5 天）---
+BULLISH                    n= 108  WIN   63  LOSS   33  acc  65.6%
+BEARISH                    n= 105  WIN   54  LOSS   43  acc  55.7%
+
+--- 2. Confidence 有效性（HIGH > MEDIUM > LOW ?）---
+BULLISH HIGH               n=  55  WIN   39  LOSS    9  acc  81.3%
+BULLISH MEDIUM             n=  42  WIN   21  LOSS   16  acc  56.8%
+BULLISH LOW                n=  11  WIN    3  LOSS    8  acc  27.3%
+BEARISH HIGH               n=  48  WIN   32  LOSS   10  acc  76.2%
+BEARISH MEDIUM             n=  35  WIN   18  LOSS   15  acc  54.5%
+BEARISH LOW                n=  22  WIN    4  LOSS   18  acc  18.2%
+
+--- 3. Scenario 对比（CONTINUATION vs REVERSAL_ATTEMPT）---
+BULLISH CONTINUATION       n=  67  WIN   43  LOSS   17  acc  71.7%
+BULLISH REVERSAL_ATTEMPT   n=  36  WIN   20  LOSS   11  acc  64.5%
+BEARISH CONTINUATION       n=  56  WIN   34  LOSS   16  acc    68%
+BEARISH REVERSAL_ATTEMPT   n=  36  WIN   20  LOSS   14  acc  58.8%
+
+--- 4. Execution 对比（READY vs WAIT）---
+READY                      n=  32  WIN   13  LOSS   19  acc  40.6%
+WAIT                       n= 163  WIN  104  LOSS   39  acc  72.7%
+
+--- 5. 多窗口对比（全部有向样本）---
+未来 7 根 4H                  n= 213  WIN   88  LOSS   51  acc  63.3%
+未来 14 根 4H                 n= 213  WIN  105  LOSS   62  acc  62.9%
+未来 30 根 4H                 n= 213  WIN  117  LOSS   76  acc  60.6%
+
+====================================================
+----------------------------------------------------
+Quality by Confidence（窗口 30 根 4H ≈ 5 天）
+口径: Direction Accuracy = WIN/(WIN+LOSS)；R = 盈亏/风险（LOSS=−1）；MAE/MFE = 相对 Entry 的 %
+
+全体
+ALL       n= 213  acc  60.6%  avgR   0.02  medR   0.15  planR    0.5  medMAE   3.1%  medMFE   3.0%
+
+HIGH
+HIGH      n= 103  acc  78.9%  avgR   0.13  medR   0.21  planR   0.34  medMAE   3.1%  medMFE   2.8%
+
+MEDIUM
+MEDIUM    n=  77  acc  55.7%  avgR  -0.08  medR    0.1  planR   0.85  medMAE   2.9%  medMFE   3.4%
+
+LOW
+LOW       n=  33  acc  21.2%  avgR  -0.14  medR     -1  planR    1.5  medMAE   3.2%  medMFE   3.2%
+
+----------------------------------------------------
+

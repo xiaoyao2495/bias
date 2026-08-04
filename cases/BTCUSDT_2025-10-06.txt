@@ -1,0 +1,119 @@
+================================
+
+BTCUSDT 4H Daily Bias
+
+Time: 2025-10-06
+
+Structure:
+EXTERNAL_BULLISH
+
+Sequence:
+HH → HL → HH → HL → HH
+
+Direction:
+Bullish
+
+Liquidity Target:
+
+Primary Buy Draw:
+PWH 125708.42
+
+Buy Side:
+PDH 125708.42
+PWH 125708.42
+EQH 116331.81
+
+Sell Side:
+PWL 111560.65
+EQL 114720.81
+PDL 122136
+
+Primary Sell Draw:
+PWL 111560.65
+
+Range Type:
+IMPULSE_BULLISH
+
+Range:
+121510 - 125708.42
+Equilibrium:
+123609.21
+Location:
+Discount
+
+Context:
+LATE_IMPULSE
+
+PD Array:
+
+Primary:
+Bullish FVG 120515.89-121466.25
+Location:
+DISCOUNT
+Status:
+VALID
+
+Alternative:
+Bullish FVG 121964.95-122136
+Bullish OB 109250
+Bullish OB 122301.63
+Bullish FVG 118926.49-119359.63
+Bullish FVG 119910.79-120072.46
+Bullish FVG 122410-123734
+Bullish OB 119610.59
+
+Market Bias:
+🟢 BULLISH
+
+Structure Status:
+✅ VALID
+
+Effective Bias:
+🟢 BULLISH
+
+Draw Target:
+PWH 125708.42
+
+Alternative:
+PDH 125708.42
+
+Reason:
+Previous Week High (HTF objective)
+
+Execution:
+WAIT
+
+
+Invalidation:
+
+Break Protected Low 121510 [STRUCTURE_PROTECTED_LOW · HL_BEFORE_DISPLACEMENT]
+
+Bias Explanation:
+
+1. Structure:
+   HH + HL confirmed — EXTERNAL_BULLISH
+
+2. Liquidity:
+   Buy-side above: PWH 125708.42 (Previous Week High (HTF objective))
+   Alternatives: PDH 125708.42
+
+3. Location:
+   Price in DISCOUNT — LATE_IMPULSE
+   near range target — avoid chasing (WAIT)
+
+4. PD Array:
+   Bullish FVG 120515.89-121466.25 — DISCOUNT, VALID
+
+5. Invalidation:
+   Protected Low 121510 — break = bias invalidated [HL_BEFORE_DISPLACEMENT]
+
+Scenario:
+
+BULLISH_CONTINUATION
+
+Confidence:
+
+MEDIUM
+
+
+================================

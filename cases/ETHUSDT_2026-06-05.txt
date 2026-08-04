@@ -1,0 +1,117 @@
+================================
+
+ETHUSDT 4H Daily Bias
+
+Time: 2026-06-05
+
+Structure:
+EXTERNAL_BEARISH
+
+Sequence:
+LL → LH → LL → LH → LL
+
+Direction:
+Bearish
+
+Liquidity Target:
+
+Primary Buy Draw:
+PWH 2141.98
+
+Buy Side:
+EQH 2157.5
+PWH 2141.98
+PDH 1820.5
+
+Sell Side:
+PDL 1717.28
+PWL 1967
+EQL 2091.48
+
+Primary Sell Draw:
+PWL 1967
+
+Range Type:
+IMPULSE_BEARISH
+
+Range:
+1717.28 - 1893.07
+Equilibrium:
+1805.17
+Location:
+Discount
+
+Context:
+LATE_IMPULSE
+
+PD Array:
+
+Primary:
+Bearish FVG 1943.87-1966.69
+Location:
+PREMIUM
+Status:
+VALID
+
+Alternative:
+Bearish FVG 2012.42-2015.34
+Bearish FVG 1990.11-1991.31
+Bearish FVG 1874.11-1881.01
+Bearish FVG 1844.08-1869.95
+Bearish OB 2021.5
+Bearish OB 1990.11
+
+Market Bias:
+🔴 BEARISH
+
+Structure Status:
+✅ VALID
+
+Effective Bias:
+🔴 BEARISH
+
+Draw Target:
+PDL 1717.28
+
+Alternative:
+-
+
+Reason:
+Previous Day Low
+
+Execution:
+WAIT
+
+
+Invalidation:
+
+Break Protected High 1893.07 [STRUCTURE_PROTECTED_HIGH · LH_BEFORE_DISPLACEMENT]
+
+Bias Explanation:
+
+1. Structure:
+   LH + LL confirmed — EXTERNAL_BEARISH
+
+2. Liquidity:
+   Sell-side below: PDL 1717.28 (Previous Day Low)
+
+3. Location:
+   Price in DISCOUNT — LATE_IMPULSE
+   near range target — avoid chasing (WAIT)
+
+4. PD Array:
+   Bearish FVG 1943.87-1966.69 — PREMIUM, VALID
+
+5. Invalidation:
+   Protected High 1893.07 — break = bias invalidated [LH_BEFORE_DISPLACEMENT]
+
+Scenario:
+
+BEARISH_CONTINUATION
+
+Confidence:
+
+MEDIUM
+
+
+================================

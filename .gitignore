@@ -1,0 +1,3 @@
+node_modules/
+data/cache/
+monitor/state.json
