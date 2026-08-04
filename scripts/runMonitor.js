@@ -30,7 +30,7 @@ import { loadState, saveState, compareState } from "../monitor/state.js";
 import { sendMarkdown } from "../monitor/dingTalk.js";
 import { appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = join(__dirname, "..", "monitor", "log.txt");
@@ -44,6 +44,9 @@ function log(...args) {
   } catch {}
   console.error(line);
 }
+
+// 模块加载即打点：诊断 pm2 进程是否真正加载/进入了该脚本
+log(`[runMonitor] 模块加载（argv1=${process.argv[1] || "(无)"}，cwd=${process.cwd()}）`);
 
 const TOP_N = 15;
 const ICON = { BULLISH: "🟢", BEARISH: "🔴", NEUTRAL: "⚪" };
@@ -194,8 +197,10 @@ function now() {
   });
 }
 
-// CLI 入口（pathToFileURL 保证 Windows 路径也能匹配）
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// CLI 入口：basename 匹配（Windows 下 pm2 可能传绝对/相对路径、大小写不同，
+// pathToFileURL + import.meta.url 精确相等在 pm2 fork 模式下可能失败 → 进程静默退出）
+if (process.argv[1] && /runMonitor\.js$/i.test(process.argv[1])) {
+  log(`[runMonitor] CLI 入口命中（argv1=${process.argv[1]}）`);
   const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
   const dryRun = process.argv.includes("--dry");
   const once = process.argv.includes("--once");
