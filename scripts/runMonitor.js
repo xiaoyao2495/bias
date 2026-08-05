@@ -152,7 +152,7 @@ function buildOverview(list) {
     lines.push(`Scenario: ${r.cur.scenario} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
     lines.push("");
   }
-  return lines.join("\n");
+  return lines.join("<br/>");
 }
 
 /** 状态变化消息（bias 翻转 → ⚠️，其余 → ℹ️） */
@@ -168,7 +168,7 @@ function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceSco
   lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
   lines.push(`原因: ${reason}`);
   lines.push(`价格: ${price}`);
-  return lines.join(`\n`);
+  return lines.join("<br/>");
 }
 
 /** 北京时间 "2026-08-04 20:00" */
