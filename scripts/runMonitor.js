@@ -63,11 +63,17 @@ const BJ_OFFSET_MS = 8 * 3600_000;
 export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {}) {
   const list = symbols && symbols.length ? symbols : (await getTopVolumeSymbols(topN)).map((t) => t.symbol);
   log(`[runMonitor] 开始，合约数=${list.length}: ${list.join(",")}`);
-  const results = await analyzeSymbols(list, { onProgress: (n, t) => log(`[runMonitor] 分析进度 ${n}/${t}`) });
-  const failed = results.filter((r) => r.error).length;
-  log(`[runMonitor] 分析完成：成功 ${results.length - failed} / ${results.length}`);
   const prevState = loadState();
   const isFirstRun = Object.keys(prevState).length === 0;
+  // 4H 收盘边界轮（到达新边界 或 首轮）→ 强制刷新 4H 缓存：
+  // 收盘报告必须用最新已收盘 K（缓存快照在部分启动相位下会滞后一根，见 M1 相位扫描）；
+  // 顺带让 Bias/结构检测在 4H 收盘后第一轮即生效，而非等 30min TTL 过期。
+  const boundaryMs = latestBjBoundaryMs();
+  const force4h = isFirstRun || boundaryMs > loadCloseReport();
+  if (force4h) log(`[runMonitor] 4H 收盘边界轮 → 强制刷新 4H 数据`);
+  const results = await analyzeSymbols(list, { onProgress: (n, t) => log(`[runMonitor] 分析进度 ${n}/${t}`), force4h });
+  const failed = results.filter((r) => r.error).length;
+  log(`[runMonitor] 分析完成：成功 ${results.length - failed} / ${results.length}`);
   const nextState = {};
   const overview = [];
   const changed = [];
@@ -92,38 +98,58 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
-    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, mss: r.mss, last4h: r.last4h, sweep: r.sweep, displacement: r.displacement, ...cmp, prev, cur };
+    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, mss: r.mss, mss5m: r.mss5m, last4h: r.last4h, sweep: r.sweep, displacement: r.displacement, ...cmp, prev, cur };
     overview.push(item);
     if (cmp.changed) changed.push(item);
   }
 
   if (!dryRun) {
     if (isFirstRun) {
-      await sendMarkdown(buildOverview(overview), "4H Bias Monitor");
-      log(`[runMonitor] 首轮全览已推送（${overview.length} 合约）`);
+      try {
+        await sendMarkdown(buildOverview(overview), "4H Bias Monitor");
+        log(`[runMonitor] 首轮全览已推送（${overview.length} 合约）`);
+      } catch (e) {
+        log(`[runMonitor] 首轮全览推送失败: ${e.message}`);
+      }
     } else {
       for (const item of changed) {
         // 新加入合约（isNew）无 prev→cur 对比上下文，不推送（静默存状态，等下次变化再推）
         if (item.isNew) continue;
-        await sendMarkdown(buildChanged(item), `${item.symbol} Bias`);
-        log(`[runMonitor] 已推送 ${item.symbol}（${item.changes.join(",")}）`);
+        try {
+          await sendMarkdown(buildChanged(item), `${item.symbol} Bias`);
+          log(`[runMonitor] 已推送 ${item.symbol}（${item.changes.join(",")}）`);
+        } catch (e) {
+          // 推送失败不落地新状态 → 下一轮 compareState 仍变化 → 重推（宁可重复不漏报）
+          log(`[runMonitor] ${item.symbol} Bias 推送失败，保留旧状态下轮重试: ${e.message}`);
+          nextState[item.symbol] = prevState[item.symbol];
+        }
       }
       log(`[runMonitor] 本轮完成: ${changed.length} 变化 / ${overview.length} 合约`);
       // P1-A：流动性扫损事件（独立推送；state 无该事件记录 → 新扫损才推）
       for (const item of overview) {
         if (item.sweep && item.prev && item.prev.sweepTime !== item.sweep.key) {
-          await sendMarkdown(buildSweep(item), `${item.symbol} 扫损`);
-          log(`[runMonitor] 已推送 ${item.symbol} 扫损（${item.sweep.side} @ ${item.sweep.level}）`);
+          try {
+            await sendMarkdown(buildSweep(item), `${item.symbol} 扫损`);
+            log(`[runMonitor] 已推送 ${item.symbol} 扫损（${item.sweep.side} @ ${item.sweep.level}）`);
+          } catch (e) {
+            // 保留旧 sweepTime → 下一轮仍视为新扫损 → 重推（不漏报流动性事件）
+            log(`[runMonitor] ${item.symbol} 扫损推送失败，保留旧记录下轮重试: ${e.message}`);
+            nextState[item.symbol].sweepTime = item.prev.sweepTime;
+          }
         }
       }
     }
     // 4H 收盘报告：每根 4H 收线后即使无状态变化也推一次（首轮全览已覆盖，只记录边界不推）
-    const boundaryMs = latestBjBoundaryMs();
+    // boundaryMs 已在轮首计算（同时决定 force4h 刷新）
     if (!isFirstRun && boundaryMs > loadCloseReport()) {
-      await sendMarkdown(buildCloseReport(overview), "4H 收盘报告");
-      log(`[runMonitor] 4H 收盘报告已推送（边界 ${new Date(boundaryMs).toISOString()}）`);
+      try {
+        await sendMarkdown(buildCloseReport(overview), "4H 收盘报告");
+        log(`[runMonitor] 4H 收盘报告已推送（边界 ${new Date(boundaryMs).toISOString()}）`);
+        saveCloseReport(boundaryMs); // 推送成功才记录边界，失败下轮重试
+      } catch (e) {
+        log(`[runMonitor] 4H 收盘报告推送失败: ${e.message}`);
+      }
     }
-    saveCloseReport(boundaryMs);
     saveState(nextState);
     log(`[runMonitor] 状态已保存（${Object.keys(nextState).length} 合约）`);
   }
@@ -205,7 +231,7 @@ function sessionOfBjHour(h) {
  * 4H 收盘报告：每根 4H 收线后的固定状态播报（即使无变化也推）。
  * 每合约一行：收于开盘上方/下方 + 幅度 + 当前 Bias + 信心度（ICT Daily Bias 的 open/close 视角）。
  */
-function buildCloseReport(overview) {
+export function buildCloseReport(overview) {
   const bj = new Date(Date.now() + BJ_OFFSET_MS);
   const bjHour = bj.getUTCHours();
   const boundary = new Date(latestBjBoundaryMs());
@@ -224,7 +250,7 @@ function buildCloseReport(overview) {
 }
 
 /** 扫损事件消息（⚡）：市场刚扫掉某流动性位后收回——带当前市场背景，帮助理解"在什么结构下发生" */
-function buildSweep({ symbol, sweep, price, cur, confidenceScore }) {
+export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }) {
   const sideText = sweep.side === "BSL" ? "上方买方流动性（BSL）" : "下方卖方流动性（SSL）";
   const levelText = sweepTypeLabel(sweep.type);
   const sweptText = sweep.side === "BSL" ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回` : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
@@ -241,9 +267,15 @@ function buildSweep({ symbol, sweep, price, cur, confidenceScore }) {
     "市场背景:",
     `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,
     `Scenario: ${cur.scenario}`,
-    `信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`,
-    `操作: ${cur.decision}`,
   ];
+  // P1-B：5m 结构事件（扫损→收回→MSS 是 ICT 经典链条，标注当前 5m 结构状态）
+  if (mss5m && mss5m.lastEvent) {
+    const ev = mss5m.lastEvent;
+    const status = ev.confirmed ? "已确认" : ev.realtime ? "实时" : "";
+    lines.push(`5m 结构: ${ev.type} ${ev.direction} @ ${ev.level}（${status}）`);
+  }
+  lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
+  lines.push(`操作: ${cur.decision}`);
   return lines.join("<br/>");
 }
 
@@ -264,7 +296,7 @@ function sweepTypeLabel(type) {
 }
 
 /** 首轮全览（紧凑，避免刷屏） */
-function buildOverview(list) {
+export function buildOverview(list) {
   const lines = [`**4H Bias Monitor**  ${nowHHMM()}`, ""];
   for (const r of list) {
     lines.push(`**${r.symbol}** ${ICON[r.cur.bias] || ""} ${r.cur.bias}`);
@@ -279,7 +311,7 @@ function buildOverview(list) {
  * 变化原因分层：Bias 变化 → 市场状态（结构失效/新结构），与 Confidence 原因分离，
  * 避免"结构失效"被误读为"方向概率低"。
  */
-function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mss }) {
+export function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mss }) {
   const biasFlipped = changes.includes("bias");
   const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**  🕐 ${nowHHMM()}` : `**ℹ️ ${symbol} 4H Bias 更新**  🕐 ${nowHHMM()}`;
   const lines = [head, ""];
@@ -288,9 +320,9 @@ function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceSco
     lines.push(`${ICON[prev.bias] || ""} ${prev.bias} → ${ICON[cur.bias] || ""} ${cur.bias}`, "");
     // Change Reason：市场发生了什么（结构失效 = MSS 事件 → 突破保护位）
     if (structureStatus === "INVALIDATED" && mss) {
-      const dirText = mss.direction === "BULLISH" ? "向上突破" : "向下跌破";
-      const levelText = mss.type === "BREAK_PROTECTED_HIGH" ? "保护高位" : "保护低位";
-      lines.push(`**结构事件: MSS**（${dirText}${levelText} ${mss.level}，原 ${mss.structureFrom} 结构失效）`);
+      // schema 与 indicators/mss.js 统一：direction = UP/DOWN（突破方向），type 恒为 "MSS"
+      const dirText = mss.direction === "UP" ? "向上突破" : "向下跌破";
+      lines.push(`**结构事件: MSS**（${dirText} ${mss.level}，原 ${mss.structureFrom} 结构失效）`);
       lines.push(`触发: ${mss.time} · 价格 ${mss.price}`);
     } else if (structureStatus === "INVALIDATED") {
       const broken = invalidation && invalidation.type === "BREAK_PROTECTED_HIGH";

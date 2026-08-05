@@ -99,16 +99,19 @@ export function computeDailyBias({ structure, liquidity, location, price, pdArra
 
   const invalidation = buildInvalidation(bias, structure);
 
-  // V1.4.1 MSS 事件化（P0）：结构失效 = 一次市场结构转变（BOS/MSS），
-  // 包装成结构化事件 { direction, level, price, structureFrom, structureTo }，供通知层直接渲染。
-  // direction = 突破方向（价格已进入的新方向）：突破保护高点 → BULLISH（向上 BOS），跌破保护低点 → BEARISH。
+  // V1.4.1 MSS 事件化（P0）：结构失效 = 一次市场结构转移（MSS）。
+  // 事件 schema 与 indicators/mss.js 统一：{ type, direction, level, price, confirmed }
+  //   type      = "MSS"（保护位穿透 = 结构转移；顺势 BOS 由 mss.js 按最近 swing 判定）
+  //   direction = 突破方向：突破保护高点 → UP；跌破保护低点 → DOWN
   let mss = null;
   if (structureStatus === "INVALIDATED" && status.brokenLevel != null && invalidation) {
     mss = {
-      type: invalidation.type, // BREAK_PROTECTED_LOW / BREAK_PROTECTED_HIGH
-      direction: invalidation.type === "BREAK_PROTECTED_HIGH" ? "BULLISH" : "BEARISH",
+      type: "MSS", // 统一结构事件类型（与 mss.js 一致），不再用 BREAK_PROTECTED_*
+      direction: invalidation.type === "BREAK_PROTECTED_HIGH" ? "UP" : "DOWN", // 突破方向，与 mss.js UP/DOWN 一致
       level: status.brokenLevel,
       price,
+      confirmed: true, // 4H 保护位穿透按传入价格（收盘/实时）判定，视为已确认事件
+      realtime: false,
       structureFrom: bias, // 原结构方向（审计：之前为什么看多/看空）
       structureTo: "NEUTRAL", // 失效后有效方向
     };
@@ -126,7 +129,9 @@ export function computeDailyBias({ structure, liquidity, location, price, pdArra
   const explanation = buildExplanation({ structure, draw, location, pdArray: pdArrayRank, bias, invalidation, structureStatus });
 
   // V2.5：Bias Decision Layer（融合 Confidence × planR，输出 Opportunity / Tradeability / Decision）
-  const decision = buildDecision({ bias, confidence, draw, price, invalidation });
+  // M2 修复：用 effectiveBias 而非 bias——结构失效后 bias 仍是旧方向，若按旧方向算 planR，
+  // 即使 confidence LOW 兜底到 NO_TRADE，语义也不严谨（失效 = 无方向 = WAIT）。
+  const decision = buildDecision({ bias: effectiveBias, confidence, draw, price, invalidation });
 
   return { bias, structureStatus, effectiveBias, draw, executionState, reason, invalidation, mss, pdArray: pdArrayRank, scenario, confidence, explanation, decision };
 }

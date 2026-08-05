@@ -40,6 +40,12 @@ const proxyAgent = PROXY ? new ProxyAgent(PROXY) : null;
 const DEFAULT_TTL_MS = (Number(process.env.BIAS_CACHE_TTL_HOURS) || 4) * 3600_000;
 const INTERVAL_MS = { "5m": 5 * 60_000, "4h": 4 * 3600_000, "1d": 24 * 3600_000, "1w": 7 * 24 * 3600_000 };
 
+/** 各周期缓存 TTL 覆盖（分钟）：
+ *  4H 是监控主周期，TTL 必须小于周期本身——否则 4H 收盘后缓存仍未过期，
+ *  收盘报告滞后一根、结构/MSS 检测最长滞后 4h（M1 修复，见审计）。
+ *  30min 折中（监控 10 分钟一轮 × 3），既及时看到新收盘 K，又避免每轮拉取。 */
+const TTL_OVERRIDE_MIN = { "4h": 30 };
+
 function mapKline(k) {
   return {
     time: k[0], // openTime
@@ -70,14 +76,16 @@ function writeCache(file, data) {
 }
 
 function ttlMs(interval) {
-  return Math.min(DEFAULT_TTL_MS, INTERVAL_MS[interval] || DEFAULT_TTL_MS);
+  const base = TTL_OVERRIDE_MIN[interval] != null ? TTL_OVERRIDE_MIN[interval] * 60_000 : (INTERVAL_MS[interval] || DEFAULT_TTL_MS);
+  return Math.min(DEFAULT_TTL_MS, base);
 }
 
-/** 获取 K 线：优先读本地缓存，未命中则经代理拉取并落盘 */
-export async function getKlines(symbol, interval, limit = 500) {
+/** 获取 K 线：优先读本地缓存，未命中则经代理拉取并落盘。
+ *  @param {Object} [opts.force] 跳过缓存强制拉取（4H 收盘报告用：边界轮必须拿到最新已收盘 K，见 M1） */
+export async function getKlines(symbol, interval, limit = 500, { force = false } = {}) {
   const file = cacheFile(symbol, interval, limit);
 
-  if (existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval)) {
+  if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval)) {
     const cached = readCache(file);
     if (cached) {
       console.error(`[binance] 命中本地缓存: ${file}`);
@@ -105,10 +113,10 @@ export async function getKlines(symbol, interval, limit = 500) {
  * 用于回放（Case Replay）等需要长历史数据的场景。
  * 缓存文件：{SYMBOL}_{INTERVAL}_h{count}.json
  */
-export async function getHistory(symbol, interval, count) {
+export async function getHistory(symbol, interval, count, { force = false } = {}) {
   const file = cacheFile(symbol, interval, `h${count}`);
 
-  if (existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval)) {
+  if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval)) {
     const cached = readCache(file);
     if (cached) {
       console.error(`[binance] 命中本地缓存: ${file}`);

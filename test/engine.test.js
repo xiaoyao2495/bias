@@ -127,6 +127,8 @@ test("BULLISH + price < protectedLow → structureStatus INVALIDATED，effective
   assert.equal(r.effectiveBias, "NEUTRAL");
   assert.equal(r.executionState, "NONE"); // 失效后不再 READY
   assert.ok(r.reason.some((x) => x.includes("Protected low broken")));
+  // M2：决策基于 effectiveBias —— 结构失效 = 无方向 = WAIT，而非按旧方向（BULLISH）算 planR 后 NO_TRADE
+  assert.equal(r.decision.decision, "WAIT");
 });
 
 test("BEARISH + price < protectedHigh → VALID，effectiveBias BEARISH", () => {
