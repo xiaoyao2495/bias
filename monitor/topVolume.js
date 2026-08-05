@@ -5,6 +5,7 @@
  * 一次拉取全部 24h ticker（/fapi/v1/ticker/24hr），
  * 过滤 USDT 永续（symbol 以 USDT 结尾），
  * 按 24h 成交额（quoteVolume，单位 USDT）降序取 Top N。
+ * 支持 exclude 排除名单（如不想监控的币种）：先排序再剔除，被排除者在 N 内由后续补位。
  * 不做额外过滤：含杠杆代币（如 SNDK/SOXL/KORU）按成交量参与排序（用户指定）。
  *
  * 网络策略：默认直连；仅当设置了 HTTPS_PROXY / HTTP_PROXY（http 代理）时才走代理。
@@ -28,13 +29,18 @@ const proxyAgent = PROXY ? new ProxyAgent(PROXY) : null;
 
 /**
  * 获取 Binance USDT 永续 24h 成交额 Top N（含杠杆代币，纯成交量排序）。
+ * 支持排除名单：先按成交量排序，再剔除 exclude 中的合约，取前 N（若被排除者在 N 内，由后续补位）。
  * @param {number} [n=10] 返回数量
+ * @param {Object} [opts]
+ * @param {string[]} [opts.exclude=[]] 排除的合约（如不想监控的币种）
  * @returns {Promise<Array<{symbol: string, quoteVolume: number, lastPrice: number}>>}
  */
-export async function getTopVolumeSymbols(n = 10) {
+export async function getTopVolumeSymbols(n = 10, { exclude = [] } = {}) {
   const tickers = await fetchTicker24h();
+  const excludeSet = new Set(exclude);
   const usdtPerps = tickers
     .filter((t) => t.symbol.endsWith("USDT"))
+    .filter((t) => !excludeSet.has(t.symbol))
     .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume));
   return usdtPerps.slice(0, n).map((t) => ({
     symbol: t.symbol,

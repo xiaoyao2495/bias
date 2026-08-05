@@ -2,14 +2,14 @@
  * runMonitor.js — Monitor 常驻入口（pm2 保活，进程内自调度）
  *
  * 流程：
- *   getTopVolumeSymbols(10) → analyzeSymbols（串行，防限频）
+ *   getTopVolumeSymbols(12, { exclude: ["SOLUSDT"] }) → analyzeSymbols（串行，防限频）
  *   → compareState → 状态变化则推钉钉 → saveState → 睡到下一个对齐点
  *
  * 调度（北京时间）：
  *   全天每 10 分钟对齐检测一次（pm2 只负责保活，进程内自调度）。
  *
  * 推送策略：
- *   首轮（state.json 无记录）→ 推送一次全览（10 合约当前状态）
+ *   首轮（state.json 无记录）→ 推送一次全览（12 合约当前状态）
  *   后续轮次 → 只推状态变化的合约：
  *     bias 翻转        → ⚠️ {SYMBOL} 4H Bias Changed（含 旧 → 新 对比）
  *     confidence/decision 变化 → ℹ️ {SYMBOL} 4H Bias Updated
@@ -18,7 +18,7 @@
  *   流动性扫损 → ⚡ {SYMBOL} 扫损：刺破/跌破流动性位后收回（state.sweepTime 去重）
  *
  * 用法：
- *   node scripts/runMonitor.js                # 常驻：Top10 全量，自调度
+ *   node scripts/runMonitor.js                # 常驻：Top12 全量（排除 SOLUSDT），自调度
  *   node scripts/runMonitor.js BTCUSDT ETHUSDT  # 常驻：指定合约（测试用）
  *   node scripts/runMonitor.js --once          # 只跑一轮后退出（手动/测试）
  *   node scripts/runMonitor.js --once --dry    # 只计算不推送
@@ -49,19 +49,21 @@ function log(...args) {
 // 模块加载即打点：诊断 pm2 进程是否真正加载/进入了该脚本
 log(`[runMonitor] 模块加载（argv1=${process.argv[1] || "(无)"}，pm_exec_path=${process.env.pm_exec_path || "(无)"}，cwd=${process.cwd()}）`);
 
-const TOP_N = 10;
+const TOP_N = 12;
+/** 监控排除名单：用户不关注的合约（不参与 Top 排名，若在 N 内由后续补位） */
+const EXCLUDE_SYMBOLS = ["SOLUSDT"];
 const ICON = { BULLISH: "🟢", BEARISH: "🔴", NEUTRAL: "⚪" };
 const BJ_OFFSET_MS = 8 * 3600_000;
 
 /**
  * 执行一轮监控：扫描 → 比较 → 推送变化 → 存状态。
  * @param {Object} [p]
- * @param {string[]} [p.symbols] 指定合约列表（默认 Top10）
- * @param {number} [p.topN=10]
+ * @param {string[]} [p.symbols] 指定合约列表（默认 Top12，排除 SOLUSDT）
+ * @param {number} [p.topN=12]
  * @param {boolean} [p.dryRun] 只计算不推送
  */
 export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {}) {
-  const list = symbols && symbols.length ? symbols : (await getTopVolumeSymbols(topN)).map((t) => t.symbol);
+  const list = symbols && symbols.length ? symbols : (await getTopVolumeSymbols(topN, { exclude: EXCLUDE_SYMBOLS })).map((t) => t.symbol);
   log(`[runMonitor] 开始，合约数=${list.length}: ${list.join(",")}`);
   const prevState = loadState();
   const isFirstRun = Object.keys(prevState).length === 0;
@@ -150,7 +152,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
         log(`[runMonitor] 4H 收盘报告推送失败: ${e.message}`);
       }
     }
-    // 白名单清理：只保留本轮监控 list 内的合约，剔除跌出 Top10 的残留状态
+    // 白名单清理：只保留本轮监控 list 内的合约，剔除跌出 Top12 的残留状态
     saveState(cleanupState(nextState, list));
     log(`[runMonitor] 状态已保存（${Object.keys(nextState).length} 合约）`);
   }
