@@ -84,7 +84,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
-    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, ...cmp, prev, cur };
+    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, mss: r.mss, ...cmp, prev, cur };
     overview.push(item);
     if (cmp.changed) changed.push(item);
   }
@@ -160,15 +160,20 @@ function buildOverview(list) {
  * 变化原因分层：Bias 变化 → 市场状态（结构失效/新结构），与 Confidence 原因分离，
  * 避免"结构失效"被误读为"方向概率低"。
  */
-function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation }) {
+function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mss }) {
   const biasFlipped = changes.includes("bias");
   const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**  🕐 ${nowHHMM()}` : `**ℹ️ ${symbol} 4H Bias 更新**  🕐 ${nowHHMM()}`;
   const lines = [head, ""];
 
   if (biasFlipped) {
     lines.push(`${ICON[prev.bias] || ""} ${prev.bias} → ${ICON[cur.bias] || ""} ${cur.bias}`, "");
-    // Change Reason：市场发生了什么（结构失效 → 突破保护位）
-    if (structureStatus === "INVALIDATED") {
+    // Change Reason：市场发生了什么（结构失效 = MSS 事件 → 突破保护位）
+    if (structureStatus === "INVALIDATED" && mss) {
+      const dirText = mss.direction === "BULLISH" ? "向上突破" : "向下跌破";
+      const levelText = mss.type === "BREAK_PROTECTED_HIGH" ? "保护高位" : "保护低位";
+      lines.push(`**结构事件: MSS**（${dirText}${levelText} ${mss.level}，原 ${mss.structureFrom} 结构失效）`);
+      lines.push(`触发: ${mss.time} · 价格 ${mss.price}`);
+    } else if (structureStatus === "INVALIDATED") {
       const broken = invalidation && invalidation.type === "BREAK_PROTECTED_HIGH";
       const level = invalidation && invalidation.price != null ? invalidation.price : "-";
       lines.push(`结构: INVALIDATED（价格突破${broken ? "保护高位" : "保护低位"} ${level}，原 ${prev.bias} 结构失效）`);

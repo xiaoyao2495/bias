@@ -99,6 +99,21 @@ export function computeDailyBias({ structure, liquidity, location, price, pdArra
 
   const invalidation = buildInvalidation(bias, structure);
 
+  // V1.4.1 MSS 事件化（P0）：结构失效 = 一次市场结构转变（BOS/MSS），
+  // 包装成结构化事件 { direction, level, price, structureFrom, structureTo }，供通知层直接渲染。
+  // direction = 突破方向（价格已进入的新方向）：突破保护高点 → BULLISH（向上 BOS），跌破保护低点 → BEARISH。
+  let mss = null;
+  if (structureStatus === "INVALIDATED" && status.brokenLevel != null && invalidation) {
+    mss = {
+      type: invalidation.type, // BREAK_PROTECTED_LOW / BREAK_PROTECTED_HIGH
+      direction: invalidation.type === "BREAK_PROTECTED_HIGH" ? "BULLISH" : "BEARISH",
+      level: status.brokenLevel,
+      price,
+      structureFrom: bias, // 原结构方向（审计：之前为什么看多/看空）
+      structureTo: "NEUTRAL", // 失效后有效方向
+    };
+  }
+
   // V1.6：PD Array 执行区域排名（跟随有效方向；不参与 bias 判定）
   const pdArrayRank = rankPDArray({ bias: effectiveBias, range: location, pdArray: pdArray || { fvg: [], ob: [] } });
 
@@ -113,7 +128,7 @@ export function computeDailyBias({ structure, liquidity, location, price, pdArra
   // V2.5：Bias Decision Layer（融合 Confidence × planR，输出 Opportunity / Tradeability / Decision）
   const decision = buildDecision({ bias, confidence, draw, price, invalidation });
 
-  return { bias, structureStatus, effectiveBias, draw, executionState, reason, invalidation, pdArray: pdArrayRank, scenario, confidence, explanation, decision };
+  return { bias, structureStatus, effectiveBias, draw, executionState, reason, invalidation, mss, pdArray: pdArrayRank, scenario, confidence, explanation, decision };
 }
 
 function buildInvalidation(bias, structure) {

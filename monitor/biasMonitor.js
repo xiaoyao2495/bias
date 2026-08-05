@@ -72,6 +72,9 @@ export async function analyzeSymbol(symbol) {
     bias: bias.effectiveBias || bias.bias,
     structureStatus: bias.structureStatus,
     invalidation: bias.invalidation || null, // { type, price }：结构失效时用于解释"突破哪个保护位"
+    mss: bias.mss
+      ? { ...bias.mss, time: new Date(time).toISOString().slice(0, 16).replace("T", " ") } // MSS 事件：方向/保护位/触发时间
+      : null,
     scenario: bias.scenario ? bias.scenario.label : "-",
     confidence: bias.confidence ? bias.confidence.level : "-",
     confidenceScore: bias.confidence ? bias.confidence.score : null,
