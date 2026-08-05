@@ -11,6 +11,7 @@ import { computeLiquidity } from "../indicators/liquidity.js";
 import { computeDealingRange } from "../indicators/dealingRange.js";
 import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
 import { computeDailyBias } from "../engine/dailyBiasEngine.js";
+import { detectStructureEvents } from "../indicators/mss.js";
 import { formatReport } from "../report/formatter.js";
 
 const symbol = process.argv[2] || "BTCUSDT";
@@ -50,7 +51,10 @@ async function main() {
   // 5. Daily Bias
   const bias = computeDailyBias({ structure, liquidity, location, price, pdArray });
 
-  console.log(formatReport({ symbol, structure, liquidity, location, pdArray, bias }));
+  // P1-B：MSS / BOS（4H 环境层，周期无关指标；传入当前价判断"哪个 swing 被打破"）
+  const mss = detectStructureEvents(candles4h, { price });
+
+  console.log(formatReport({ symbol, structure, liquidity, location, pdArray, bias, mss }));
 }
 
 main().catch((e) => {

@@ -16,6 +16,8 @@ export function formatReport(r) {
   lines.push(structure.sequence.length ? structure.sequence.join(" → ") : "-", "");
   lines.push("Direction:");
   lines.push(directionName(structure.direction), "");
+  lines.push("MSS / BOS:");
+  pushMssBos(lines, r.mss);
   lines.push("Liquidity Target:", "");
 
   lines.push("Primary Buy Draw:");
@@ -123,6 +125,30 @@ export function formatReport(r) {
   lines.push(LINE);
 
   return lines.join("\n");
+}
+
+/** P1-B：MSS / BOS 状态（Internal/External 分层 + 最近事件） */
+function pushMssBos(lines, mss) {
+  if (!mss) {
+    lines.push("-", "");
+    return;
+  }
+  const int = mss.structureLayer && mss.structureLayer.internal;
+  const ext = mss.structureLayer && mss.structureLayer.external;
+  lines.push("Internal:");
+  const intParts = [];
+  if (int) {
+    intParts.push(int.trend || "-");
+    if (int.protectedLow != null) intParts.push(`protectedLow ${fmtPrice(int.protectedLow)}`);
+    if (int.protectedHigh != null) intParts.push(`protectedHigh ${fmtPrice(int.protectedHigh)}`);
+  }
+  lines.push(intParts.length ? intParts.join(" · ") : "-", "");
+  lines.push("External:");
+  lines.push(ext ? `high ${fmtPrice(ext.high)} / low ${fmtPrice(ext.low)}` : "-", "");
+  const ev = mss.lastEvent;
+  lines.push("Event:");
+  lines.push(ev ? `${ev.type} ${ev.direction} @ ${fmtPrice(ev.level)} (${ev.levelType})` : "-");
+  lines.push("");
 }
 
 function pushPdArray(lines, ranked) {
