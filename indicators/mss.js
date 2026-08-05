@@ -16,6 +16,8 @@
  *   MSS 会被推迟到更深的位（ICT 中 MSS = 打破最近反方向 swing）。
  *
  * 收盘确认（ICT：close beyond 才算结构转移）：
+ *   - swing 判定只用已收盘 K（进行中 K 不参与 Pivot 右侧确认——其 high/low 实时变动
+ *     会使已确认 swing 点漂移）；未收盘 K 仅经 price 提供"实时触发"
  *   - 末根 K 已收盘 → 用其 close 判定，事件 confirmed=true
  *   - 末根 K 进行中 → 用实时 price 判定，事件 confirmed=false、realtime=true（仅提示；
  *     wick 插针刺破后收回属于 Sweep 模块的流动性事件，不算结构转移）
@@ -50,10 +52,16 @@ function mkEvent(type, direction, level, price, swingIndex, reason, confirmed, r
  * }}
  */
 export function detectStructureEvents(candles, { price, left = 2, right = 2 } = {}) {
-  const labeled = analyzeSwings(findSwings(candles, left, right));
+  const now = Date.now();
+  // 修复（等待 K 收盘）：swing 判定只用已收盘 K。
+  // 进行中 K 的 high/low/close 会随实时成交变动，若参与 Pivot 右侧确认，
+  // 会使倒数第 2 根的 swing 状态随实时价漂移（同一根 K 时而确认时而否决），
+  // 进而污染 lastHigh/lastLow 与 MSS/BOS 判定。swing 必须收盘确认；
+  // 未收盘 K 仅经 price 提供"实时触发"，事件以 realtime 标注，收盘后转 confirmed。
+  const closed = candles.filter((k) => !k.closeTime || k.closeTime <= now);
+  const labeled = analyzeSwings(findSwings(closed, left, right));
   const structure = buildStructure(labeled);
   const last = candles[candles.length - 1];
-  const now = Date.now();
   const lastClosed = !last || !last.closeTime || last.closeTime <= now;
 
   // 判定价：优先实时 price（进行中提示），缺省末根 close（收盘确认）

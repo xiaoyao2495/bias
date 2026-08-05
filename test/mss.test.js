@@ -119,6 +119,34 @@ test("收盘确认：末根已收盘才 confirmed；进行中 K 传实时价 →
   assert.equal(r.lastEvent.realtime, true);
 });
 
+test("修复：进行中 K 不参与 swing 确认，swing 点不漂移", () => {
+  // 基准：bullish 最后一个已确认 swing high = 120
+  const rBase = detectStructureEvents(bullish, { price: 121 });
+  assert.equal(rBase.structureLayer.internal.lastHigh.price, 120);
+
+  // 追加两根进行中 K（closeTime 未来），其 high 极高（999/998）——
+  // 若参与 Pivot 确认，旧逻辑会把 999 识别为 swing high（lastHigh=999），
+  // BOS 判定随之失效；修复后只用已收盘 K，swing 稳定在 120。
+  const live = bullish.concat(mk(999, 998, 16, false), mk(998, 997, 17, false));
+  const rLive = detectStructureEvents(live, { price: 121 });
+  assert.equal(rLive.structureLayer.internal.lastHigh.price, 120);
+  assert.equal(rLive.structureLayer.internal.lastLow.price, 108);
+  assert.equal(rLive.lastEvent.type, "BOS");
+  assert.equal(rLive.lastEvent.direction, "UP");
+  assert.equal(rLive.lastEvent.level, 120);
+  assert.equal(rLive.lastEvent.confirmed, false); // 进行中 → 仅提示
+  assert.equal(rLive.lastEvent.realtime, true);
+});
+
+test("修复：已收盘全部时行为不变（swing 正常确认）", () => {
+  // 最后两根已收盘：index 15(118) < 14(119) 不构成 swing；lastHigh 仍 120
+  const r = detectStructureEvents(bullish, { price: 121 });
+  assert.equal(r.structureLayer.internal.lastHigh.price, 120);
+  assert.equal(r.structureLayer.internal.lastLow.price, 108);
+  assert.equal(r.lastEvent.type, "BOS");
+  assert.equal(r.lastEvent.confirmed, true);
+});
+
 test("scanStructureEvents：历史扫描用收盘确认，wick 插针不算 MSS", () => {
   // BULLISH 后：index16 插针到 107（< 108）但 close 收回；index20 收盘 107 才确认 MSS
   const decline = [
