@@ -2,3 +2,4 @@ node_modules/
 data/cache/
 monitor/state.json
 monitor/log.txt
+monitor/closeReport.json
