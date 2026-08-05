@@ -12,7 +12,7 @@
  * 不落缓存：ticker 全量一次请求，监控每小时一次，无需缓存。
  *
  * 用法：
- *   node monitor/topVolume.js            # 输出 Top 15（含成交额）
+ *   node monitor/topVolume.js            # 输出 Top 10（含成交额）
  *   node monitor/topVolume.js 20         # 输出 Top 20
  */
 import { ProxyAgent, request } from "undici";
@@ -28,10 +28,10 @@ const proxyAgent = PROXY ? new ProxyAgent(PROXY) : null;
 
 /**
  * 获取 Binance USDT 永续 24h 成交额 Top N（含杠杆代币，纯成交量排序）。
- * @param {number} [n=15] 返回数量
+ * @param {number} [n=10] 返回数量
  * @returns {Promise<Array<{symbol: string, quoteVolume: number, lastPrice: number}>>}
  */
-export async function getTopVolumeSymbols(n = 15) {
+export async function getTopVolumeSymbols(n = 10) {
   const tickers = await fetchTicker24h();
   const usdtPerps = tickers
     .filter((t) => t.symbol.endsWith("USDT"))
@@ -81,7 +81,7 @@ async function fetchTicker24h() {
 
 // CLI：node monitor/topVolume.js [N]
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const n = Number(process.argv[2]) || 15;
+  const n = Number(process.argv[2]) || 10;
   getTopVolumeSymbols(n)
     .then((list) => {
       console.log(`# ${n} USDT 永续 24h 成交额 Top（单位: 10亿 USDT）\n`);

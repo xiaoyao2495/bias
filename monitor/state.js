@@ -27,6 +27,22 @@ export function saveState(state) {
 }
 
 /**
+ * 清理状态：只保留仍在监控列表（list）内的合约，剔除跌出 Top15 后的残留。
+ * state.json 目前由 runMonitor 全量覆盖写（nextState 只含本轮 list），
+ * 残留会被自动清除；此函数显式化该约束并作防御——若未来改为合并写入，
+ * 跌出列表的合约状态将不再被覆盖清除，必须经此白名单清理。
+ * @param {Object} state 待保存状态
+ * @param {string[]} list 本轮监控合约列表（白名单）
+ */
+export function cleanupState(state, list) {
+  const cleaned = {};
+  for (const symbol of list) {
+    if (state[symbol]) cleaned[symbol] = state[symbol];
+  }
+  return cleaned;
+}
+
+/**
  * 比较新旧状态，返回变化详情。
  * @param {Object|null} prev 旧状态（无记录 = null）
  * @param {Object} cur 新状态
