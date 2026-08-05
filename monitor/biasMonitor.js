@@ -68,7 +68,9 @@ export async function analyzeSymbol(symbol) {
     symbol,
     time: new Date(time).toISOString().slice(0, 16).replace("T", " "),
     price,
-    bias: bias.bias,
+    // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导
+    bias: bias.effectiveBias || bias.bias,
+    structureStatus: bias.structureStatus,
     scenario: bias.scenario ? bias.scenario.label : "-",
     confidence: bias.confidence ? bias.confidence.level : "-",
     confidenceScore: bias.confidence ? bias.confidence.score : null,
