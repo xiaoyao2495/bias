@@ -125,10 +125,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         console.log(`${r.symbol}  ${r.price}`);
         console.log(`Bias: ${icon[r.bias] || ""} ${r.bias}`);
         console.log(`Scenario: ${r.scenario}`);
-        console.log(`Confidence: ${r.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
-        console.log(`Quality: ${r.quality}${r.planR != null ? ` (planR ${r.planR.toFixed(2)})` : ""}`);
-        console.log(`Decision: ${r.decisionLabel}`);
-        console.log(`Reason: ${r.reason}`);
+        console.log(`信心度: ${r.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
+        console.log(`机会质量: ${r.quality}${r.planR != null ? ` (planR ${r.planR.toFixed(2)})` : ""}`);
+        console.log(`操作: ${r.decisionLabel}`);
+        console.log(`原因: ${r.reason}`);
         console.log(`Execution: ${r.execution} @ ${r.location}/${r.context}\n`);
       }
     })

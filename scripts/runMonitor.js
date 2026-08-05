@@ -146,11 +146,11 @@ export async function startMonitorLoop({ symbols, intervalMs } = {}) {
 
 /** 首轮全览（紧凑，避免刷屏） */
 function buildOverview(list) {
-  const lines = ["**4H Bias Monitor**", now(), ""];
+  const lines = [`**4H Bias Monitor**  ${nowHHMM()}`, ""];
   for (const r of list) {
     lines.push(`**${r.symbol}** ${ICON[r.cur.bias] || ""} ${r.cur.bias}`);
-    lines.push(`Scenario: ${r.cur.scenario} · Confidence: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
-    lines.push(`Quality: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · Decision: ${r.cur.decision}`);
+    lines.push(`Scenario: ${r.cur.scenario} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
+    lines.push(`机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
     lines.push("");
   }
   return lines.join("\n");
@@ -159,24 +159,24 @@ function buildOverview(list) {
 /** 状态变化消息（bias 翻转 → ⚠️，其余 → ℹ️） */
 function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore }) {
   const biasFlipped = changes.includes("bias");
-  const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias Changed**` : `**ℹ️ ${symbol} 4H Bias Updated**`;
-  const lines = [head, ""];
+  const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**` : `**ℹ️ ${symbol} 4H Bias 更新**`;
+  const lines = [head, "", `🕐 ${nowHHMM()}`, ""];
 
   if (biasFlipped) {
     lines.push(`${ICON[prev.bias] || ""} ${prev.bias} → ${ICON[cur.bias] || ""} ${cur.bias}`, "");
   }
   if (changes.includes("confidence")) {
-    lines.push(`Confidence: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
+    lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   }
   if (changes.includes("decision")) {
-    lines.push(`Decision: ${prev.decision} → ${cur.decision}`);
+    lines.push(`操作: ${prev.decision} → ${cur.decision}`);
   }
   if (!biasFlipped && cur.scenario) {
     lines.push(`Scenario: ${cur.scenario}`);
   }
-  lines.push(`Quality: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
-  lines.push(`Reason: ${reason}`);
-  lines.push(`Price: ${price}`);
+  lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
+  lines.push(`原因: ${reason}`);
+  lines.push(`价格: ${price}`);
   return lines.join("\n");
 }
 
@@ -187,6 +187,16 @@ function now() {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+/** 北京时间 hh:mm */
+function nowHHMM() {
+  return new Date().toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
