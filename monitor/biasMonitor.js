@@ -20,7 +20,7 @@
  * 用法（CLI 验证）：
  *   node monitor/biasMonitor.js BTCUSDT ETHUSDT SOLUSDT
  */
-import { getHistory } from "../data/binance.js";
+import { getHistory, getKlines } from "../data/binance.js";
 import { findSwings, analyzeSwings } from "../indicators/swing.js";
 import { buildStructure } from "../indicators/structure.js";
 import { computeLiquidity } from "../indicators/liquidity.js";
@@ -41,10 +41,12 @@ const HISTORY = { "4h": 5000, "1d": 2000, "1w": 400 };
  * @returns {Promise<Object>} 摘要对象（字段见 analyzeSymbol 返回）
  */
 export async function analyzeSymbol(symbol) {
-  const [h4, daily, weekly] = await Promise.all([
+  const [h4, daily, weekly, m5] = await Promise.all([
     getHistory(symbol, "4h", HISTORY["4h"]),
     getHistory(symbol, "1d", HISTORY["1d"]),
     getHistory(symbol, "1w", HISTORY["1w"]),
+    // 5m 用于流动性扫损检测（缓存 TTL 5 分钟，保证扫损事件的实时性）
+    getKlines(symbol, "5m", 100),
   ]);
 
   if (!h4.length) throw new Error(`${symbol} 无 4H 数据`);
@@ -65,20 +67,22 @@ export async function analyzeSymbol(symbol) {
   const htfDirection = computeHtfDirection(daily, weekly, price);
   const bias = computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection });
 
-  // P1-A：流动性扫损（最近 3 根已收盘 4H 刺破后收回）；目标含流动性池 + 外部结构高低点
+  // P1-A：流动性扫损（5m K 线：进行中 5m 实时检测 + 最近 48 根已收盘 5m 确认，≈4 小时窗口）
+  // 用 5m 粒度：扫损是分钟级价格行为（刺破流动性后收回），4H 单根 K 会把整个过程包住，粒度过粗
   const buyLevels = (liquidity.buySide || []).concat(
     structure.externalSwingHigh != null ? [{ type: "EXTERNAL_HIGH", price: structure.externalSwingHigh }] : []
   );
   const sellLevels = (liquidity.sellSide || []).concat(
     structure.externalSwingLow != null ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow }] : []
   );
-  const sweep = detectSweeps(h4, buyLevels, sellLevels);
+  const price5m = m5.length ? m5[m5.length - 1].close : price; // 进行中 5m 的 close = 当前最新成交价
+  const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48);
 
-  // P1-C：位移 K（最后一根位移 K 须在最近 3 根已收盘 4H 内才输出，用于收盘报告标注）
-  const dispList = findDisplacements(h4);
+  // P1-C：位移 K（5m 粒度：最近 48 根 5m ≈ 4 小时内出现位移 K，用于收盘报告标注）
+  const dispList = findDisplacements(m5);
   const lastDisp = dispList.length ? dispList[dispList.length - 1] : null;
   const displacement =
-    lastDisp && lastClosed.closeTime - lastDisp.time <= 3 * 4 * 3600_000
+    lastDisp && m5[m5.length - 1].closeTime - lastDisp.time <= 48 * 5 * 60_000
       ? { time: lastDisp.time, direction: lastDisp.direction, ratio: lastDisp.ratio }
       : null;
 

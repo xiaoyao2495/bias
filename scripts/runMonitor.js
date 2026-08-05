@@ -85,7 +85,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       scenario: r.scenario,
       quality: r.quality,
       planR: r.planR,
-      sweepTime: r.sweep ? r.sweep.time : null, // 扫损事件去重（time 变化 = 新事件）
+      sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = K开盘时间_方向，一根 4H 内同一侧只推一次）
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
@@ -108,7 +108,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       log(`[runMonitor] 本轮完成: ${changed.length} 变化 / ${overview.length} 合约`);
       // P1-A：流动性扫损事件（独立推送；state 无该事件记录 → 新扫损才推）
       for (const item of overview) {
-        if (item.sweep && item.prev && item.prev.sweepTime !== item.sweep.time) {
+        if (item.sweep && item.prev && item.prev.sweepTime !== item.sweep.key) {
           await sendMarkdown(buildSweep(item), `${item.symbol} 扫损`);
           log(`[runMonitor] 已推送 ${item.symbol} 扫损（${item.sweep.side} @ ${item.sweep.level}）`);
         }
@@ -225,11 +225,15 @@ function buildSweep({ symbol, sweep, price, cur, confidenceScore }) {
   const sideText = sweep.side === "BSL" ? "上方买方流动性（BSL）" : "下方卖方流动性（SSL）";
   const levelText = sweepTypeLabel(sweep.type);
   const sweptText = sweep.side === "BSL" ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回` : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
+  const tag = sweep.realtime ? "实时" : "已确认";
+  const timeText = sweep.realtime
+    ? `检测于 ${nowHHMM()}（本根 4H 进行中）`
+    : `时间: ${new Date(sweep.closedTime).toISOString().slice(0, 16).replace("T", " ")}（已收盘确认）`;
   const lines = [
-    `**⚡ ${symbol} 流动性扫损**  🕐 ${nowHHMM()}`,
+    `**⚡ ${symbol} 流动性扫损（${tag}）**  🕐 ${nowHHMM()}`,
     "",
     `${sideText}被扫：${sweptText}，收 ${sweep.close}`,
-    `时间: ${new Date(sweep.time).toISOString().slice(0, 16).replace("T", " ")} · 现价 ${price}`,
+    `${timeText} · 现价 ${price}`,
     "",
     "市场背景:",
     `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,

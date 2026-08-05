@@ -38,7 +38,7 @@ const PROXY = /^https?:\/\//i.test(PROXY_ENV) ? PROXY_ENV : "";
 const proxyAgent = PROXY ? new ProxyAgent(PROXY) : null;
 
 const DEFAULT_TTL_MS = (Number(process.env.BIAS_CACHE_TTL_HOURS) || 4) * 3600_000;
-const INTERVAL_MS = { "4h": 4 * 3600_000, "1d": 24 * 3600_000, "1w": 7 * 24 * 3600_000 };
+const INTERVAL_MS = { "5m": 5 * 60_000, "4h": 4 * 3600_000, "1d": 24 * 3600_000, "1w": 7 * 24 * 3600_000 };
 
 function mapKline(k) {
   return {
