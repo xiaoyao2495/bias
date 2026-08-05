@@ -71,6 +71,7 @@ export async function analyzeSymbol(symbol) {
     // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导
     bias: bias.effectiveBias || bias.bias,
     structureStatus: bias.structureStatus,
+    invalidation: bias.invalidation || null, // { type, price }：结构失效时用于解释"突破哪个保护位"
     scenario: bias.scenario ? bias.scenario.label : "-",
     confidence: bias.confidence ? bias.confidence.level : "-",
     confidenceScore: bias.confidence ? bias.confidence.score : null,

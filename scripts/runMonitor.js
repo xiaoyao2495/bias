@@ -84,7 +84,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
-    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, ...cmp, prev, cur };
+    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, ...cmp, prev, cur };
     overview.push(item);
     if (cmp.changed) changed.push(item);
   }
@@ -155,18 +155,39 @@ function buildOverview(list) {
   return lines.join("<br/>");
 }
 
-/** 状态变化消息（bias 翻转 → ⚠️，其余 → ℹ️） */
-function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore }) {
+/**
+ * 状态变化消息（bias 翻转 → ⚠️，其余 → ℹ️）。
+ * 变化原因分层：Bias 变化 → 市场状态（结构失效/新结构），与 Confidence 原因分离，
+ * 避免"结构失效"被误读为"方向概率低"。
+ */
+function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation }) {
   const biasFlipped = changes.includes("bias");
   const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**  🕐 ${nowHHMM()}` : `**ℹ️ ${symbol} 4H Bias 更新**  🕐 ${nowHHMM()}`;
   const lines = [head, ""];
 
-  if (biasFlipped) lines.push(`${ICON[prev.bias] || ""} ${prev.bias} → ${ICON[cur.bias] || ""} ${cur.bias}`, "");
+  if (biasFlipped) {
+    lines.push(`${ICON[prev.bias] || ""} ${prev.bias} → ${ICON[cur.bias] || ""} ${cur.bias}`, "");
+    // Change Reason：市场发生了什么（结构失效 → 突破保护位）
+    if (structureStatus === "INVALIDATED") {
+      const broken = invalidation && invalidation.type === "BREAK_PROTECTED_HIGH";
+      const level = invalidation && invalidation.price != null ? invalidation.price : "-";
+      lines.push(`结构: INVALIDATED（价格突破${broken ? "保护高位" : "保护低位"} ${level}，原 ${prev.bias} 结构失效）`);
+    } else {
+      const desc =
+        cur.bias === "BULLISH" ? "新多头结构形成（HH+HL）" :
+        cur.bias === "BEARISH" ? "新空头结构形成（LH+LL）" : "结构方向未确认";
+      lines.push(`结构: ${structureStatus || "-"}（${desc}）`);
+    }
+    lines.push("");
+  }
   if (changes.includes("confidence")) lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
+  else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);
+  else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
   if (!biasFlipped && cur.scenario) lines.push(`Scenario: ${cur.scenario}`);
   lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
-  lines.push(`原因: ${reason}`);
+  // 非 bias 变化时 reason 是可信度/空间原因；bias 变化时原因已在结构行解释
+  if (!biasFlipped) lines.push(`原因: ${reason}`);
   lines.push(`价格: ${price}`);
   return lines.join("<br/>");
 }
