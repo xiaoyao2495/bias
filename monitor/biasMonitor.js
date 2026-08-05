@@ -46,8 +46,11 @@ export async function analyzeSymbol(symbol) {
   ]);
 
   if (!h4.length) throw new Error(`${symbol} 无 4H 数据`);
-  const price = h4[h4.length - 1].close;
-  const time = h4[h4.length - 1].closeTime;
+  const lastK = h4[h4.length - 1];
+  // 收盘报告需要"最后已收盘 4H"（最后一根若未收盘则取上一根），用于展示收于开盘上方/下方
+  const lastClosed = lastK.closeTime <= Date.now() ? lastK : h4[h4.length - 2] || lastK;
+  const price = lastK.close;
+  const time = lastK.closeTime;
 
   const swings = findSwings(h4);
   const labeled = analyzeSwings(swings);
@@ -68,6 +71,8 @@ export async function analyzeSymbol(symbol) {
     symbol,
     time: new Date(time).toISOString().slice(0, 16).replace("T", " "),
     price,
+    // 最后已收盘 4H（收盘报告用：收于开盘上方/下方）
+    last4h: { open: lastClosed.open, close: lastClosed.close, time: lastClosed.closeTime },
     // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导
     bias: bias.effectiveBias || bias.bias,
     structureStatus: bias.structureStatus,

@@ -13,6 +13,8 @@
  *   后续轮次 → 只推状态变化的合约：
  *     bias 翻转        → ⚠️ {SYMBOL} 4H Bias Changed（含 旧 → 新 对比）
  *     confidence/decision 变化 → ℹ️ {SYMBOL} 4H Bias Updated
+ *   4H 收盘报告 → 每根 4H 收线后（北京 00/04/08/12/16/20）即使无变化也推一次
+ *     （记录在 monitor/closeReport.json，首轮全览已覆盖则不重复推）
  *
  * 用法：
  *   node scripts/runMonitor.js                # 常驻：Top15 全量，自调度
@@ -25,12 +27,13 @@ import { getTopVolumeSymbols } from "../monitor/topVolume.js";
 import { analyzeSymbols } from "../monitor/biasMonitor.js";
 import { loadState, saveState, compareState } from "../monitor/state.js";
 import { sendMarkdown } from "../monitor/dingTalk.js";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = join(__dirname, "..", "monitor", "log.txt");
+const CLOSE_REPORT_FILE = join(__dirname, "..", "monitor", "closeReport.json"); // 记录已推送收盘报告的 4H 边界
 
 /** 文件日志：Windows 上 pm2 的 out/err 日志空白，写文件便于在服务器上排查 */
 function log(...args) {
@@ -84,7 +87,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
-    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, mss: r.mss, ...cmp, prev, cur };
+    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, mss: r.mss, last4h: r.last4h, ...cmp, prev, cur };
     overview.push(item);
     if (cmp.changed) changed.push(item);
   }
@@ -100,6 +103,13 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       }
       log(`[runMonitor] 本轮完成: ${changed.length} 变化 / ${overview.length} 合约`);
     }
+    // 4H 收盘报告：每根 4H 收线后即使无状态变化也推一次（首轮全览已覆盖，只记录边界不推）
+    const boundaryMs = latestBjBoundaryMs();
+    if (!isFirstRun && boundaryMs > loadCloseReport()) {
+      await sendMarkdown(buildCloseReport(overview), "4H 收盘报告");
+      log(`[runMonitor] 4H 收盘报告已推送（边界 ${new Date(boundaryMs).toISOString()}）`);
+    }
+    saveCloseReport(boundaryMs);
     saveState(nextState);
     log(`[runMonitor] 状态已保存（${Object.keys(nextState).length} 合约）`);
   }
@@ -142,6 +152,60 @@ export async function startMonitorLoop({ symbols, intervalMs } = {}) {
       log(`[monitor] 本轮失败: ${e.message}，继续下一轮`);
     }
   }
+}
+
+/**
+ * 最近一个已过的 4H 边界（北京时间 00/04/08/12/16/20 整点）对应的 epoch ms。
+ * 用 UTC 字段 + 8h 偏移模拟北京时间，与服务器时区无关。
+ * @param {Date} [now]
+ */
+export function latestBjBoundaryMs(now = new Date()) {
+  const bj = new Date(now.getTime() + BJ_OFFSET_MS);
+  const startOfBjDay = Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate());
+  const mins = bj.getUTCHours() * 60 + bj.getUTCMinutes();
+  const boundaryMin = Math.floor(mins / 240) * 240; // 4H = 240 分钟
+  return startOfBjDay + boundaryMin * 60000 - BJ_OFFSET_MS;
+}
+
+/** 4H 收盘报告记录：已推送到的边界（无记录 → 0） */
+function loadCloseReport() {
+  try {
+    return JSON.parse(readFileSync(CLOSE_REPORT_FILE, "utf8")).lastBoundary || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveCloseReport(boundaryMs) {
+  writeFileSync(CLOSE_REPORT_FILE, JSON.stringify({ lastBoundary: boundaryMs }));
+}
+
+/** 4H 边界对应的时段（北京时间，ICT 简化标注） */
+function sessionOfBjHour(h) {
+  if (h >= 8 && h < 16) return "亚洲";
+  if (h >= 16 && h < 20) return "伦敦";
+  return "纽约";
+}
+
+/**
+ * 4H 收盘报告：每根 4H 收线后的固定状态播报（即使无变化也推）。
+ * 每合约一行：收于开盘上方/下方 + 幅度 + 当前 Bias + 信心度（ICT Daily Bias 的 open/close 视角）。
+ */
+function buildCloseReport(overview) {
+  const bj = new Date(Date.now() + BJ_OFFSET_MS);
+  const bjHour = bj.getUTCHours();
+  const boundary = new Date(latestBjBoundaryMs());
+  const bjBoundary = new Date(boundary.getTime() + BJ_OFFSET_MS);
+  const label = `${String(bjBoundary.getUTCHours()).padStart(2, "0")}:00`;
+  const lines = [`**4H 收盘报告** · ${sessionOfBjHour(bjHour)}时段（北京 ${label} 收线）`, `本根 4H 收盘：`, ""];
+  for (const r of overview) {
+    const k = r.last4h;
+    if (!k || k.open == null) continue;
+    const pct = ((k.close - k.open) / k.open) * 100;
+    const up = k.close >= k.open;
+    lines.push(`**${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · ${ICON[r.cur.bias] || ""} ${r.cur.bias} · ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
+  }
+  return lines.join("<br/>");
 }
 
 /** 首轮全览（紧凑，避免刷屏） */
