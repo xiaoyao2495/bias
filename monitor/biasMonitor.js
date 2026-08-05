@@ -21,15 +21,10 @@
  *   node monitor/biasMonitor.js BTCUSDT ETHUSDT SOLUSDT
  */
 import { getHistory, getKlines } from "../data/binance.js";
-import { findSwings, analyzeSwings } from "../indicators/swing.js";
-import { buildStructure } from "../indicators/structure.js";
-import { computeLiquidity } from "../indicators/liquidity.js";
-import { computeDealingRange } from "../indicators/dealingRange.js";
-import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
-import { computeHtfDirection } from "../indicators/scenario.js";
 import { detectSweeps } from "../indicators/sweep.js";
 import { findDisplacements } from "../indicators/displacement.js";
-import { computeDailyBias } from "../engine/dailyBiasEngine.js";
+import { detectStructureEvents } from "../indicators/mss.js";
+import { analyzeBias } from "../engine/analyzeBias.js";
 import { pathToFileURL } from "node:url";
 
 // 与 scanner/replayCase 同款数据窗口：4H 5000 根 ≈ 830 天，1D/1W 供 HTF 方向
@@ -38,11 +33,13 @@ const HISTORY = { "4h": 5000, "1d": 2000, "1w": 400 };
 /**
  * 对单个 symbol 跑一次 Bias 分析，返回简洁摘要。
  * @param {string} symbol 如 "BTCUSDT"
+ * @param {Object} [opt]
+ * @param {boolean} [opt.force4h] 跳过 4H 缓存强制拉取（4H 收盘边界轮用：保证收盘报告/结构检测用最新已收盘 K，见 M1）
  * @returns {Promise<Object>} 摘要对象（字段见 analyzeSymbol 返回）
  */
-export async function analyzeSymbol(symbol) {
+export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const [h4, daily, weekly, m5] = await Promise.all([
-    getHistory(symbol, "4h", HISTORY["4h"]),
+    getHistory(symbol, "4h", HISTORY["4h"], { force: force4h }),
     getHistory(symbol, "1d", HISTORY["1d"]),
     getHistory(symbol, "1w", HISTORY["1w"]),
     // 5m 用于流动性扫损/位移检测（辅助信息，缓存 TTL 5 分钟）；拉取失败降级为 []，
@@ -62,16 +59,8 @@ export async function analyzeSymbol(symbol) {
   const price5m = m5.length ? m5[m5.length - 1].close : null;
   const price = price5m ?? price4h;
 
-  const swings = findSwings(h4);
-  const labeled = analyzeSwings(swings);
-  const structure = buildStructure(labeled);
-  const liquidity = computeLiquidity(daily, weekly, swings, 0.002, time);
-  const location = computeDealingRange(swings, structure, price);
-  const fvgs = findFvgs(h4);
-  const obs = findOrderBlocks(h4);
-  const pdArray = annotatePDArray({ fvg: fvgs.slice(-6), ob: obs.slice(-6) }, location, h4);
-  const htfDirection = computeHtfDirection(daily, weekly, price);
-  const bias = computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection });
+  // 核心判定链路（与 Historical Scanner 共用 analyzeBias，见 engine/analyzeBias.js）
+  const { structure, liquidity, location, bias } = analyzeBias({ candles: h4, daily, weekly, price, time });
 
   // P1-A：流动性扫损（5m K 线：进行中 5m 实时检测 + 最近 48 根已收盘 5m 确认，≈4 小时窗口）
   // 用 5m 粒度：扫损是分钟级价格行为（刺破流动性后收回），4H 单根 K 会把整个过程包住，粒度过粗
@@ -82,6 +71,17 @@ export async function analyzeSymbol(symbol) {
     structure.externalSwingLow != null ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow }] : []
   );
   const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48);
+
+  // P1-B：5m 层 MSS/BOS（周期无关检测；5m 用 ICT 最小 swing 窗口每侧 1 根，收盘确认）
+  // 仅检测不生成信号：在扫损消息中标注（扫损→收回→MSS 是 ICT 经典链条），供人工判断结构转向。
+  // m5 拉取失败（[]）时跳过，不阻断主分析。
+  let mss5m = null;
+  if (m5.length >= 3) {
+    try {
+      const cur5m = detectStructureEvents(m5, { price, left: 1, right: 1 });
+      if (cur5m.lastEvent) mss5m = { direction: cur5m.direction, lastEvent: cur5m.lastEvent };
+    } catch {}
+  }
 
   // P1-C：位移 K（5m 粒度：最近 48 根 5m ≈ 4 小时内出现位移 K，用于收盘报告标注）
   const dispList = findDisplacements(m5);
@@ -112,6 +112,7 @@ export async function analyzeSymbol(symbol) {
     confidence: bias.confidence ? bias.confidence.level : "-",
     confidenceScore: bias.confidence ? bias.confidence.score : null,
     sweep, // { side, type, level, sweptPrice, close, time } | null（流动性扫损事件）
+    mss5m, // { direction, lastEvent } | null（5m 层最近 MSS/BOS 事件，扫损消息标注）
     displacement, // { time, direction, ratio } | null（位移 K，最近 3 根内）
     quality,
     planR,
@@ -125,12 +126,12 @@ export async function analyzeSymbol(symbol) {
 }
 
 /** 对多个 symbol 串行分析（避免 Binance 限频），返回摘要数组 */
-export async function analyzeSymbols(symbols, { onProgress } = {}) {
+export async function analyzeSymbols(symbols, { onProgress, force4h = false } = {}) {
   const results = [];
   for (let i = 0; i < symbols.length; i++) {
     const s = symbols[i];
     try {
-      results.push(await analyzeSymbol(s));
+      results.push(await analyzeSymbol(s, { force4h }));
     } catch (e) {
       results.push({ symbol: s, error: e.message });
     }

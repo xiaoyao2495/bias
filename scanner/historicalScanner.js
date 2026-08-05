@@ -11,13 +11,7 @@
  *   node scripts/scanBias.js BTCUSDT --start 2025-01-01 --end 2026-01-01 --step 6
  */
 import { getHistory } from "../data/binance.js";
-import { findSwings, analyzeSwings } from "../indicators/swing.js";
-import { buildStructure } from "../indicators/structure.js";
-import { computeLiquidity } from "../indicators/liquidity.js";
-import { computeDealingRange } from "../indicators/dealingRange.js";
-import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
-import { computeHtfDirection } from "../indicators/scenario.js";
-import { computeDailyBias } from "../engine/dailyBiasEngine.js";
+import { analyzeBias } from "../engine/analyzeBias.js";
 import { evaluateOutcome } from "./evaluator.js";
 
 // 数据窗口：4H 5000 根 ≈ 830 天（覆盖 2025 全年 + 前置历史），1D 2000 根 / 1W 400 根用于 HTF 方向
@@ -82,25 +76,13 @@ export async function scanHistory({ symbol, startTime, endTime, step = 6, target
   };
 }
 
-/** 在 4H bars[i] 收盘点跑一次完整 Bias 分析 + 未来评估（与 Case Replay 相同流程） */
+/** 在 4H bars[i] 收盘点跑一次完整 Bias 分析 + 未来评估（与 Case Replay / 实时监控共用 analyzeBias） */
 function analyzeAt(bars, daily, weekly, i, k, targetPct, windows) {
   const candles = bars.slice(0, i + 1); // 已收盘（closeTime <= k.closeTime）
   const price = k.close;
   const t = k.closeTime;
 
-  const day = daily.filter((c) => c.closeTime <= t);
-  const week = weekly.filter((c) => c.closeTime <= t);
-
-  const swings = findSwings(candles);
-  const labeled = analyzeSwings(swings);
-  const structure = buildStructure(labeled);
-  const liquidity = computeLiquidity(day, week, swings, 0.002, t);
-  const location = computeDealingRange(swings, structure, price);
-  const fvgs = findFvgs(candles);
-  const obs = findOrderBlocks(candles);
-  const pdArray = annotatePDArray({ fvg: fvgs.slice(-6), ob: obs.slice(-6) }, location, candles);
-  const htfDirection = computeHtfDirection(day, week, price);
-  const bias = computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection });
+  const { structure, location, bias } = analyzeBias({ candles, daily, weekly, price, time: t });
 
   const future = bars.slice(i + 1, i + 1 + maxWindow(windows));
   const ev = evaluateOutcome({
