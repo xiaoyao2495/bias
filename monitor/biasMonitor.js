@@ -27,6 +27,8 @@ import { computeLiquidity } from "../indicators/liquidity.js";
 import { computeDealingRange } from "../indicators/dealingRange.js";
 import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
 import { computeHtfDirection } from "../indicators/scenario.js";
+import { detectSweeps } from "../indicators/sweep.js";
+import { findDisplacements } from "../indicators/displacement.js";
 import { computeDailyBias } from "../engine/dailyBiasEngine.js";
 import { pathToFileURL } from "node:url";
 
@@ -63,6 +65,23 @@ export async function analyzeSymbol(symbol) {
   const htfDirection = computeHtfDirection(daily, weekly, price);
   const bias = computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection });
 
+  // P1-A：流动性扫损（最近 3 根已收盘 4H 刺破后收回）；目标含流动性池 + 外部结构高低点
+  const buyLevels = (liquidity.buySide || []).concat(
+    structure.externalSwingHigh != null ? [{ type: "EXTERNAL_HIGH", price: structure.externalSwingHigh }] : []
+  );
+  const sellLevels = (liquidity.sellSide || []).concat(
+    structure.externalSwingLow != null ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow }] : []
+  );
+  const sweep = detectSweeps(h4, buyLevels, sellLevels);
+
+  // P1-C：位移 K（最后一根位移 K 须在最近 3 根已收盘 4H 内才输出，用于收盘报告标注）
+  const dispList = findDisplacements(h4);
+  const lastDisp = dispList.length ? dispList[dispList.length - 1] : null;
+  const displacement =
+    lastDisp && lastClosed.closeTime - lastDisp.time <= 3 * 4 * 3600_000
+      ? { time: lastDisp.time, direction: lastDisp.direction, ratio: lastDisp.ratio }
+      : null;
+
   const decision = bias.decision || {};
   const planR = decision.planR ?? null;
   const quality = planR == null ? "-" : planR >= 1 ? "HIGH" : planR >= 0.5 ? "MEDIUM" : "LOW";
@@ -83,6 +102,8 @@ export async function analyzeSymbol(symbol) {
     scenario: bias.scenario ? bias.scenario.label : "-",
     confidence: bias.confidence ? bias.confidence.level : "-",
     confidenceScore: bias.confidence ? bias.confidence.score : null,
+    sweep, // { side, type, level, sweptPrice, close, time } | null（流动性扫损事件）
+    displacement, // { time, direction, ratio } | null（位移 K，最近 3 根内）
     quality,
     planR,
     decision: decision.decision || "-",

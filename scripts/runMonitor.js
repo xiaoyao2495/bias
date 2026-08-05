@@ -15,6 +15,7 @@
  *     confidence/decision 变化 → ℹ️ {SYMBOL} 4H Bias Updated
  *   4H 收盘报告 → 每根 4H 收线后（北京 00/04/08/12/16/20）即使无变化也推一次
  *     （记录在 monitor/closeReport.json，首轮全览已覆盖则不重复推）
+ *   流动性扫损 → ⚡ {SYMBOL} 扫损：刺破/跌破流动性位后收回（state.sweepTime 去重）
  *
  * 用法：
  *   node scripts/runMonitor.js                # 常驻：Top15 全量，自调度
@@ -84,10 +85,11 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       scenario: r.scenario,
       quality: r.quality,
       planR: r.planR,
+      sweepTime: r.sweep ? r.sweep.time : null, // 扫损事件去重（time 变化 = 新事件）
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
-    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, mss: r.mss, last4h: r.last4h, ...cmp, prev, cur };
+    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, mss: r.mss, last4h: r.last4h, sweep: r.sweep, displacement: r.displacement, ...cmp, prev, cur };
     overview.push(item);
     if (cmp.changed) changed.push(item);
   }
@@ -102,6 +104,13 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
         log(`[runMonitor] 已推送 ${item.symbol}（${item.changes.join(",")}）`);
       }
       log(`[runMonitor] 本轮完成: ${changed.length} 变化 / ${overview.length} 合约`);
+      // P1-A：流动性扫损事件（独立推送；state 无该事件记录 → 新扫损才推）
+      for (const item of overview) {
+        if (item.sweep && item.prev && item.prev.sweepTime !== item.sweep.time) {
+          await sendMarkdown(buildSweep(item), `${item.symbol} 扫损`);
+          log(`[runMonitor] 已推送 ${item.symbol} 扫损（${item.sweep.side} @ ${item.sweep.level}）`);
+        }
+      }
     }
     // 4H 收盘报告：每根 4H 收线后即使无状态变化也推一次（首轮全览已覆盖，只记录边界不推）
     const boundaryMs = latestBjBoundaryMs();
@@ -203,9 +212,40 @@ function buildCloseReport(overview) {
     if (!k || k.open == null) continue;
     const pct = ((k.close - k.open) / k.open) * 100;
     const up = k.close >= k.open;
-    lines.push(`**${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · ${ICON[r.cur.bias] || ""} ${r.cur.bias} · ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
+    const disp = r.displacement ? ` · 位移${r.displacement.direction === "UP" ? "↑" : "↓"}${r.displacement.ratio.toFixed(1)}x` : "";
+    lines.push(`**${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · ${ICON[r.cur.bias] || ""} ${r.cur.bias} · ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}${disp}`);
   }
   return lines.join("<br/>");
+}
+
+/** 扫损事件消息（⚡）：市场刚扫掉某流动性位后收回——"发生了什么"事件推送 */
+function buildSweep({ symbol, sweep, price }) {
+  const sideText = sweep.side === "BSL" ? "上方买方流动性（BSL）" : "下方卖方流动性（SSL）";
+  const levelText = sweepTypeLabel(sweep.type);
+  const sweptText = sweep.side === "BSL" ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回` : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
+  const lines = [
+    `**⚡ ${symbol} 流动性扫损**  🕐 ${nowHHMM()}`,
+    "",
+    `${sideText}被扫：${sweptText}，收 ${sweep.close}`,
+    `时间: ${new Date(sweep.time).toISOString().slice(0, 16).replace("T", " ")} · 现价 ${price}`,
+  ];
+  return lines.join("<br/>");
+}
+
+/** 流动性位类型 → 中文标签 */
+function sweepTypeLabel(type) {
+  return (
+    {
+      PDH: "昨日高点",
+      PDL: "昨日低点",
+      PWH: "上周高点",
+      PWL: "上周低点",
+      EQH: "等高点",
+      EQL: "等低点",
+      EXTERNAL_HIGH: "外部结构高点",
+      EXTERNAL_LOW: "外部结构低点",
+    }[type] || type
+  );
 }
 
 /** 首轮全览（紧凑，避免刷屏） */
