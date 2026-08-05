@@ -149,8 +149,7 @@ function buildOverview(list) {
   const lines = [`**4H Bias Monitor**  ${nowHHMM()}`, ""];
   for (const r of list) {
     lines.push(`**${r.symbol}** ${ICON[r.cur.bias] || ""} ${r.cur.bias}`);
-    lines.push(`Scenario: ${r.cur.scenario} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
-    lines.push(`机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
+    lines.push(`Scenario: ${r.cur.scenario} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
     lines.push("");
   }
   return lines.join("\n");
@@ -159,25 +158,17 @@ function buildOverview(list) {
 /** 状态变化消息（bias 翻转 → ⚠️，其余 → ℹ️） */
 function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore }) {
   const biasFlipped = changes.includes("bias");
-  const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**` : `**ℹ️ ${symbol} 4H Bias 更新**`;
-  const lines = [head, "", `🕐 ${nowHHMM()}`, ""];
+  const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**  🕐 ${nowHHMM()}` : `**ℹ️ ${symbol} 4H Bias 更新**  🕐 ${nowHHMM()}`;
+  const lines = [head, ""];
 
-  if (biasFlipped) {
-    lines.push(`${ICON[prev.bias] || ""} ${prev.bias} → ${ICON[cur.bias] || ""} ${cur.bias}`, "");
-  }
-  if (changes.includes("confidence")) {
-    lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
-  }
-  if (changes.includes("decision")) {
-    lines.push(`操作: ${prev.decision} → ${cur.decision}`);
-  }
-  if (!biasFlipped && cur.scenario) {
-    lines.push(`Scenario: ${cur.scenario}`);
-  }
+  if (biasFlipped) lines.push(`${ICON[prev.bias] || ""} ${prev.bias} → ${ICON[cur.bias] || ""} ${cur.bias}`, "");
+  if (changes.includes("confidence")) lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
+  if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);
+  if (!biasFlipped && cur.scenario) lines.push(`Scenario: ${cur.scenario}`);
   lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
   lines.push(`原因: ${reason}`);
   lines.push(`价格: ${price}`);
-  return lines.join("\n");
+  return lines.join(`\n`);
 }
 
 /** 北京时间 "2026-08-04 20:00" */
