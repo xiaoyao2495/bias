@@ -100,6 +100,8 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       log(`[runMonitor] 首轮全览已推送（${overview.length} 合约）`);
     } else {
       for (const item of changed) {
+        // 新加入合约（isNew）无 prev→cur 对比上下文，不推送（静默存状态，等下次变化再推）
+        if (item.isNew) continue;
         await sendMarkdown(buildChanged(item), `${item.symbol} Bias`);
         log(`[runMonitor] 已推送 ${item.symbol}（${item.changes.join(",")}）`);
       }
@@ -265,23 +267,11 @@ function buildOverview(list) {
  * 避免"结构失效"被误读为"方向概率低"。
  */
 function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mss }) {
-  // isNew（changes=["*"]）：合约首次进入监控（state 无记录），展示完整当前状态
-  const isNew = changes.includes("*");
-  const biasFlipped = isNew ? false : changes.includes("bias");
-  const head = isNew
-    ? `**ℹ️ ${symbol} 加入监控**  🕐 ${nowHHMM()}`
-    : biasFlipped
-      ? `**⚠️ ${symbol} 4H Bias 变化**  🕐 ${nowHHMM()}`
-      : `**ℹ️ ${symbol} 4H Bias 更新**  🕐 ${nowHHMM()}`;
+  const biasFlipped = changes.includes("bias");
+  const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**  🕐 ${nowHHMM()}` : `**ℹ️ ${symbol} 4H Bias 更新**  🕐 ${nowHHMM()}`;
   const lines = [head, ""];
 
-  if (isNew) {
-    // 新合约首条消息：Bias / Scenario / 信心度 / 操作 全量展示
-    lines.push(`${ICON[cur.bias] || ""} ${cur.bias}`, "");
-    if (cur.scenario) lines.push(`Scenario: ${cur.scenario}`);
-    lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
-    lines.push(`操作: ${cur.decision}`);
-  } else if (biasFlipped) {
+  if (biasFlipped) {
     lines.push(`${ICON[prev.bias] || ""} ${prev.bias} → ${ICON[cur.bias] || ""} ${cur.bias}`, "");
     // Change Reason：市场发生了什么（结构失效 = MSS 事件 → 突破保护位）
     if (structureStatus === "INVALIDATED" && mss) {
@@ -301,13 +291,11 @@ function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceSco
     }
     lines.push("");
   }
-  if (!isNew) {
-    if (changes.includes("confidence")) lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
-    else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
-    if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);
-    else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
-    if (!biasFlipped && cur.scenario) lines.push(`Scenario: ${cur.scenario}`);
-  }
+  if (changes.includes("confidence")) lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
+  else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
+  if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);
+  else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
+  if (!biasFlipped && cur.scenario) lines.push(`Scenario: ${cur.scenario}`);
   lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
   // 非 bias 变化时 reason 是可信度/空间原因；bias 变化时原因已在结构行解释
   if (!biasFlipped) lines.push(`原因: ${reason}`);
