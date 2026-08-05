@@ -220,8 +220,8 @@ function buildCloseReport(overview) {
   return lines.join("<br/>");
 }
 
-/** 扫损事件消息（⚡）：市场刚扫掉某流动性位后收回——"发生了什么"事件推送 */
-function buildSweep({ symbol, sweep, price }) {
+/** 扫损事件消息（⚡）：市场刚扫掉某流动性位后收回——带当前市场背景，帮助理解"在什么结构下发生" */
+function buildSweep({ symbol, sweep, price, cur, confidenceScore }) {
   const sideText = sweep.side === "BSL" ? "上方买方流动性（BSL）" : "下方卖方流动性（SSL）";
   const levelText = sweepTypeLabel(sweep.type);
   const sweptText = sweep.side === "BSL" ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回` : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
@@ -230,6 +230,12 @@ function buildSweep({ symbol, sweep, price }) {
     "",
     `${sideText}被扫：${sweptText}，收 ${sweep.close}`,
     `时间: ${new Date(sweep.time).toISOString().slice(0, 16).replace("T", " ")} · 现价 ${price}`,
+    "",
+    "市场背景:",
+    `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,
+    `Scenario: ${cur.scenario}`,
+    `信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`,
+    `操作: ${cur.decision}`,
   ];
   return lines.join("<br/>");
 }
