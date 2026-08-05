@@ -45,16 +45,22 @@ export async function analyzeSymbol(symbol) {
     getHistory(symbol, "4h", HISTORY["4h"]),
     getHistory(symbol, "1d", HISTORY["1d"]),
     getHistory(symbol, "1w", HISTORY["1w"]),
-    // 5m 用于流动性扫损检测（缓存 TTL 5 分钟，保证扫损事件的实时性）
-    getKlines(symbol, "5m", 100),
+    // 5m 用于流动性扫损/位移检测（辅助信息，缓存 TTL 5 分钟）；拉取失败降级为 []，
+    // 不阻断主分析（否则 5m 抖动会导致整个合约分析失败）
+    getKlines(symbol, "5m", 100).catch(() => []),
   ]);
 
   if (!h4.length) throw new Error(`${symbol} 无 4H 数据`);
   const lastK = h4[h4.length - 1];
   // 收盘报告需要"最后已收盘 4H"（最后一根若未收盘则取上一根），用于展示收于开盘上方/下方
   const lastClosed = lastK.closeTime <= Date.now() ? lastK : h4[h4.length - 2] || lastK;
-  const price = lastK.close;
+  const price4h = lastK.close; // 4H 末根收盘价（缓存下最多陈旧 4 小时）
   const time = lastK.closeTime;
+  // 核心判定与展示用实时价：5m 末根 close（进行中 5m 的 close = 当前最新成交价，TTL 5 分钟）。
+  // 修复 major：直接拿 4H 收盘价判结构失效/MSS/confidence/planR，最多延迟 4 小时才报；
+  // 5m 拉取失败时回退 4H 收盘价。
+  const price5m = m5.length ? m5[m5.length - 1].close : null;
+  const price = price5m ?? price4h;
 
   const swings = findSwings(h4);
   const labeled = analyzeSwings(swings);
@@ -75,7 +81,6 @@ export async function analyzeSymbol(symbol) {
   const sellLevels = (liquidity.sellSide || []).concat(
     structure.externalSwingLow != null ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow }] : []
   );
-  const price5m = m5.length ? m5[m5.length - 1].close : price; // 进行中 5m 的 close = 当前最新成交价
   const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48);
 
   // P1-C：位移 K（5m 粒度：最近 48 根 5m ≈ 4 小时内出现位移 K，用于收盘报告标注）

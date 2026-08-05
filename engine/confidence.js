@@ -33,7 +33,9 @@ export function computeConfidence({ bias, structure, structureStatus, location, 
     protectedValid: structureStatus === "VALID",
     liquidityClear: !!(draw && draw.primary),
     locationValid: location.context === "DISCOUNT_VALID" || location.context === "PREMIUM_VALID",
-    pdArrayAligned: !!(pdArray && pdArray.primary),
+    // aligned = 有顺位 primary 执行区 且 价格仍在区间内/紧贴（未远离已填充区），
+    // 避免"价格已跑远/已填充"的执行区仍给 +25 最强正因子导致信心度虚高
+    pdArrayAligned: !!(pdArray && pdArray.primary && price != null && withinRange(price, pdArray.primary)),
   };
 
   // 硬门槛：结构未确认 / 保护位失效 → 直接 LOW，无评分
@@ -107,6 +109,22 @@ export function computeConfidence({ bias, structure, structureStatus, location, 
 const NEAR_DRAW_PCT = 0.02; // 距目标 <2% 视为"目标就在眼前"（惯性最强）
 const WIDE_RANGE_PCT = 0.25; // 区间跨度 > 价格 25% 视为宽区间（防御性罚分）
 const LEVELS = { HIGH: 75, MEDIUM: 40 }; // score >= 75 → HIGH；>= 40 → MEDIUM；否则 LOW
+const PD_ARRAY_MARGIN = 0.02; // 执行区贴边容差：价格在区间 ±2% 内视为"仍在执行区附近"
+
+/** 价格是否位于执行区区间内/紧贴（aligned 语义：未远离执行区）。
+ * 有 top/bottom → 按区间 ±margin 判；只有参考价（简化输入）→ 按参考价贴近度判。 */
+function withinRange(price, primary, margin = PD_ARRAY_MARGIN) {
+  if (price == null || primary == null) return false;
+  const top = primary.top;
+  const bottom = primary.bottom;
+  if (top != null && bottom != null) {
+    return price >= bottom * (1 - margin) && price <= top * (1 + margin);
+  }
+  if (primary.price != null) {
+    return Math.abs(price - primary.price) / price <= margin;
+  }
+  return false;
+}
 
 /** 价格到 Draw Target 的相对距离（BULLISH 用上方目标，BEARISH 用下方目标） */
 function drawDist(bias, price, draw) {

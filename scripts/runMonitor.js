@@ -75,6 +75,9 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
   for (const r of results) {
     if (r.error) {
       console.error(`[runMonitor] ${r.symbol} 分析失败: ${r.error}`);
+      // 保留该合约旧状态：saveState 是全量写入，若不保留，失败合约会被清掉，
+      // 恢复后 compareState 视为 isNew 被静默跳过 → 漏推（major bug 修复）
+      if (prevState[r.symbol]) nextState[r.symbol] = prevState[r.symbol];
       continue;
     }
     const prev = prevState[r.symbol] || null;
@@ -85,7 +88,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       scenario: r.scenario,
       quality: r.quality,
       planR: r.planR,
-      sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = K开盘时间_方向，一根 4H 内同一侧只推一次）
+      sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = 5m K 开盘时间_方向，同一根 5m 内同一侧只推一次）
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
@@ -227,8 +230,8 @@ function buildSweep({ symbol, sweep, price, cur, confidenceScore }) {
   const sweptText = sweep.side === "BSL" ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回` : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
   const tag = sweep.realtime ? "实时" : "已确认";
   const timeText = sweep.realtime
-    ? `检测于 ${nowHHMM()}（本根 4H 进行中）`
-    : `时间: ${new Date(sweep.closedTime).toISOString().slice(0, 16).replace("T", " ")}（已收盘确认）`;
+    ? `检测于 ${nowHHMM()}（本根 5m 进行中）`
+    : `时间: ${bjTime(sweep.closedTime)}（已收盘确认）`;
   const lines = [
     `**⚡ ${symbol} 流动性扫损（${tag}）**  🕐 ${nowHHMM()}`,
     "",
@@ -330,6 +333,18 @@ function now() {
 function nowHHMM() {
   return new Date().toLocaleString("zh-CN", {
     timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+/** 时间戳 → 北京时间 "MM-DD hh:mm"（与消息其他时间统一北京时间，避免 UTC/北京混用） */
+function bjTime(ms) {
+  return new Date(ms).toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    month: "2-digit",
+    day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
