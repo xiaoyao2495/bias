@@ -79,14 +79,14 @@ test("buildSweep: BSL 实时 — 刺破上方流动性且现价收回", () => {
   assert.match(msg, /上方买方流动性（BSL）被扫：刺破 昨日高点 105（高 106）后收回，收 104/);
 });
 
-test("buildCloseReport: 收上/收下幅度 + 位移标注", () => {
+test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据）", () => {
   const msg = buildCloseReport([
-    { symbol: "BTCUSDT", last4h: { open: 100, close: 101.2 }, displacement: { direction: "UP", ratio: 2 }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 52 },
+    { symbol: "BTCUSDT", last4h: { open: 100, close: 101.2 }, displacement: { direction: "UP", ratio: 2, structureBreak: { type: "BOS", direction: "UP", level: 101.5 }, fvg: { top: 101.5, bottom: 99.9 } }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 52 },
     { symbol: "ETHUSDT", last4h: { open: 100, close: 99.5 }, displacement: null, cur: { bias: "BEARISH", confidence: "LOW" }, confidenceScore: 10 },
   ]);
   assert.match(msg, /\*\*4H 收盘报告\*\*/);
   assert.match(msg, /本根 4H 收盘/); // 标题含 收线 视角
-  assert.match(msg, /\*\*BTCUSDT\*\* 收上 \+1.20% · 🟢 BULLISH · MEDIUM 52 · 位移↑2.0x/);
+  assert.match(msg, /\*\*BTCUSDT\*\* 收上 \+1.20% · 🟢 BULLISH · MEDIUM 52 · 位移↑2.0x（BOS 101.5，FVG 99.9-101.5）/);
   assert.match(msg, /\*\*ETHUSDT\*\* 收下 -0.50% · 🔴 BEARISH · LOW 10/);
 });
 

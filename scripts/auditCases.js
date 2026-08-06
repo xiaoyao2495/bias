@@ -17,13 +17,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getHistory } from "../data/binance.js";
-import { findSwings, analyzeSwings } from "../indicators/swing.js";
-import { buildStructure } from "../indicators/structure.js";
-import { computeLiquidity } from "../indicators/liquidity.js";
-import { computeDealingRange } from "../indicators/dealingRange.js";
-import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
-import { computeHtfDirection } from "../indicators/scenario.js";
-import { computeDailyBias } from "../engine/dailyBiasEngine.js";
+import { analyzeBias } from "../engine/analyzeBias.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CASES_DIR = join(__dirname, "..", "cases");
@@ -47,16 +41,15 @@ async function analyzeOne(symbol, replayTime) {
   const week = sliceToTime(weekly, replayTime);
 
   const price = candles4h[candles4h.length - 1].close;
-  const swings = findSwings(candles4h);
-  const labeled = analyzeSwings(swings);
-  const structure = buildStructure(labeled);
-  const liquidity = computeLiquidity(day, week, swings, 0.002, replayTime);
-  const location = computeDealingRange(swings, structure, price);
-  const fvgs = findFvgs(candles4h);
-  const obs = findOrderBlocks(candles4h);
-  const pdArray = annotatePDArray({ fvg: fvgs.slice(-6), ob: obs.slice(-6) }, location, candles4h);
-  const htfDirection = computeHtfDirection(day, week, price);
-  const bias = computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection });
+  // 共用分析链路（与 replayCase/实时监控一致，engine/analyzeBias.js）：
+  // 内部按 replayTime 截断日/周线并注入 htfDirection，回放与审计结果一致
+  const { structure, liquidity, location, bias } = analyzeBias({
+    candles: candles4h,
+    daily: day,
+    weekly: week,
+    price,
+    time: replayTime,
+  });
   return { symbol, replayTime, price, structure, liquidity, location, bias };
 }
 

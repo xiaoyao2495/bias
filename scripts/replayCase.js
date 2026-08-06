@@ -19,13 +19,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getHistory } from "../data/binance.js";
-import { findSwings, analyzeSwings } from "../indicators/swing.js";
-import { buildStructure } from "../indicators/structure.js";
-import { computeLiquidity } from "../indicators/liquidity.js";
-import { computeDealingRange } from "../indicators/dealingRange.js";
-import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
-import { computeHtfDirection } from "../indicators/scenario.js";
-import { computeDailyBias } from "../engine/dailyBiasEngine.js";
+import { analyzeBias } from "../engine/analyzeBias.js";
 import { formatReport } from "../report/formatter.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -70,29 +64,16 @@ async function main() {
 
   const price = candles4h[candles4h.length - 1].close;
 
-  // 1. Structure
-  const swings = findSwings(candles4h);
-  const labeled = analyzeSwings(swings);
-  const structure = buildStructure(labeled);
-
-  // 2. Liquidity（注入回放时间，只认已收盘的日/周 K）
-  const liquidity = computeLiquidity(day, week, swings, 0.002, replayTime);
-
-  // 3. Dealing Range（External Range V1：按结构方向取推动段）
-  const location = computeDealingRange(swings, structure, price);
-
-  // 4. PD Array（V1.6：标注执行属性，作为执行区域，不参与 bias 判定）
-  const fvgs = findFvgs(candles4h);
-  const obs = findOrderBlocks(candles4h);
-  const pdArray = annotatePDArray(
-    { fvg: fvgs.slice(-6), ob: obs.slice(-6) },
-    location,
-    candles4h
-  );
-
-  // 5. Daily Bias（V2.0：注入 HTF 方向用于 Scenario 判定）
-  const htfDirection = computeHtfDirection(day, week, price);
-  const bias = computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection });
+  // 共用分析链路（与实时监控/历史扫描一致，engine/analyzeBias.js）：
+  // 内部按 replayTime 截断日/周线并注入 htfDirection，保证回放与实时结果一致；
+  // 后续指标/confidence 更新只需改 analyzeBias 一处，回放/审计自动同步
+  const { structure, liquidity, location, pdArray, bias } = analyzeBias({
+    candles: candles4h,
+    daily: day,
+    weekly: week,
+    price,
+    time: replayTime,
+  });
 
   const report = formatReport({ symbol, replayTime, structure, liquidity, location, pdArray, bias });
 

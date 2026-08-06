@@ -5,13 +5,8 @@
  *   node scripts/analyze.js BTCUSDT [limit]
  */
 import { get4hKlines, getDailyKlines, getWeeklyKlines } from "../data/binance.js";
-import { findSwings, analyzeSwings } from "../indicators/swing.js";
-import { buildStructure } from "../indicators/structure.js";
-import { computeLiquidity } from "../indicators/liquidity.js";
-import { computeDealingRange } from "../indicators/dealingRange.js";
-import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
-import { computeDailyBias } from "../engine/dailyBiasEngine.js";
 import { detectStructureEvents } from "../indicators/mss.js";
+import { analyzeBias } from "../engine/analyzeBias.js";
 import { formatReport } from "../report/formatter.js";
 
 const symbol = process.argv[2] || "BTCUSDT";
@@ -28,28 +23,15 @@ async function main() {
 
   const price = candles4h[candles4h.length - 1].close;
 
-  // 1. Structure
-  const swings = findSwings(candles4h);
-  const labeled = analyzeSwings(swings);
-  const structure = buildStructure(labeled);
-
-  // 2. Liquidity
-  const liquidity = computeLiquidity(daily, weekly, swings);
-
-  // 3. Dealing Range（External Range V1：按结构方向取推动段）
-  const location = computeDealingRange(swings, structure, price);
-
-  // 4. PD Array（V1.6：标注执行属性，作为执行区域，不参与 bias 判定）
-  const fvgs = findFvgs(candles4h);
-  const obs = findOrderBlocks(candles4h);
-  const pdArray = annotatePDArray(
-    { fvg: fvgs.slice(-6), ob: obs.slice(-6) },
-    location,
-    candles4h
-  );
-
-  // 5. Daily Bias
-  const bias = computeDailyBias({ structure, liquidity, location, price, pdArray });
+  // 共用分析链路（与监控/回放一致，engine/analyzeBias.js）：内部按 time 截断日/周线
+  // 并注入 htfDirection 用于 Scenario 判定——此前缺该参数导致 HTF 恒为 NEUTRAL，与监控结果不一致
+  const { structure, liquidity, location, pdArray, bias } = analyzeBias({
+    candles: candles4h,
+    daily,
+    weekly,
+    price,
+    time: candles4h[candles4h.length - 1].closeTime,
+  });
 
   // P1-B：MSS / BOS（4H 环境层，周期无关指标；传入当前价判断"哪个 swing 被打破"）
   const mss = detectStructureEvents(candles4h, { price });

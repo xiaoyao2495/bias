@@ -84,11 +84,12 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   }
 
   // P1-C：位移 K（5m 粒度：最近 48 根 5m ≈ 4 小时内出现位移 K，用于收盘报告标注）
+  // 保留三条件证据（structureBreak/fvg），供消息层展示"为什么算 ICT 位移"而非仅凭大实体
   const dispList = findDisplacements(m5);
   const lastDisp = dispList.length ? dispList[dispList.length - 1] : null;
   const displacement =
     lastDisp && m5[m5.length - 1].closeTime - lastDisp.time <= 48 * 5 * 60_000
-      ? { time: lastDisp.time, direction: lastDisp.direction, ratio: lastDisp.ratio }
+      ? { time: lastDisp.time, direction: lastDisp.direction, ratio: lastDisp.ratio, structureBreak: lastDisp.structureBreak, fvg: lastDisp.fvg }
       : null;
 
   const decision = bias.decision || {};
@@ -113,7 +114,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     confidenceScore: bias.confidence ? bias.confidence.score : null,
     sweep, // { side, type, level, sweptPrice, close, time } | null（流动性扫损事件）
     mss5m, // { direction, lastEvent } | null（5m 层最近 MSS/BOS 事件，扫损消息标注）
-    displacement, // { time, direction, ratio } | null（位移 K，最近 3 根内）
+    displacement, // { time, direction, ratio, structureBreak, fvg } | null（位移 K，最近 4 小时内，三条件证据齐备）
     quality,
     planR,
     decision: decision.decision || "-",

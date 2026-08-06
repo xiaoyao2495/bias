@@ -246,7 +246,9 @@ export function buildCloseReport(overview) {
     if (!k || k.open == null) continue;
     const pct = ((k.close - k.open) / k.open) * 100;
     const up = k.close >= k.open;
-    const disp = r.displacement ? ` · 位移${r.displacement.direction === "UP" ? "↑" : "↓"}${r.displacement.ratio.toFixed(1)}x` : "";
+    const disp = r.displacement
+      ? ` · 位移${r.displacement.direction === "UP" ? "↑" : "↓"}${r.displacement.ratio.toFixed(1)}x（${dispEvidence(r.displacement)}）`
+      : "";
     lines.push(`**${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · ${ICON[r.cur.bias] || ""} ${r.cur.bias} · ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}${disp}`);
   }
   return lines.join("<br/>");
@@ -280,6 +282,19 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
   lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   lines.push(`操作: ${cur.decision}`);
   return lines.join("<br/>");
+}
+
+/** 位移证据摘要：结构突破位（BOS）+ 缺口区间（FVG），让用户确认是否真为 ICT 三条件位移 */
+function dispEvidence(d) {
+  const parts = [];
+  if (d.structureBreak && d.structureBreak.level != null) parts.push(`BOS ${fmtPrice(d.structureBreak.level)}`);
+  if (d.fvg && d.fvg.top != null && d.fvg.bottom != null) parts.push(`FVG ${fmtPrice(d.fvg.bottom)}-${fmtPrice(d.fvg.top)}`);
+  return parts.join("，");
+}
+
+/** 价格显示：整数原样，小数保留 2 位去尾零 */
+function fmtPrice(n) {
+  return String(Number(n.toFixed(2)));
 }
 
 /** 流动性位类型 → 中文标签 */
