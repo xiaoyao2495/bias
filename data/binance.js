@@ -16,9 +16,10 @@
  *       BTC/ETH 等传统合约永续与现货结构几乎一致，杠杆代币/商品永续只在 fapi 存在。
  *
  * K 线格式（统一）：
- *   { time, open, high, low, close, closeTime }
+ *   { time, open, high, low, close, closeTime, quoteVol }
  *   time      — 开盘时间 (ms)
  *   closeTime — 收盘时间 (ms)，用于判断该 K 线是否已收盘
+ *   quoteVol  — 成交量（USDT 成交额），数据驱动 Killzone（活跃时段）用
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
@@ -53,6 +54,7 @@ function mapKline(k) {
     high: +k[2],
     low: +k[3],
     close: +k[4],
+    quoteVol: +k[7] || 0, // 成交量（USDT 成交额），数据驱动 Killzone 用；旧缓存缺字段时为 0
     closeTime: k[6],
   };
 }

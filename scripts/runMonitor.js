@@ -28,7 +28,6 @@ import { getTopVolumeSymbols } from "../monitor/topVolume.js";
 import { analyzeSymbols } from "../monitor/biasMonitor.js";
 import { loadState, saveState, compareState, cleanupState } from "../monitor/state.js";
 import { sendMarkdown } from "../monitor/dingTalk.js";
-import { killzoneOfK } from "../indicators/killzone.js";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,10 +55,10 @@ const EXCLUDE_SYMBOLS = ["SOLUSDT"];
 const ICON = { BULLISH: "🟢", BEARISH: "🔴", NEUTRAL: "⚪" };
 const BJ_OFFSET_MS = 8 * 3600_000;
 
-/** Killzone 展示：伦敦 Killzone（14:00-17:00） */
+/** Session 展示（数据驱动活跃窗口）：活跃窗口 20:00-24:00（占比 23.4%） */
 function sessionText(s) {
   if (!s) return null;
-  return `${s.cn} Killzone（${String(s.start).padStart(2, "0")}:00-${String(s.end).padStart(2, "0")}:00）`;
+  return `活跃窗口 ${String(s.start).padStart(2, "0")}:00-${String(s.end).padStart(2, "0")}:00（占比 ${s.ratio}%）`;
 }
 
 // 中文化（交互信息规范）：ICT 术语标签（Scenario/Bias 等）保留英文，标签值/原因内容翻译
@@ -260,9 +259,9 @@ export function buildCloseReport(overview) {
   const boundary = new Date(latestBjBoundaryMs());
   const bjBoundary = new Date(boundary.getTime() + BJ_OFFSET_MS);
   const label = `${String(bjBoundary.getUTCHours()).padStart(2, "0")}:00`;
-  // 刚收线那根 4H（[boundary-4h, boundary)）覆盖的主要 Killzone（ICT 2022 Session 标注）
-  const kz = killzoneOfK({ time: boundary.getTime() - 4 * 3600_000, closeTime: boundary.getTime() });
-  const kzText = kz ? `${kz.cn} Killzone` : "非 Killzone 时段";
+  // 数据驱动后无全局 Killzone 窗口：统计本时段处于自身活跃窗口的合约数，反映整体活跃度
+  const activeCount = overview.filter((r) => r.session).length;
+  const kzText = `本时段 ${activeCount}/${overview.length} 合约处于活跃窗口`;
   const lines = [`**4H 收盘报告** · ${kzText}（北京 ${label} 收线）`, `本根 4H 收盘：`, ""];
   for (const r of overview) {
     const k = r.last4h;

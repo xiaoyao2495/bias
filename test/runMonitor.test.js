@@ -49,12 +49,12 @@ test("buildChanged: Scenario 值 + 原因英译中（ETHUSDT 08-06 通知场景�
     symbol: "ETHUSDT", price: 1910.86, reason: "Enough upside room with acceptable direction probability",
     changes: ["confidence", "decision"],
     prev: { ...basePrev, bias: "BULLISH" },
-    cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", quality: "HIGH", planR: 1.26, scenario: "BULLISH_REVERSAL_ATTEMPT", session: { name: "LONDON", cn: "伦敦", start: 14, end: 17 } },
+    cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", quality: "HIGH", planR: 1.26, scenario: "BULLISH_REVERSAL_ATTEMPT", session: { start: 20, end: 24, ratio: 28.6 } },
     confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
   });
   assert.match(msg, /Scenario: 多头反转尝试/);
   assert.match(msg, /原因: 方向概率可接受且上方空间充足/);
-  assert.match(msg, /Session: 伦敦 Killzone（14:00-17:00）/);
+  assert.match(msg, /Session: 活跃窗口 20:00-24:00（占比 28.6%）/);
 });
 
 test("buildSweep: SSL 已收盘确认 — 侧/位/价/回收/背景字段齐全", () => {

@@ -24,7 +24,7 @@ import { getHistory, getKlines } from "../data/binance.js";
 import { detectSweeps } from "../indicators/sweep.js";
 import { findDisplacements } from "../indicators/displacement.js";
 import { detectStructureEvents } from "../indicators/mss.js";
-import { killzoneOfK } from "../indicators/killzone.js";
+import { computeActiveWindows, killzoneOfK } from "../indicators/killzone.js";
 import { analyzeBias } from "../engine/analyzeBias.js";
 import { pathToFileURL } from "node:url";
 
@@ -39,13 +39,16 @@ const HISTORY = { "4h": 5000, "1d": 2000, "1w": 400 };
  * @returns {Promise<Object>} 摘要对象（字段见 analyzeSymbol 返回）
  */
 export async function analyzeSymbol(symbol, { force4h = false } = {}) {
-  const [h4, daily, weekly, m5] = await Promise.all([
+  const [h4, daily, weekly, m5, h1] = await Promise.all([
     getHistory(symbol, "4h", HISTORY["4h"], { force: force4h }),
     getHistory(symbol, "1d", HISTORY["1d"]),
     getHistory(symbol, "1w", HISTORY["1w"]),
     // 5m 用于流动性扫损/位移检测（辅助信息，缓存 TTL 5 分钟）；拉取失败降级为 []，
     // 不阻断主分析（否则 5m 抖动会导致整个合约分析失败）
     getKlines(symbol, "5m", 100).catch(() => []),
+    // 1h 用于数据驱动 Killzone（活跃窗口）：近 30 天成交量分布，缓存 TTL 4h（分布短期稳定，
+    // 无需每轮重算）；拉取失败降级为 [] → 活跃窗口空 → Session 显示"非 Killzone"
+    getKlines(symbol, "1h", 720).catch(() => []),
   ]);
 
   if (!h4.length) throw new Error(`${symbol} 无 4H 数据`);
@@ -101,8 +104,9 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     symbol,
     time: new Date(time).toISOString().slice(0, 16).replace("T", " "),
     price,
-    // 当前 4H K（末根，可进行中）覆盖的主要 Killzone（ICT 2022 Session 背景，供通知展示）
-    session: killzoneOfK(lastK), // { name, cn, start, end } | null
+    // 数据驱动 Killzone（真实活跃窗口）：1h 成交量聚合 → 当前 4H K 覆盖的活跃窗口
+    // { start, end, ratio } | null（ratio = 窗口成交量占比%）；无 1h 数据 → null
+    session: h1.length >= 24 ? killzoneOfK(lastK, computeActiveWindows(h1)) : null,
     // 最后已收盘 4H（收盘报告用：收于开盘上方/下方）
     last4h: { open: lastClosed.open, close: lastClosed.close, time: lastClosed.closeTime },
     // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导
@@ -170,7 +174,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         }
         console.log(`${r.symbol}  ${r.price}`);
         console.log(`Bias: ${icon[r.bias] || ""} ${r.bias}`);
-        console.log(`Session: ${r.session ? `${r.session.cn} Killzone` : "非 Killzone"}`);
+        console.log(`Session: ${r.session ? `活跃窗口 ${String(r.session.start).padStart(2, "0")}:00-${String(r.session.end).padStart(2, "0")}:00（占比 ${r.session.ratio}%）` : "非 Killzone"}`);
         console.log(`Scenario: ${r.scenario}`);
         console.log(`信心度: ${r.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
         console.log(`机会质量: ${r.quality}${r.planR != null ? ` (planR ${r.planR.toFixed(2)})` : ""}`);
