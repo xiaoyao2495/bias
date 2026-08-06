@@ -1,7 +1,8 @@
 /**
- * displacement.test.js — 位移 K 检测（P1-C）
+ * displacement.test.js — 位移 K 检测（ICT 2022 三条件）
  *
- * 覆盖 findDisplacements：实体 ≥ 阈值倍 × 前 lookback 根平均实体 → 标记位移 K（UP/DOWN）。
+ * 覆盖 findDisplacements：BODY（实体 ≥ 阈值倍 × 前 lookback 根平均实体）
+ * + STRUCTURE BREAK（收盘越过最近 Swing High/Low）+ FVG（相邻同向缺口）三条件同时满足。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -9,64 +10,115 @@ import { findDisplacements } from "../indicators/displacement.js";
 
 const M5 = 300_000;
 const now = Date.now();
-/** 已收盘 5m K：open=100，body=|close-100| */
-const k = (i, close, { closeTime } = {}) => ({
+/** 全字段 K：open/close 控制实体，high/low 控制 swing 与 FVG */
+const k = (i, open, close, high, low, { closeTime } = {}) => ({
   time: i * M5,
-  open: 100,
-  high: Math.max(100, close) + 1,
-  low: Math.min(100, close) - 1,
+  open,
   close,
-  closeTime: closeTime ?? now - (100 - i) * M5,
+  high,
+  low,
+  closeTime: closeTime ?? now - (300 - i) * M5,
 });
 
-test("UP 位移：实体 ≥ 1.5× 前 20 根平均实体，close ≥ open", () => {
-  const h5m = Array.from({ length: 21 }, (_, i) => k(i, i < 20 ? 101 : 105)); // 前 20 根 body=1，第 21 根 body=5
-  const out = findDisplacements(h5m);
+/**
+ * UP 场景：index 8 形成 Swing High 101.5（两侧更低）；10-19 低位整理（无新 swing high，
+ * 且高点给 FVG 留出下沿）；index 20 大阳线 body=6 突破 101.5；index 21 小阳线构成 FVG。
+ */
+function upScenario() {
+  const c = [];
+  for (let i = 0; i < 20; i++) {
+    if (i === 8) c.push(k(i, 99.5, 100.5, 101.5, 99.0)); // Swing High 101.5
+    else if (i >= 10) c.push(k(i, 98.8, 99.8, 99.8, 98.7)); // 低位整理
+    else c.push(k(i, 99.5, 100.5, 101.0, 99.0));
+  }
+  c.push(k(20, 100, 106, 106, 99.9)); // 位移大阳线：close 106 > 101.5
+  c.push(k(21, 106, 106.4, 106.8, 105.8)); // 小阳线低点 105.8 > 邻居高点 → bullish FVG
+  return c;
+}
+
+/** DOWN 场景：index 8 形成 Swing Low 98.5；index 20 大阴线 body=6 跌破；index 21 构成 bearish FVG */
+function downScenario() {
+  const c = [];
+  for (let i = 0; i < 20; i++) {
+    if (i === 8) c.push(k(i, 99.0, 98.5, 100.0, 98.5)); // Swing Low 98.5
+    else if (i >= 10) c.push(k(i, 99.5, 100.5, 101.2, 100.0)); // 高位整理
+    else c.push(k(i, 99.0, 100.0, 101.0, 99.0));
+  }
+  c.push(k(20, 100, 94, 100.2, 94)); // 位移大阴线：close 94 < 98.5
+  c.push(k(21, 99.4, 99.4, 99.8, 99.0)); // 小阴线高点 99.8 < 邻居低点 → bearish FVG
+  return c;
+}
+
+test("UP：BODY + STRUCTURE BREAK + FVG 三条件齐备 → 输出位移（含证据字段）", () => {
+  const out = findDisplacements(upScenario());
   assert.equal(out.length, 1);
   assert.equal(out[0].direction, "UP");
-  assert.equal(out[0].body, 5);
-  assert.equal(out[0].avgBody, 1);
-  assert.equal(out[0].ratio, 5);
-  assert.equal(out[0].close, 105);
+  assert.equal(out[0].body, 6);
+  assert.equal(out[0].ratio, 6); // 前 20 根 body 均 1 → avgBody=1
+  assert.equal(out[0].close, 106);
+  // 结构突破：最近 Swing High 101.5（index 8）
+  assert.deepEqual(out[0].structureBreak, { type: "BOS", direction: "UP", level: 101.5, swingIndex: 8 });
+  // FVG：存在且 top > bottom
+  assert.ok(out[0].fvg && out[0].fvg.top > out[0].fvg.bottom);
+  assert.equal(out[0].time, now - (300 - 20) * M5);
 });
 
-test("DOWN 位移：大阴线实体 → direction DOWN", () => {
-  const h5m = Array.from({ length: 21 }, (_, i) => k(i, i < 20 ? 101 : 95)); // body 5 向下
-  const out = findDisplacements(h5m);
+test("DOWN：三条件齐备 → 跌破最近 Swing Low + bearish FVG", () => {
+  const out = findDisplacements(downScenario());
   assert.equal(out.length, 1);
   assert.equal(out[0].direction, "DOWN");
-  assert.equal(out[0].ratio, 5);
+  assert.equal(out[0].body, 6);
+  assert.ok(out[0].ratio >= 5); // avgBody = (19×1 + 0.5)/20 = 0.975
+  assert.deepEqual(out[0].structureBreak, { type: "BOS", direction: "DOWN", level: 98.5, swingIndex: 8 });
+  assert.ok(out[0].fvg && out[0].fvg.top > out[0].fvg.bottom);
 });
 
-test("未达阈值 → 空数组（全部均等实体）", () => {
-  const h5m = Array.from({ length: 30 }, (_, i) => k(i, 101)); // 全部 body=1 → ratio 1 < 1.5
-  assert.deepEqual(findDisplacements(h5m), []);
+test("仅 BODY 达标、未破结构（close 未越过最近 Swing High）→ 空", () => {
+  const c = [];
+  for (let i = 0; i < 20; i++) {
+    if (i === 8) c.push(k(i, 104, 105, 105.5, 103.5)); // Swing High 105.5
+    else c.push(k(i, 103, 104, 104.5, 102.5));
+  }
+  c.push(k(20, 99, 104.2, 104.5, 98.8)); // body 5.2，但 close 104.2 < 105.5
+  c.push(k(21, 104.2, 104.6, 105.0, 103.6));
+  assert.deepEqual(findDisplacements(c), []);
+});
+
+test("BODY + BREAK 达标但无 FVG → 空", () => {
+  const c = [];
+  for (let i = 0; i < 20; i++) {
+    if (i === 8) c.push(k(i, 103, 104, 103.5, 102.0)); // Swing High 103.5
+    else c.push(k(i, 102, 103, 103.0, 101.0));
+  }
+  c.push(k(20, 100, 105, 105.5, 102.0)); // close 105 > 103.5 破结构，body 5
+  c.push(k(21, 104.5, 104.8, 105.0, 102.5)); // 低点 102.5 ≤ 邻居高点 → 无缺口
+  assert.deepEqual(findDisplacements(c), []);
 });
 
 test("K 线数量不足 lookback → 空数组", () => {
-  const h5m = Array.from({ length: 19 }, (_, i) => k(i, 101));
-  assert.deepEqual(findDisplacements(h5m), []);
+  const c = Array.from({ length: 19 }, (_, i) => k(i, 100, 101, 102, 99));
+  assert.deepEqual(findDisplacements(c), []);
 });
 
 test("avgBody = 0（全部平盘）→ 跳过不报错", () => {
-  const h5m = Array.from({ length: 25 }, (_, i) => k(i, 100)); // body=0，avgBody=0
-  assert.deepEqual(findDisplacements(h5m), []);
-});
-
-test("多根位移 → 时间升序输出", () => {
-  const h5m = Array.from({ length: 23 }, (_, i) => k(i, i < 20 ? 101 : 105)); // i=20、21、22 均 body=5
-  const out = findDisplacements(h5m);
-  assert.equal(out.length, 3);
-  assert.ok(out[0].time < out[1].time && out[1].time < out[2].time);
-  assert.equal(out[0].ratio, 5); // 首根 avgBody 纯基线 → ratio 恰为 5
-  assert.ok(out[2].ratio < out[0].ratio); // 后续 avgBody 含前一根大实体 → ratio 衰减
+  const c = Array.from({ length: 25 }, (_, i) => k(i, 100, 100, 101, 99));
+  assert.deepEqual(findDisplacements(c), []);
 });
 
 test("进行中 K（closeTime 未来）不参与检测", () => {
-  const h5m = [
-    ...Array.from({ length: 21 }, (_, i) => k(i, i < 20 ? 101 : 105)),
-    k(21, 105, { closeTime: now + M5 }), // 进行中，应被过滤
-  ];
-  const out = findDisplacements(h5m);
-  assert.equal(out.length, 1); // 只有已收盘的第 21 根
+  const c = [...upScenario(), k(22, 106.5, 107, 107.5, 106.2, { closeTime: now + M5 })];
+  const out = findDisplacements(c);
+  assert.equal(out.length, 1); // 只有已收盘的位移 K
+});
+
+test("多根位移 → 时间升序输出（各自独立满足三条件）", () => {
+  const c = upScenario();
+  c.push(k(22, 106, 112, 112, 106)); // 第二根位移：body 6，close 112 > 101.5
+  c.push(k(23, 112, 112.5, 113, 111.5)); // 低点 111.5 > 邻居高点 106.8 → FVG
+  const out = findDisplacements(c);
+  assert.equal(out.length, 2);
+  assert.ok(out[0].time < out[1].time);
+  assert.equal(out[0].direction, "UP");
+  assert.equal(out[1].direction, "UP");
+  assert.ok(out[0].ratio > out[1].ratio); // 第二根 avgBody 含第一根大实体 → ratio 衰减
 });
