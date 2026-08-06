@@ -28,6 +28,7 @@ import { getTopVolumeSymbols } from "../monitor/topVolume.js";
 import { analyzeSymbols } from "../monitor/biasMonitor.js";
 import { loadState, saveState, compareState, cleanupState } from "../monitor/state.js";
 import { sendMarkdown } from "../monitor/dingTalk.js";
+import { killzoneOfK } from "../indicators/killzone.js";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,6 +55,12 @@ const TOP_N = 10;
 const EXCLUDE_SYMBOLS = ["SOLUSDT"];
 const ICON = { BULLISH: "🟢", BEARISH: "🔴", NEUTRAL: "⚪" };
 const BJ_OFFSET_MS = 8 * 3600_000;
+
+/** Killzone 展示：伦敦 Killzone（14:00-17:00） */
+function sessionText(s) {
+  if (!s) return null;
+  return `${s.cn} Killzone（${String(s.start).padStart(2, "0")}:00-${String(s.end).padStart(2, "0")}:00）`;
+}
 
 // 中文化（交互信息规范）：ICT 术语标签（Scenario/Bias 等）保留英文，标签值/原因内容翻译
 const SCENARIO_CN = {
@@ -115,6 +122,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       confidence: r.confidence,
       decision: r.decisionLabel,
       scenario: r.scenario,
+      session: r.session, // ICT Killzone 背景（通知展示）
       quality: r.quality,
       planR: r.planR,
       sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = 5m K 开盘时间_方向，同一根 5m 内同一侧只推一次）
@@ -244,24 +252,18 @@ function saveCloseReport(boundaryMs) {
   writeFileSync(CLOSE_REPORT_FILE, JSON.stringify({ lastBoundary: boundaryMs }));
 }
 
-/** 4H 边界对应的时段（北京时间，ICT 简化标注） */
-function sessionOfBjHour(h) {
-  if (h >= 8 && h < 16) return "亚洲";
-  if (h >= 16 && h < 20) return "伦敦";
-  return "纽约";
-}
-
 /**
  * 4H 收盘报告：每根 4H 收线后的固定状态播报（即使无变化也推）。
  * 每合约一行：收于开盘上方/下方 + 幅度 + 当前 Bias + 信心度（ICT Daily Bias 的 open/close 视角）。
  */
 export function buildCloseReport(overview) {
-  const bj = new Date(Date.now() + BJ_OFFSET_MS);
-  const bjHour = bj.getUTCHours();
   const boundary = new Date(latestBjBoundaryMs());
   const bjBoundary = new Date(boundary.getTime() + BJ_OFFSET_MS);
   const label = `${String(bjBoundary.getUTCHours()).padStart(2, "0")}:00`;
-  const lines = [`**4H 收盘报告** · ${sessionOfBjHour(bjHour)}时段（北京 ${label} 收线）`, `本根 4H 收盘：`, ""];
+  // 刚收线那根 4H（[boundary-4h, boundary)）覆盖的主要 Killzone（ICT 2022 Session 标注）
+  const kz = killzoneOfK({ time: boundary.getTime() - 4 * 3600_000, closeTime: boundary.getTime() });
+  const kzText = kz ? `${kz.cn} Killzone` : "非 Killzone 时段";
+  const lines = [`**4H 收盘报告** · ${kzText}（北京 ${label} 收线）`, `本根 4H 收盘：`, ""];
   for (const r of overview) {
     const k = r.last4h;
     if (!k || k.open == null) continue;
@@ -292,6 +294,7 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
     "",
     "市场背景:",
     `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,
+    `Session: ${sessionText(cur.session) || "非 Killzone"}`,
     `Scenario: ${scenarioCN(cur.scenario)}`,
   ];
   // P1-B：5m 结构事件（扫损→收回→MSS 是 ICT 经典链条，标注当前 5m 结构状态）
@@ -375,6 +378,7 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
     }
     lines.push("");
   }
+  if (cur.session) lines.push(`Session: ${sessionText(cur.session)}`);
   if (changes.includes("confidence")) lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);

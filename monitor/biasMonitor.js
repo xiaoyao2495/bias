@@ -24,6 +24,7 @@ import { getHistory, getKlines } from "../data/binance.js";
 import { detectSweeps } from "../indicators/sweep.js";
 import { findDisplacements } from "../indicators/displacement.js";
 import { detectStructureEvents } from "../indicators/mss.js";
+import { killzoneOfK } from "../indicators/killzone.js";
 import { analyzeBias } from "../engine/analyzeBias.js";
 import { pathToFileURL } from "node:url";
 
@@ -100,6 +101,8 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     symbol,
     time: new Date(time).toISOString().slice(0, 16).replace("T", " "),
     price,
+    // 当前 4H K（末根，可进行中）覆盖的主要 Killzone（ICT 2022 Session 背景，供通知展示）
+    session: killzoneOfK(lastK), // { name, cn, start, end } | null
     // 最后已收盘 4H（收盘报告用：收于开盘上方/下方）
     last4h: { open: lastClosed.open, close: lastClosed.close, time: lastClosed.closeTime },
     // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导
@@ -167,6 +170,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         }
         console.log(`${r.symbol}  ${r.price}`);
         console.log(`Bias: ${icon[r.bias] || ""} ${r.bias}`);
+        console.log(`Session: ${r.session ? `${r.session.cn} Killzone` : "非 Killzone"}`);
         console.log(`Scenario: ${r.scenario}`);
         console.log(`信心度: ${r.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
         console.log(`机会质量: ${r.quality}${r.planR != null ? ` (planR ${r.planR.toFixed(2)})` : ""}`);
