@@ -37,7 +37,8 @@ test("实时：SSL 被扫 — 进行中 K 刺破下方流动性且现价收回�
 });
 
 test("已收盘确认：SSL — 最近 48 根内跌破 EQL 后收盘收回", () => {
-  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  // 常态收盘 115 > 111（位未消费，保证扫损事件是新鲜的）
+  const bars = Array.from({ length: 50 }, (_, i) => closedK(i, 114, 116, 113, 115));
   bars[48] = closedK(48, 113, 114, 110, 112); // 扫损 K：low 110 < 111，close 112 > 111
   const s = detectSweeps([...bars, liveK(112, 113, 111, 112)], [], [{ type: "EQL", price: 111 }], 112);
   assert.equal(s.side, "SSL");
@@ -66,15 +67,60 @@ test("无事件 → null（价格未刺破流动性位）", () => {
 });
 
 test("刺破但未收回 → null（SSL 收盘仍在 level 下方，不算扫损）", () => {
-  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  // 常态收盘 115 > 111（位未消费，专测"未收回"条件）
+  const bars = Array.from({ length: 50 }, (_, i) => closedK(i, 114, 116, 113, 115));
   bars[48] = closedK(48, 113, 114, 108, 109); // low 108 < 111 但 close 109 < 111 → 未收回
   assert.equal(detectSweeps([...bars, liveK(109, 110, 108, 109)], [], [{ type: "EQL", price: 111 }], 109), null);
 });
 
 test("无 price → 跳过实时检测，只做已收盘确认", () => {
-  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  // 常态收盘 115 > 111（位未消费）
+  const bars = Array.from({ length: 50 }, (_, i) => closedK(i, 114, 116, 113, 115));
   bars[48] = closedK(48, 113, 114, 110, 112);
   const s = detectSweeps([...bars, liveK(112, 113, 111, 112)], [], [{ type: "EQL", price: 111 }]);
   assert.equal(s.side, "SSL");
   assert.equal(s.realtime, false);
+});
+
+// —— 回归：流动性位"已消费"检测（KORUUSDT 08-06 误报）——
+// 位只要被历史任一已收盘 K 收在 level 外侧即视为已消费（已破位/被扫），
+// 之后插针只是回测旧位，不算新扫损。只认收盘（wick 刺破不算消费）。
+
+test("实时：BSL 已被历史收盘消费 → 插针不再报扫损", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[10] = closedK(10, 106, 107, 105, 106); // 历史已收盘在 105 上方（位已消费）
+  const h5m = [...bars, liveK(101, 106, 100, 104)]; // 插针 106 后现价收回 104
+  assert.equal(detectSweeps(h5m, [{ type: "PDH", price: 105 }], [], 104), null);
+});
+
+test("实时：SSL 已被历史收盘消费 → 插针不再报扫损", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[10] = closedK(10, 94, 95, 93, 94); // 历史已收盘在 95 下方（位已消费）
+  const h5m = [...bars, liveK(100, 101, 94, 100)]; // 插针 94 后现价收回 100
+  assert.equal(detectSweeps(h5m, [], [{ type: "PDL", price: 95 }], 100), null);
+});
+
+test("已收盘确认：BSL 已被历史收盘消费 → 不再报扫损", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[30] = closedK(30, 106, 107, 105, 106); // 位早已消费
+  bars[48] = closedK(48, 100, 107, 99, 97); // 插针 K：high 107 > 105，close 97 < 105
+  assert.equal(detectSweeps([...bars, liveK(98, 99, 97, 98)], [{ type: "EQH", price: 105 }], [], 98), null);
+});
+
+test("已收盘确认：SSL 已被历史收盘消费 → 不再报扫损", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[30] = closedK(30, 94, 95, 93, 94); // 位早已消费
+  bars[48] = closedK(48, 113, 114, 90, 112); // 插针 K：low 90 < 95，close 112 > 95
+  assert.equal(detectSweeps([...bars, liveK(112, 113, 111, 112)], [], [{ type: "PDL", price: 95 }], 112), null);
+});
+
+test("历史 wick 刺破但收盘未越过 → 不算消费，扫损仍上报", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[10] = closedK(10, 100, 106, 99, 100); // wick 到 106 但收 100（未消费）
+  bars[48] = closedK(48, 100, 107, 99, 97); // 插针后收回 → 有效扫损
+  const s = detectSweeps([...bars, liveK(98, 99, 97, 98)], [{ type: "EQH", price: 105 }], [], 98);
+  assert.equal(s.side, "BSL");
+  assert.equal(s.type, "EQH");
+  assert.equal(s.level, 105);
+  assert.equal(s.sweptPrice, 107);
 });

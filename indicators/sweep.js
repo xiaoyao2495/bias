@@ -33,15 +33,29 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48) {
   const now = Date.now();
   const cur = h5m[h5m.length - 1];
 
+  // 流动性位是否早已被消费（此前任一根已收盘 K 收在 level 外侧）：
+  //   BSL 只要历史收在 level 上方 → 该位已破位/被扫，之后插针只是回测旧位，不算新扫损；SSL 对称。
+  // 修复 KORUUSDT 08-06 误报：外部结构高点 16.95 早在数小时前被 18+ 收盘越过（位已消费），
+  // 价格回落后插针 16.96 仍被报成"流动性扫损"。只认收盘（wick 刺破不算消费，与扫损"收回"语义一致）。
+  const alreadyTaken = (lv, isBuy, upToIndex) => {
+    for (let i = 0; i < upToIndex; i++) {
+      const k = h5m[i];
+      if (k.closeTime > now) continue;
+      if (isBuy ? k.close > lv.price : k.close < lv.price) return true;
+    }
+    return false;
+  };
+
   // 1) 实时：进行中的 K 已刺破流动性位，且当前最新价已收回（BSL：price 跌回 level 下；SSL：price 升回 level 上）
   if (cur && cur.closeTime > now && price != null) {
+    const lastIdx = h5m.length - 1;
     for (const lv of buySide || []) {
-      if (cur.high > lv.price && price < lv.price) {
+      if (cur.high > lv.price && price < lv.price && !alreadyTaken(lv, true, lastIdx)) {
         return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: cur.high, close: price, time: cur.time, key: `${cur.time}_BSL`, realtime: true };
       }
     }
     for (const lv of sellSide || []) {
-      if (cur.low < lv.price && price > lv.price) {
+      if (cur.low < lv.price && price > lv.price && !alreadyTaken(lv, false, lastIdx)) {
         return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: cur.low, close: price, time: cur.time, key: `${cur.time}_SSL`, realtime: true };
       }
     }
@@ -52,13 +66,14 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48) {
   const recent = closed.slice(-window);
   for (let i = recent.length - 1; i >= 0; i--) {
     const k = recent[i];
+    const idx = h5m.indexOf(k);
     for (const lv of buySide || []) {
-      if (k.high > lv.price && k.close < lv.price) {
+      if (k.high > lv.price && k.close < lv.price && !alreadyTaken(lv, true, idx)) {
         return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: k.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: k.closeTime };
       }
     }
     for (const lv of sellSide || []) {
-      if (k.low < lv.price && k.close > lv.price) {
+      if (k.low < lv.price && k.close > lv.price && !alreadyTaken(lv, false, idx)) {
         return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: k.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime };
       }
     }
