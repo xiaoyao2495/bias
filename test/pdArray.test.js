@@ -102,6 +102,50 @@ test("V1.6 OB 带 confirmed: true", () => {
   assert.equal(obs[0].confirmed, true);
 });
 
+test("L4 OB 细类: BREAKER（OB 被收盘穿透后收回 → 角色反转）", () => {
+  const candles = [
+    candle(102, 103, 98, 99, 0), // BULLISH_OB 区间 [98, 103]
+    candle(100, 107, 99, 106, 1), // 阳线突破 → OB 确认
+    candle(98, 98, 96, 96.5, 2), // 阴线收盘 96.5 < 98 → 穿透
+    candle(97, 101, 96, 99.5, 3), // 阳线收盘 99.5 >= 98 → 收回
+  ];
+  const obs = findOrderBlocks(candles);
+  const first = obs.find((o) => o.type === "BULLISH_OB");
+  assert.equal(first.kind, "BREAKER");
+  assert.equal(first.state, "USED"); // 突破 K 已访问 OB 区间
+});
+
+test("L4 OB 细类: REJECTION（OB 所在 K 长下影 → 机构拒绝）", () => {
+  const candles = [
+    candle(100.9, 101, 97.8, 100, 0), // 阴线 body=0.9，下影 100-97.8=2.2 >= 2*0.9
+    candle(100, 108, 100.5, 107, 1), // 阳线突破，未回踩 OB
+  ];
+  const obs = findOrderBlocks(candles);
+  assert.equal(obs[0].kind, "REJECTION");
+});
+
+test("L4 OB 细类: 未回踩 → FRESH；无穿透无拒绝 → STANDARD", () => {
+  const candles = [
+    candle(102, 103, 98, 99, 0), // 阴线
+    candle(104, 107, 105, 106, 1), // 阳线突破，low 105 > 103 未触及 OB
+  ];
+  const obs = findOrderBlocks(candles);
+  assert.equal(obs[0].kind, "STANDARD");
+  assert.equal(obs[0].state, "FRESH");
+});
+
+test("L4 OB 细类: BEARISH_OB 穿透后收回 → BREAKER", () => {
+  const candles = [
+    candle(99, 104, 98, 103, 0), // BEARISH_OB 区间 [98, 104]
+    candle(102, 103, 95, 96, 1), // 阴线跌破 → OB 确认
+    candle(97, 103, 96, 104.5, 2), // 阳线收盘 104.5 > 104 → 穿透
+    candle(104, 104, 100, 101, 3), // 阴线收盘 101 <= 104 → 收回
+  ];
+  const obs = findOrderBlocks(candles);
+  assert.equal(obs[0].type, "BEARISH_OB");
+  assert.equal(obs[0].kind, "BREAKER");
+});
+
 test("V1.6 annotatePDArray: location / age / status(FILLED)", () => {
   // eq = 110：FVG 108-100 中点 104 < 110 → DISCOUNT
   const range = { equilibrium: 110 };

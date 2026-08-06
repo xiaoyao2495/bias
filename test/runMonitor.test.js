@@ -111,3 +111,31 @@ test("buildOverview: 首轮全览字段布局（Scenario · 信心度 · 机会�
   assert.match(msg, /\*\*BTCUSDT\*\* 🟢 BULLISH/);
   assert.match(msg, /Scenario: 多头延续 · 信心度: MEDIUM 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
 });
+
+test("buildChanged: OB BREAKER → 显示辅助行（仅有关注价值时）", () => {
+  const msg = buildChanged({
+    symbol: "ETHUSDT", price: 1910.86, reason: [],
+    changes: ["confidence"],
+    prev: { ...basePrev, bias: "BULLISH" },
+    cur: {
+      bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", quality: "HIGH", planR: 1.26, scenario: "BULLISH_REVERSAL_ATTEMPT",
+      ob: { type: "BULLISH_OB", kind: "BREAKER", state: "USED", high: 101.5, low: 98, status: "OPEN", location: "DISCOUNT" },
+    },
+    confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
+  });
+  assert.match(msg, /最近OB: 多头OB（破位反包·已回踩·折扣区）/);
+});
+
+test("buildChanged: OB STANDARD·USED → 不显示辅助行（避免噪音）", () => {
+  const msg = buildChanged({
+    symbol: "ETHUSDT", price: 1910.86, reason: [],
+    changes: ["confidence"],
+    prev: { ...basePrev, bias: "BULLISH" },
+    cur: {
+      bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", quality: "HIGH", planR: 1.26, scenario: "BULLISH_REVERSAL_ATTEMPT",
+      ob: { type: "BULLISH_OB", kind: "STANDARD", state: "USED", high: 101.5, low: 98, status: "OPEN", location: "DISCOUNT" },
+    },
+    confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
+  });
+  assert.ok(!msg.includes("最近OB"));
+});

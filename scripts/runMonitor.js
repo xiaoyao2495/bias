@@ -126,6 +126,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       quality: r.quality,
       planR: r.planR,
       sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = 5m K 开盘时间_方向，同一根 5m 内同一侧只推一次）
+      ob: r.ob, // { type, kind, state, ... } | null（最近 Order Block 细类）
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
@@ -337,6 +338,18 @@ function sweepTypeLabel(type) {
   );
 }
 
+/** Order Block 细类 → 中文（ICT 2022 L4：BREAKER 破位反包 / REJECTION 拒绝 / STANDARD 标准）
+ *  仅在有关注价值时显示：BREAKER/REJECTION 总是显示；STANDARD 需未回踩（FRESH）才显示 */
+const OB_KIND_CN = { BREAKER: "破位反包", REJECTION: "拒绝", STANDARD: "标准" };
+function obText(o) {
+  if (!o) return null;
+  if (o.kind === "STANDARD" && o.state === "USED") return null;
+  const kind = OB_KIND_CN[o.kind] || o.kind;
+  const state = o.state === "USED" ? "已回踩" : o.state === "FRESH" ? "未回踩" : o.state;
+  const loc = o.location === "DISCOUNT" ? "折扣区" : o.location === "PREMIUM" ? "溢价区" : null;
+  return `最近OB: ${o.type === "BULLISH_OB" ? "多头OB" : "空头OB"}（${kind}·${state}${loc ? `·${loc}` : ""}）`;
+}
+
 /** 首轮全览（紧凑，避免刷屏） */
 export function buildOverview(list) {
   const lines = [`**4H Bias Monitor**  ${nowHHMM()}`, ""];
@@ -379,6 +392,9 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
     lines.push("");
   }
   if (cur.session) lines.push(`Session: ${sessionText(cur.session)}`);
+  // 辅助状态：OB 细类（ICT 2022 L4），仅在有关注价值时显示，避免噪音
+  const ob = obText(cur.ob);
+  if (ob) lines.push(ob);
   if (changes.includes("confidence")) lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);

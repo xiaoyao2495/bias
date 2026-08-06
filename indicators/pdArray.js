@@ -28,7 +28,15 @@ export function findFvgs(candles) {
   return fvgs;
 }
 
-/** 找出所有 Order Block（EXPERIMENTAL，简单版；突破发生时已确认） */
+/**
+ * 找出所有 Order Block，并按 ICT 2022（L4）细分：
+ *   kind  = STANDARD | BREAKER | REJECTION
+ *     BREAKER  ：OB 形成后被收盘穿透（BULLISH_OB 收破下沿 / BEARISH_OB 收破上沿），
+ *                且之后又收盘收回 OB 区间 → 原支撑/阻力角色反转（Breaker Block）
+ *     REJECTION：OB 所在 K 自带长影线（BULLISH_OB 长下影 / BEARISH_OB 长上影）→ 机构在该区域拒绝
+ *   state = FRESH | USED
+ *     后续任一根 K 回踩过 OB 区间 → USED（已消费），否则 FRESH（未访问，效力更强）
+ */
 export function findOrderBlocks(candles) {
   const obs = [];
   for (let i = 1; i < candles.length; i++) {
@@ -40,12 +48,49 @@ export function findOrderBlocks(candles) {
     const curBullish = cur.close > cur.open;
     const curBearish = cur.close < cur.open;
 
-    if (prevBearish && curBullish && cur.close > prev.high) {
-      obs.push({ type: "BULLISH_OB", direction: "BULLISH", high: prev.high, low: prev.low, index: i, time: prev.time, experimental: true, confirmed: true });
+    const bullish = prevBearish && curBullish && cur.close > prev.high;
+    const bearish = prevBullish && curBearish && cur.close < prev.low;
+    if (!bullish && !bearish) continue;
+
+    const high = prev.high;
+    const low = prev.low;
+    const body = Math.abs(prev.close - prev.open);
+
+    // 后续 K：穿透后收回（BREAKER）+ 是否被回踩（USED）
+    let broken = false;
+    let recovered = false;
+    let used = false;
+    for (let j = i; j < candles.length; j++) {
+      const k = candles[j];
+      if (k.low <= high && k.high >= low) used = true; // 价格访问过 OB 区间
+      if (bullish) {
+        if (!broken && k.close < low) broken = true; // 收盘跌破 OB 下沿（穿透）
+        else if (broken && k.close >= low) recovered = true; // 之后收盘收回 OB 内/上方
+      } else {
+        if (!broken && k.close > high) broken = true; // 收盘涨破 OB 上沿（穿透）
+        else if (broken && k.close <= high) recovered = true; // 之后收盘收回 OB 内/下方
+      }
     }
-    if (prevBullish && curBearish && cur.close < prev.low) {
-      obs.push({ type: "BEARISH_OB", direction: "BEARISH", high: prev.high, low: prev.low, index: i, time: prev.time, experimental: true, confirmed: true });
-    }
+    // 影线拒绝：BULLISH_OB 看长下影（下方抛压被拒回），BEARISH_OB 看长上影
+    const reject = body > 0
+      ? bullish
+        ? Math.min(prev.open, prev.close) - prev.low >= 2 * body
+        : prev.high - Math.max(prev.open, prev.close) >= 2 * body
+      : false;
+    const kind = broken && recovered ? "BREAKER" : reject ? "REJECTION" : "STANDARD";
+
+    obs.push({
+      type: bullish ? "BULLISH_OB" : "BEARISH_OB",
+      direction: bullish ? "BULLISH" : "BEARISH",
+      high,
+      low,
+      index: i,
+      time: prev.time,
+      experimental: true,
+      confirmed: true,
+      kind,
+      state: used ? "USED" : "FRESH",
+    });
   }
   return obs;
 }

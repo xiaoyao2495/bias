@@ -64,7 +64,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const price = price5m ?? price4h;
 
   // 核心判定链路（与 Historical Scanner 共用 analyzeBias，见 engine/analyzeBias.js）
-  const { structure, liquidity, location, bias } = analyzeBias({ candles: h4, daily, weekly, price, time });
+  const { structure, liquidity, location, pdArray, bias } = analyzeBias({ candles: h4, daily, weekly, price, time });
 
   // P1-A：流动性扫损（5m K 线：进行中 5m 实时检测 + 最近 48 根已收盘 5m 确认，≈4 小时窗口）
   // 用 5m 粒度：扫损是分钟级价格行为（刺破流动性后收回），4H 单根 K 会把整个过程包住，粒度过粗
@@ -100,6 +100,13 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const planR = decision.planR ?? null;
   const quality = planR == null ? "-" : planR >= 1 ? "HIGH" : planR >= 0.5 ? "MEDIUM" : "LOW";
 
+  // P1-E：最近 Order Block 细类（ICT 2022 L4：BREAKER/REJECTION/STANDARD + FRESH/USED；辅助标注）
+  const obList = pdArray.ob || [];
+  const ob = obList.length ? obList[obList.length - 1] : null;
+  const obSummary = ob
+    ? { type: ob.type, kind: ob.kind, state: ob.state, high: ob.high, low: ob.low, status: ob.status, location: ob.location }
+    : null;
+
   // 数据驱动 Killzone（真实活跃窗口）：上周交易周（周一~五）1h 成交量聚合 →
   // 当前 4H K 覆盖的活跃窗口 { start, end, ratio } | null（ratio = 窗口成交量占比%）；
   // 上周数据不足 24 根（如 1h 拉取失败/缓存旧）→ null → 显示"非 Killzone"
@@ -126,6 +133,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     sweep, // { side, type, level, sweptPrice, close, time } | null（流动性扫损事件）
     mss5m, // { direction, lastEvent } | null（5m 层最近 MSS/BOS 事件，扫损消息标注）
     displacement, // { time, direction, ratio, structureBreak, fvg } | null（位移 K，最近 4 小时内，三条件证据齐备）
+    ob: obSummary, // { type, kind, state, high, low, status, location } | null（最近 Order Block 细类）
     quality,
     planR,
     decision: decision.decision || "-",
@@ -184,6 +192,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         console.log(`机会质量: ${r.quality}${r.planR != null ? ` (planR ${r.planR.toFixed(2)})` : ""}`);
         console.log(`操作: ${r.decisionLabel}`);
         console.log(`原因: ${r.reason}`);
+        if (r.ob) console.log(`最近OB: ${r.ob.type}（${r.ob.kind} · ${r.ob.state}${r.ob.status ? ` · ${r.ob.status}` : ""}）`);
         console.log(`Execution: ${r.execution} @ ${r.location}/${r.context}\n`);
       }
     })
