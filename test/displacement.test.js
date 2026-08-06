@@ -58,8 +58,8 @@ test("UP：BODY + STRUCTURE BREAK + FVG 三条件齐备 → 输出位移（含�
   assert.equal(out[0].close, 106);
   // 结构突破：最近 Swing High 101.5（index 8）
   assert.deepEqual(out[0].structureBreak, { type: "BOS", direction: "UP", level: 101.5, swingIndex: 8 });
-  // FVG：存在且 top > bottom
-  assert.ok(out[0].fvg && out[0].fvg.top > out[0].fvg.bottom);
+  // FVG 证据（位移 K 为第三根）：top = K20.low(99.9) > bottom = K18.high(99.8)，中间根 = 19
+  assert.deepEqual(out[0].fvg, { top: 99.9, bottom: 99.8, middleIndex: 19 });
   assert.equal(out[0].time, now - (300 - 20) * M5);
 });
 
@@ -70,7 +70,8 @@ test("DOWN：三条件齐备 → 跌破最近 Swing Low + bearish FVG", () => {
   assert.equal(out[0].body, 6);
   assert.ok(out[0].ratio >= 5); // avgBody = (19×1 + 0.5)/20 = 0.975
   assert.deepEqual(out[0].structureBreak, { type: "BOS", direction: "DOWN", level: 98.5, swingIndex: 8 });
-  assert.ok(out[0].fvg && out[0].fvg.top > out[0].fvg.bottom);
+  // FVG 证据（位移 K 为中间根）：top = K19.low(100.0) > bottom = K21.high(99.8)，中间根 = 20
+  assert.deepEqual(out[0].fvg, { top: 100.0, bottom: 99.8, middleIndex: 20 });
 });
 
 test("仅 BODY 达标、未破结构（close 未越过最近 Swing High）→ 空", () => {
@@ -121,4 +122,6 @@ test("多根位移 → 时间升序输出（各自独立满足三条件）", () 
   assert.equal(out[0].direction, "UP");
   assert.equal(out[1].direction, "UP");
   assert.ok(out[0].ratio > out[1].ratio); // 第二根 avgBody 含第一根大实体 → ratio 衰减
+  // 第二根位移 FVG（位移 K 为中间根）：top = K23.low(111.5) > bottom = K21.high(106.8)，中间根 = 22
+  assert.deepEqual(out[1].fvg, { top: 111.5, bottom: 106.8, middleIndex: 22 });
 });
