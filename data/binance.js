@@ -44,8 +44,9 @@ const INTERVAL_MS = { "5m": 5 * 60_000, "4h": 4 * 3600_000, "1d": 24 * 3600_000,
 /** 各周期缓存 TTL 覆盖（分钟）：
  *  4H 是监控主周期，TTL 必须小于周期本身——否则 4H 收盘后缓存仍未过期，
  *  收盘报告滞后一根、结构/MSS 检测最长滞后 4h（M1 修复，见审计）。
- *  30min 折中（监控 10 分钟一轮 × 3），既及时看到新收盘 K，又避免每轮拉取。 */
-const TTL_OVERRIDE_MIN = { "4h": 30 };
+ *  30min 折中（监控 10 分钟一轮 × 3），既及时看到新收盘 K，又避免每轮拉取。
+ *  1h 供数据驱动 Killzone（活跃窗口）：每周一刷新一次（拉上周交易周数据），TTL 一周。 */
+const TTL_OVERRIDE_MIN = { "4h": 30, "1h": 7 * 24 * 60 };
 
 function mapKline(k) {
   return {
@@ -79,7 +80,9 @@ function writeCache(file, data) {
 
 function ttlMs(interval) {
   const base = TTL_OVERRIDE_MIN[interval] != null ? TTL_OVERRIDE_MIN[interval] * 60_000 : (INTERVAL_MS[interval] || DEFAULT_TTL_MS);
-  return Math.min(DEFAULT_TTL_MS, base);
+  // 1h（数据驱动 Killzone）按周刷新，不受 4h 全局上限约束；其余周期仍受 DEFAULT 上限
+  const cap = interval === "1h" ? 7 * 24 * 3600_000 : DEFAULT_TTL_MS;
+  return Math.min(cap, base);
 }
 
 /** 获取 K 线：优先读本地缓存，未命中则经代理拉取并落盘。

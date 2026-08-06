@@ -19,11 +19,33 @@
  */
 
 const BJ_OFFSET_MS = 8 * 3600_000;
+const DAY_MS = 24 * 3600_000;
 
 /** ms → 北京时间小时（小数） */
 function bjHour(ms) {
   const d = new Date(ms + BJ_OFFSET_MS);
   return d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600;
+}
+
+/**
+ * 过滤最近一个完整交易周（北京时间周一 00:00 ~ 周五 24:00）的 1h K 线。
+ * 活跃窗口只用上周一~五数据：排除周末（加密市场周末量低，且美股代币标的休市），
+ * 且用近期周更能反映当前活跃时段（比 30 天历史权重更贴近现状）。
+ * 每周一刷新一次（1h 缓存 TTL 一周，见 data/binance.js TTL_OVERRIDE_MIN["1h"]）。
+ * @param {Array} h1 1h K 线（{time}，任意天数）
+ * @param {number} [now=Date.now()] 测试可注入
+ * @returns {Array} 落在上周一 00:00（北京）~ 上周五 24:00（北京）的 K
+ */
+export function lastTradingWeek(h1, now = Date.now()) {
+  if (!h1 || !h1.length) return [];
+  const bjNow = new Date(now + BJ_OFFSET_MS);
+  const dow = bjNow.getUTCDay(); // 0=周日
+  const daysBackToMon = (dow + 6) % 7; // 距最近周一 00:00 的天数（今天周一=0）
+  const today00BjUtc = Date.UTC(bjNow.getUTCFullYear(), bjNow.getUTCMonth(), bjNow.getUTCDate()) - BJ_OFFSET_MS; // 北京今天 00:00（UTC ms）
+  const thisMon00 = today00BjUtc - daysBackToMon * DAY_MS; // 本周一 00:00（北京，UTC ms）
+  const lastMon00 = thisMon00 - 7 * DAY_MS; // 上周一 00:00（北京）
+  const lastFriEnd = lastMon00 + 5 * DAY_MS; // 上周五 24:00（北京）
+  return h1.filter((k) => k.time >= lastMon00 && k.time < lastFriEnd);
 }
 
 /**

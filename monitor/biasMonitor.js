@@ -24,7 +24,7 @@ import { getHistory, getKlines } from "../data/binance.js";
 import { detectSweeps } from "../indicators/sweep.js";
 import { findDisplacements } from "../indicators/displacement.js";
 import { detectStructureEvents } from "../indicators/mss.js";
-import { computeActiveWindows, killzoneOfK } from "../indicators/killzone.js";
+import { computeActiveWindows, lastTradingWeek, killzoneOfK } from "../indicators/killzone.js";
 import { analyzeBias } from "../engine/analyzeBias.js";
 import { pathToFileURL } from "node:url";
 
@@ -46,8 +46,8 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     // 5m 用于流动性扫损/位移检测（辅助信息，缓存 TTL 5 分钟）；拉取失败降级为 []，
     // 不阻断主分析（否则 5m 抖动会导致整个合约分析失败）
     getKlines(symbol, "5m", 100).catch(() => []),
-    // 1h 用于数据驱动 Killzone（活跃窗口）：近 30 天成交量分布，缓存 TTL 4h（分布短期稳定，
-    // 无需每轮重算）；拉取失败降级为 [] → 活跃窗口空 → Session 显示"非 Killzone"
+    // 1h 用于数据驱动 Killzone（活跃窗口）：只取上周一~五（上周交易周）的 1h 成交量分布，
+    // 缓存 TTL 一周（每周一刷新，分布短期稳定无需每轮重算）；拉取失败降级为 [] → 非 Killzone
     getKlines(symbol, "1h", 720).catch(() => []),
   ]);
 
@@ -100,13 +100,17 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const planR = decision.planR ?? null;
   const quality = planR == null ? "-" : planR >= 1 ? "HIGH" : planR >= 0.5 ? "MEDIUM" : "LOW";
 
+  // 数据驱动 Killzone（真实活跃窗口）：上周交易周（周一~五）1h 成交量聚合 →
+  // 当前 4H K 覆盖的活跃窗口 { start, end, ratio } | null（ratio = 窗口成交量占比%）；
+  // 上周数据不足 24 根（如 1h 拉取失败/缓存旧）→ null → 显示"非 Killzone"
+  const wk = lastTradingWeek(h1);
+  const session = wk.length >= 24 ? killzoneOfK(lastK, computeActiveWindows(wk)) : null;
+
   return {
     symbol,
     time: new Date(time).toISOString().slice(0, 16).replace("T", " "),
     price,
-    // 数据驱动 Killzone（真实活跃窗口）：1h 成交量聚合 → 当前 4H K 覆盖的活跃窗口
-    // { start, end, ratio } | null（ratio = 窗口成交量占比%）；无 1h 数据 → null
-    session: h1.length >= 24 ? killzoneOfK(lastK, computeActiveWindows(h1)) : null,
+    session,
     // 最后已收盘 4H（收盘报告用：收于开盘上方/下方）
     last4h: { open: lastClosed.open, close: lastClosed.close, time: lastClosed.closeTime },
     // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导

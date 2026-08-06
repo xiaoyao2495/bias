@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeActiveWindows, killzoneOfK } from "../indicators/killzone.js";
+import { computeActiveWindows, lastTradingWeek, killzoneOfK } from "../indicators/killzone.js";
 
 const HOUR = 3600_000;
 /** 北京时刻 → epoch ms（北京 = UTC+8） */
@@ -20,6 +20,35 @@ function buildH1(volByHour, days = 3) {
     for (let h = 0; h < 24; h++) out.push({ time: bjMs(2026, 8, 6, h) + d * 24 * HOUR, quoteVol: (volByHour && volByHour[h]) || 100 });
   return out;
 }
+
+test("lastTradingWeek：只保留上周一~五（北京口径，排除周末与本周）", () => {
+  const now = bjMs(2026, 8, 6, 12); // 2026-08-06 周四
+  const k = (y, mo, d, h) => ({ time: bjMs(y, mo, d, h) });
+  const h1 = [
+    k(2026, 7, 26, 23), // 上周日 23:00 → 排除
+    k(2026, 7, 27, 0), // 上周一 00:00 → 含（下边界）
+    k(2026, 7, 29, 8), // 上周三 → 含
+    k(2026, 7, 31, 23), // 上周五 23:00 → 含
+    k(2026, 8, 1, 0), // 上周六 00:00 → 排除（上周五 24:00 整点，半开区间）
+    k(2026, 8, 3, 0), // 本周一 → 排除
+  ];
+  const out = lastTradingWeek(h1, now);
+  assert.deepEqual(
+    out.map((x) => x.time),
+    [k(2026, 7, 27, 0).time, k(2026, 7, 29, 8).time, k(2026, 7, 31, 23).time]
+  );
+});
+
+test("lastTradingWeek：今天是周一 → 上周 = 前一个完整周", () => {
+  const now = bjMs(2026, 8, 3, 9); // 2026-08-03 周一 09:00
+  const k = (y, mo, d, h) => ({ time: bjMs(y, mo, d, h) });
+  const h1 = [k(2026, 7, 26, 23), k(2026, 7, 27, 0), k(2026, 7, 31, 23), k(2026, 8, 2, 23), k(2026, 8, 3, 0)];
+  const out = lastTradingWeek(h1, now);
+  assert.deepEqual(
+    out.map((x) => x.time),
+    [k(2026, 7, 27, 0).time, k(2026, 7, 31, 23).time]
+  );
+});
 
 test("computeActiveWindows：单段活跃窗口 — 20:00-23:00 高量 → [20,24]", () => {
   // 4 小时 200 vs 其余 100 → mean = 116.67，阈值 140 → 仅 20-23 活跃
