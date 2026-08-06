@@ -109,7 +109,12 @@ export function computeConfidence({ bias, structure, structureStatus, location, 
 const NEAR_DRAW_PCT = 0.02; // 距目标 <2% 视为"目标就在眼前"（惯性最强）
 const WIDE_RANGE_PCT = 0.25; // 区间跨度 > 价格 25% 视为宽区间（防御性罚分）
 const LEVELS = { HIGH: 75, MEDIUM: 40 }; // score >= 75 → HIGH；>= 40 → MEDIUM；否则 LOW
-const PD_ARRAY_MARGIN = 0.02; // 执行区贴边容差：价格在区间 ±2% 内视为"仍在执行区附近"
+// 执行区贴边容差：价格在区间 ±1% 内视为"仍在执行区附近"。
+// V2.6 收紧（0.02 → 0.01）：±2% 对高价合约（ETH 1900+ = 38 美元）太宽，
+// 价格在 PREMIUM、执行区在 DISCOUNT 时仍被判"贴边"→ pdArrayAligned ±25 分
+// 开关因子随微小价格波动在阈值 40 附近来回翻转，10 分钟内刷屏（MEDIUM 45 ↔ LOW 20）。
+// 收紧后"价格未真正进入/贴近执行区"不再计对齐分。
+const PD_ARRAY_MARGIN = 0.01;
 
 /** 价格是否位于执行区区间内/紧贴（aligned 语义：未远离执行区）。
  * 有 top/bottom → 按区间 ±margin 判；只有参考价（简化输入）→ 按参考价贴近度判。 */
