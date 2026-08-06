@@ -55,6 +55,27 @@ const EXCLUDE_SYMBOLS = ["SOLUSDT"];
 const ICON = { BULLISH: "🟢", BEARISH: "🔴", NEUTRAL: "⚪" };
 const BJ_OFFSET_MS = 8 * 3600_000;
 
+// 中文化（交互信息规范）：ICT 术语标签（Scenario/Bias 等）保留英文，标签值/原因内容翻译
+const SCENARIO_CN = {
+  BULLISH_CONTINUATION: "多头延续",
+  BEARISH_CONTINUATION: "空头延续",
+  BULLISH_REVERSAL_ATTEMPT: "多头反转尝试",
+  BEARISH_REVERSAL_ATTEMPT: "空头反转尝试",
+  RANGE: "区间",
+  TRANSITION: "过渡",
+};
+const scenarioCN = (s) => SCENARIO_CN[s] || s || "-";
+/** 决策原因 → 中文（decision.reason 枚举映射，未命中保持原样） */
+const REASON_CN = {
+  "No directional bias": "无方向偏倚",
+  "Direction probability too low": "方向概率过低",
+  "No reward estimate (missing draw or invalidation)": "缺少目标或失效位，无法评估盈亏比",
+  "Direction correct but reward insufficient (planR < 0.5)": "方向正确但空间不足（planR < 0.5）",
+  "Acceptable direction, but room limited — wait for retracement to improve R": "方向可接受但空间有限，等待回撤改善盈亏比",
+  "Enough upside room with acceptable direction probability": "方向概率可接受且上方空间充足",
+};
+const reasonCN = (r) => (r ? REASON_CN[r] || r : "-");
+
 /**
  * 执行一轮监控：扫描 → 比较 → 推送变化 → 存状态。
  * @param {Object} [p]
@@ -271,7 +292,7 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
     "",
     "市场背景:",
     `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,
-    `Scenario: ${cur.scenario}`,
+    `Scenario: ${scenarioCN(cur.scenario)}`,
   ];
   // P1-B：5m 结构事件（扫损→收回→MSS 是 ICT 经典链条，标注当前 5m 结构状态）
   if (mss5m && mss5m.lastEvent) {
@@ -318,7 +339,7 @@ export function buildOverview(list) {
   const lines = [`**4H Bias Monitor**  ${nowHHMM()}`, ""];
   for (const r of list) {
     lines.push(`**${r.symbol}** ${ICON[r.cur.bias] || ""} ${r.cur.bias}`);
-    lines.push(`Scenario: ${r.cur.scenario} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
+    lines.push(`Scenario: ${scenarioCN(r.cur.scenario)} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
     lines.push("");
   }
   return lines.join("<br/>");
@@ -358,10 +379,10 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
   else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);
   else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
-  if (!biasFlipped && cur.scenario) lines.push(`Scenario: ${cur.scenario}`);
+  if (!biasFlipped && cur.scenario) lines.push(`Scenario: ${scenarioCN(cur.scenario)}`);
   lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
   // 非 bias 变化时 reason 是可信度/空间原因；bias 变化时原因已在结构行解释
-  if (!biasFlipped) lines.push(`原因: ${reason}`);
+  if (!biasFlipped) lines.push(`原因: ${reasonCN(reason)}`);
   lines.push(`价格: ${price}`);
   return lines.join("<br/>");
 }

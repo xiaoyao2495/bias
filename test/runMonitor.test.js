@@ -44,6 +44,18 @@ test("buildChanged: 非 bias 变化 — ℹ️ 头、信心度/操作 旧→新�
   assert.match(msg, /价格: 3500/);
 });
 
+test("buildChanged: Scenario 值 + 原因英译中（ETHUSDT 08-06 通知场景）", () => {
+  const msg = buildChanged({
+    symbol: "ETHUSDT", price: 1910.86, reason: "Enough upside room with acceptable direction probability",
+    changes: ["confidence", "decision"],
+    prev: { ...basePrev, bias: "BULLISH" },
+    cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", quality: "HIGH", planR: 1.26, scenario: "BULLISH_REVERSAL_ATTEMPT" },
+    confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
+  });
+  assert.match(msg, /Scenario: 多头反转尝试/);
+  assert.match(msg, /原因: 方向概率可接受且上方空间充足/);
+});
+
 test("buildSweep: SSL 已收盘确认 — 侧/位/价/回收/背景字段齐全", () => {
   const msg = buildSweep({
     symbol: "SPCXUSDT", price: 111.56,
@@ -54,7 +66,7 @@ test("buildSweep: SSL 已收盘确认 — 侧/位/价/回收/背景字段齐全"
   assert.match(msg, /下方卖方流动性（SSL）被扫：跌破 等低点 111.01（低 110.67）后收回，收 111.56/);
   assert.match(msg, /市场背景:/);
   assert.match(msg, /Bias: ⚪ NEUTRAL/);
-  assert.match(msg, /Scenario: RANGE/);
+  assert.match(msg, /Scenario: 区间/);
   assert.match(msg, /信心度: LOW 0/);
   assert.match(msg, /操作: WAIT/);
 });
@@ -92,9 +104,9 @@ test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据�
 
 test("buildOverview: 首轮全览字段布局（Scenario · 信心度 · 机会质量 · 操作）", () => {
   const msg = buildOverview([
-    { symbol: "BTCUSDT", cur: { bias: "BULLISH", scenario: "TREND_CONTINUATION", confidence: "MEDIUM", quality: "MEDIUM", planR: 1.2, decision: "WATCH_FOR_ENTRY" }, confidenceScore: 52 },
+    { symbol: "BTCUSDT", cur: { bias: "BULLISH", scenario: "BULLISH_CONTINUATION", confidence: "MEDIUM", quality: "MEDIUM", planR: 1.2, decision: "WATCH_FOR_ENTRY" }, confidenceScore: 52 },
   ]);
   assert.match(msg, /\*\*4H Bias Monitor\*\*/);
   assert.match(msg, /\*\*BTCUSDT\*\* 🟢 BULLISH/);
-  assert.match(msg, /Scenario: TREND_CONTINUATION · 信心度: MEDIUM 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
+  assert.match(msg, /Scenario: 多头延续 · 信心度: MEDIUM 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
 });
