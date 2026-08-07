@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { analyzeBias } from "../engine/analyzeBias.js";
+import { computeConfidence } from "../engine/confidence.js";
 
 const H4 = 4 * 3600_000;
 const D1 = 24 * 3600_000;
@@ -132,4 +133,72 @@ test("日/周线按 time 截断：进行中的日 K（closeTime > time）不参�
   assert.ok(r.liquidity.buySide.some((x) => x.type === "PDH" && x.price === 107.5)); // 仍取最后一根已收盘日 K
   assert.ok(!r.liquidity.buySide.some((x) => x.type === "PDH" && x.price === 200)); // 未来日 K 未泄漏
   assert.equal(r.htfDirection, "BULLISH"); // 结构判定同样不受未来 K 影响
+});
+
+/**
+ * P0-1 fixture：BULLISH 结构（swings：LOW 100→HIGH 140→HL 130→HH 165→HL 140），
+ * 最近 swing low(140) 高于保护位(130)。价格跌破 140 但未破 130 → 应判 MSS（INVALIDATED）。
+ */
+function h4MssFixture() {
+  const rows = [
+    [104, 105, 106, 103], [105, 106, 107, 104], [106, 102, 108, 100], [110, 138, 139, 109],
+    [138, 139, 140, 133], [135, 133, 136, 131], [133, 131, 134, 130], [140, 155, 155, 134],
+    [154, 163, 165, 153], [160, 161, 162, 141], [143, 141, 145, 140], [142, 142, 144, 141],
+    [143, 142, 143, 141],
+  ];
+  return rows.map(([o, c, h, l], i) => k(o, c, h, l, T0 + i * H4, H4));
+}
+
+test("P0-1: 价格跌破最近 swing low（未破保护位）→ MSS，effectiveBias 转 NEUTRAL（ICT：MSS = 打破最近 swing）", () => {
+  const candles = h4MssFixture();
+  // 结构确认：lastHigh = HH 165，lastLow = HL 140；保护位 = 130（HH 165 之前的 HL）
+  const r = analyzeBias({ candles, daily: [], weekly: [], price: 135, time: TIME });
+  assert.equal(r.structure.direction, "BULLISH");
+  assert.equal(r.structure.protectedLow, 130);
+  assert.equal(r.structure.lastLow.price, 140);
+  // 135 <= 140（最近 swing low 被打破）但 135 > 130（深位保护位未破）→ 修复前 VALID，修复后 INVALIDATED
+  assert.equal(r.bias.structureStatus, "INVALIDATED");
+  assert.equal(r.bias.effectiveBias, "NEUTRAL");
+  assert.ok(r.bias.mss);
+  assert.equal(r.bias.mss.level, 140); // MSS 基准 = 被打破的最近 swing，而非深位保护位
+  assert.equal(r.bias.mss.direction, "DOWN");
+  assert.equal(r.bias.mss.structureFrom, "BULLISH");
+});
+
+test("P0-1 对照组: 价格未破最近 swing low → 结构保持 VALID", () => {
+  const r = analyzeBias({ candles: h4MssFixture(), daily: [], weekly: [], price: 145, time: TIME });
+  assert.equal(r.bias.structureStatus, "VALID");
+  assert.equal(r.bias.effectiveBias, "BULLISH");
+  assert.equal(r.bias.mss, null);
+});
+
+test("P0-2: computeConfidence — 结构确认 + 保护位有效 + HTF 中性（TRANSITION）→ base 20 而非 10", () => {
+  const c = computeConfidence({
+    bias: "BULLISH",
+    structure: { direction: "BULLISH" },
+    structureStatus: "VALID",
+    location: { location: "DISCOUNT", context: "UNKNOWN", high: 120, low: 100 },
+    draw: null,
+    pdArray: null,
+    price: 110,
+    scenario: { state: "TRANSITION", htfDirection: "NEUTRAL" },
+  });
+  // base 20（结构确认但 HTF 中性）+ 无其他因子；修复前 base 10
+  assert.equal(c.score, 20);
+  assert.equal(c.level, "LOW");
+});
+
+test("P0-2 对照组: 结构失效的 TRANSITION → 硬门槛 LOW 0 不变", () => {
+  const c = computeConfidence({
+    bias: "BULLISH",
+    structure: { direction: "BULLISH" },
+    structureStatus: "INVALIDATED",
+    location: { location: "DISCOUNT", context: "UNKNOWN", high: 120, low: 100 },
+    draw: null,
+    pdArray: null,
+    price: 110,
+    scenario: { state: "TRANSITION", htfDirection: "NEUTRAL" },
+  });
+  assert.equal(c.score, 0);
+  assert.equal(c.level, "LOW");
 });

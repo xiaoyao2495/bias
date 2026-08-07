@@ -51,7 +51,12 @@ export function computeConfidence({ bias, structure, structureStatus, location, 
 
   // 1. Base：Scenario 状态质量（V2.3.3 单变量：CONTINUATION 66-70% > REVERSAL 48-55%）
   const state = (scenario && scenario.state) || "TRANSITION";
-  const baseScore = { TREND_CONTINUATION: 25, REVERSAL_ATTEMPT: 5 }[state] ?? 10;
+  let baseScore = { TREND_CONTINUATION: 25, REVERSAL_ATTEMPT: 5 }[state] ?? 10;
+  // P0-2（ICT 2022）：4H 结构确认（HH+HL）本身就是有效 Bias，HTF 中性只是"无助力"，
+  // 不是"方向存疑"。此前把"结构确认但 HTF 中性"与"结构失效"都归入 TRANSITION base 10，
+  // 把已确认结构的信心度拖到 LOW（如 MUUSDT 08-07：planR 3.43 仍 NO TRADE）。
+  // 修正：保护位有效（结构未失效）的 TRANSITION = 方向成立但无 HTF 助力，给中间分。
+  if (state === "TRANSITION" && checks.structureConfirmed && checks.protectedValid) baseScore = 20;
   score += baseScore;
   if (baseScore > 0) {
     const name = state === "TREND_CONTINUATION" ? "Trend continuation" : state === "REVERSAL_ATTEMPT" ? "Reversal attempt" : "Transition";

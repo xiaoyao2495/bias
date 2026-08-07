@@ -39,7 +39,19 @@ export function computeDailyBias({ structure, liquidity, location, price, pdArra
   const reason = [];
   const direction = structure.direction;
   const status = validateProtectedStructure(structure, price);
-  const structureStatus = status.status;
+  let structureStatus = status.status;
+
+  // P0-1（ICT 2022）：MSS = 打破最近反方向 swing → 结构转移，不等 HH/HL 重排。
+  // 4H 结构 BULLISH 时，最近 swing low（lastLow，通常比 protectedLow 浅的 HL）被价格跌破
+  // 即为结构转移；validateProtectedStructure 只查深位（protectedLow = 最后一个 HH 之前的
+  // 位移起点），会滞后一根 4H（mss.js 已按"最近 swing"检测，4H bias 层此前不一致）。
+  const lastLow = structure.lastLow;
+  const lastHigh = structure.lastHigh;
+  const brokenLow = direction === "BULLISH" && lastLow && price != null && price <= lastLow.price;
+  const brokenHigh = direction === "BEARISH" && lastHigh && price != null && price >= lastHigh.price;
+  if (brokenLow || brokenHigh) structureStatus = "INVALIDATED";
+  // 实际被打破的结构位：优先最近 swing（MSS 语义），其次保护位（V1.4 深位审计）
+  const brokenLevel = brokenLow ? lastLow.price : brokenHigh ? lastHigh.price : status.brokenLevel;
 
   // 1. Market Bias（原始结构方向，审计保留）：只由 Structure 决定
   let bias = "NEUTRAL";
@@ -77,7 +89,7 @@ export function computeDailyBias({ structure, liquidity, location, price, pdArra
     reason.push("4H Higher High Higher Low");
     reason.push(draw ? `Draw on Liquidity = ${draw.primary.type}` : "No buy-side liquidity above");
     if (structureStatus === "INVALIDATED") {
-      reason.push(`Protected low broken (price ${price} < ${status.brokenLevel}) — structure INVALIDATED`);
+      reason.push(`Protected low broken (price ${price} < ${brokenLevel}) — structure INVALIDATED`);
     } else if (ctx === "LATE_IMPULSE") {
       reason.push(`Price in ${loc} near range target (LATE_IMPULSE) — execution WAIT (avoid chasing late impulse)`);
     } else if (loc === "DISCOUNT") reason.push("Price in discount — execution READY (look for longs)");
@@ -87,7 +99,7 @@ export function computeDailyBias({ structure, liquidity, location, price, pdArra
     reason.push("4H Lower High Lower Low");
     reason.push(draw ? `Draw on Liquidity = ${draw.primary.type}` : "No sell-side liquidity below");
     if (structureStatus === "INVALIDATED") {
-      reason.push(`Protected high broken (price ${price} > ${status.brokenLevel}) — structure INVALIDATED`);
+      reason.push(`Protected high broken (price ${price} > ${brokenLevel}) — structure INVALIDATED`);
     } else if (ctx === "LATE_IMPULSE") {
       reason.push(`Price in ${loc} near range target (LATE_IMPULSE) — execution WAIT (avoid chasing late impulse)`);
     } else if (loc === "PREMIUM") reason.push("Price in premium — execution READY (look for shorts)");
@@ -101,14 +113,15 @@ export function computeDailyBias({ structure, liquidity, location, price, pdArra
 
   // V1.4.1 MSS 事件化（P0）：结构失效 = 一次市场结构转移（MSS）。
   // 事件 schema 与 indicators/mss.js 统一：{ type, direction, level, price, confirmed }
-  //   type      = "MSS"（保护位穿透 = 结构转移；顺势 BOS 由 mss.js 按最近 swing 判定）
-  //   direction = 突破方向：突破保护高点 → UP；跌破保护低点 → DOWN
+  //   type      = "MSS"（最近 swing 被反势打破 = 结构转移；顺势 BOS 由 mss.js 按最近 swing 判定）
+  //   direction = 突破方向：BULLISH 结构跌破低点 → DOWN；BEARISH 突破高点 → UP
+  // P0-1：level 用实际被打破的最近 swing（brokenLevel），与 5m 层 mss.js 语义一致
   let mss = null;
-  if (structureStatus === "INVALIDATED" && status.brokenLevel != null && invalidation) {
+  if (structureStatus === "INVALIDATED" && brokenLevel != null) {
     mss = {
       type: "MSS", // 统一结构事件类型（与 mss.js 一致），不再用 BREAK_PROTECTED_*
-      direction: invalidation.type === "BREAK_PROTECTED_HIGH" ? "UP" : "DOWN", // 突破方向，与 mss.js UP/DOWN 一致
-      level: status.brokenLevel,
+      direction: direction === "BULLISH" ? "DOWN" : "UP", // 突破方向，与 mss.js UP/DOWN 一致
+      level: brokenLevel,
       price,
       confirmed: true, // 4H 保护位穿透按传入价格（收盘/实时）判定，视为已确认事件
       realtime: false,
