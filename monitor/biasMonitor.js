@@ -56,11 +56,18 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const lastClosed = lastK.closeTime <= Date.now() ? lastK : h4[h4.length - 2] || lastK;
   const price4h = lastK.close; // 4H 末根收盘价（缓存下最多陈旧 4 小时）
   const time = lastK.closeTime;
-  // 核心判定与展示用实时价：5m 末根 close（进行中 5m 的 close = 当前最新成交价，TTL 5 分钟）。
-  // 修复 major：直接拿 4H 收盘价判结构失效/MSS/confidence/planR，最多延迟 4 小时才报；
-  // 5m 拉取失败时回退 4H 收盘价。
-  const price5m = m5.length ? m5[m5.length - 1].close : null;
-  const price = price5m ?? price4h;
+  // 核心判定与展示用"收盘确认价"：最近一根已收盘 5m 的 close（5m TTL 5 分钟 + 最多跳过 1 根未收盘 5m，
+  // 判定价最多滞后 ~10 分钟）。审计修复：原实现用进行中 5m 的实时 close 判 4H 结构失效/MSS/confidence/planR，
+  // 实时插针（瞬时跌破保护位又收回）会在 10 分钟轮内触发结构 INVALIDATED → Bias 翻转刷屏；
+  // 收盘确认价与 mss.js"事件需收盘确认"的语义保持一致。5m 拉取失败/无已收盘 5m → 回退 4H 收盘价。
+  const price5m = m5.length ? m5[m5.length - 1].close : null; // 实时价：仅供 detectSweeps 实时扫损检测
+  let price;
+  if (m5.length) {
+    const last5m = m5[m5.length - 1];
+    price = last5m.closeTime <= Date.now() ? last5m.close : m5[m5.length - 2] ? m5[m5.length - 2].close : price4h;
+  } else {
+    price = price4h;
+  }
 
   // 核心判定链路（与 Historical Scanner 共用 analyzeBias，见 engine/analyzeBias.js）
   // session（数据驱动 Killzone）在 analyzeBias 内统一计算：h1 → 上周交易周成交量 →

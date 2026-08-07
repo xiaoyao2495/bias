@@ -26,8 +26,10 @@
  */
 import { getTopVolumeSymbols } from "../monitor/topVolume.js";
 import { analyzeSymbols } from "../monitor/biasMonitor.js";
+import { scanOpportunities, OPP_MIN_SCORE } from "../monitor/opportunity.js";
 import { loadState, saveState, compareState, cleanupState } from "../monitor/state.js";
 import { sendMarkdown } from "../monitor/dingTalk.js";
+import { getHistory } from "../data/binance.js";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +37,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = join(__dirname, "..", "monitor", "log.txt");
 const CLOSE_REPORT_FILE = join(__dirname, "..", "monitor", "closeReport.json"); // 记录已推送收盘报告的 4H 边界
+const OPP_DIGEST_FILE = join(__dirname, "..", "monitor", "opportunityDigest.json"); // 记录机会榜上次推送时间
 
 /** 文件日志：Windows 上 pm2 的 out/err 日志空白，写文件便于在服务器上排查 */
 function log(...args) {
@@ -55,6 +58,10 @@ const TOP_N = 12;
 const EXCLUDE_SYMBOLS = ["SOLUSDT", "KORUUSDT"];
 const ICON = { BULLISH: "🟢", BEARISH: "🔴", NEUTRAL: "⚪" };
 const BJ_OFFSET_MS = 8 * 3600_000;
+/** 5m 机会扫描：5m 历史长度（≈3.5 天，swing 结构/执行区/MSS-BOS 历史用，缓存 TTL 5 分钟） */
+const OPP_M5_LIMIT = 1000;
+/** 同一机会 key 推送冷却（避免同一执行区/同一链条每 10 分钟重复推） */
+const OPP_COOLDOWN_MS = 60 * 60_000;
 
 /** Session 展示（数据驱动活跃窗口）：活跃窗口 20:00-24:00（占比 23.4%） */
 function sessionText(s) {
@@ -127,6 +134,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       planR: r.planR,
       sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = 5m K 开盘时间_方向，同一根 5m 内同一侧只推一次）
       ob: r.ob, // { type, kind, state, ... } | null（最近 Order Block 细类）
+      oppPushed: (prev && prev.oppPushed) || {}, // 5m 机会推送去重（key → 推送时间戳），冷却期内不重复推
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
@@ -169,6 +177,15 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
             nextState[item.symbol].sweepTime = item.prev.sweepTime;
           }
         }
+      }
+    }
+    // P2：5m 机会发现（顺 4H Bias 的入场触发器）。真实运行首轮不推（全览已覆盖整体），
+    // 非首轮每轮扫描 + 新机会推送（key 冷却去重）；dry 模式也扫描打点，便于本地验证。
+    if (!isFirstRun || dryRun) {
+      try {
+        await scanAndPushOpportunities({ overview, prevState, nextState, dryRun });
+      } catch (e) {
+        log(`[runMonitor] 机会扫描失败: ${e.message}`);
       }
     }
     // 4H 收盘报告：每根 4H 收线后即使无状态变化也推一次（首轮全览已覆盖，只记录边界不推）
@@ -364,6 +381,115 @@ export function buildOverview(list) {
 /** 结构状态描述（中文）：当前 Bias 对应 ICT 结构形态 */
 function structureDesc(bias) {
   return bias === "BULLISH" ? "新多头结构形成（HH+HL）" : bias === "BEARISH" ? "新空头结构形成（LH+LL）" : "结构方向未确认";
+}
+
+/** 5m 机会类型 → 中文标签 */
+const OPP_TYPE_CN = { CHAIN: "扫损→MSS→回踩", BOS: "结构突破 BOS", RETRACE: "执行区回踩" };
+
+/** 机会榜上次推送时间记录（monitor/opportunityDigest.json） */
+function loadDigestTs() {
+  try {
+    return JSON.parse(readFileSync(OPP_DIGEST_FILE, "utf8")).lastTs || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveDigestTs(ts) {
+  writeFileSync(OPP_DIGEST_FILE, JSON.stringify({ lastTs: ts }));
+}
+
+/**
+ * P2：5m 机会发现（顺 4H Bias 的入场触发器）。
+ * 对每个成功合约拉长 5m 历史 → scanOpportunities → 新机会推送（key 冷却去重）+
+ * 每 30 分钟整点轮推送机会榜。全部副作用失败均降级，不阻断主监控。
+ */
+async function scanAndPushOpportunities({ overview, prevState, nextState, dryRun }) {
+  const all = [];
+  for (const item of overview) {
+    try {
+      const m5 = await getHistory(item.symbol, "5m", OPP_M5_LIMIT);
+      const opps = scanOpportunities({ symbol: item.symbol, env: item, m5 });
+      if (opps.length) log(`[runMonitor] ${item.symbol} 5m 机会 ${opps.length} 个（${opps.map((o) => o.type).join(",")}）`);
+      all.push(...opps);
+    } catch (e) {
+      log(`[runMonitor] ${item.symbol} 机会扫描失败: ${e.message}`);
+    }
+  }
+  if (!all.length) return;
+
+  // 🎯 新机会推送：score ≥ 门槛 且 同 key 超过冷却期（推送成功才落地时间戳，失败下轮重试）
+  for (const op of all) {
+    if (op.score < OPP_MIN_SCORE) continue;
+    const pushed = nextState[op.symbol].oppPushed;
+    // 审计修复：旧版 state.json 合约条目无 oppPushed 字段（升级兼容），可选链避免
+    // 首轮升级后整个机会扫描段抛 TypeError 中断（见审计重要 #4）
+    const lastTs = prevState[op.symbol]?.oppPushed?.[op.key] || 0;
+    if (Date.now() - lastTs < OPP_COOLDOWN_MS) continue;
+    if (dryRun) {
+      log(`[runMonitor][dry] 机会候选 ${op.symbol} ${op.type} ${op.direction} score=${op.score}`);
+      continue;
+    }
+    try {
+      await sendMarkdown(buildOpportunity(op, itemOf(op, overview)), `${op.symbol} 5m机会`);
+      pushed[op.key] = Date.now();
+      log(`[runMonitor] 已推送 ${op.symbol} 5m 机会（${op.type} score=${op.score}）`);
+    } catch (e) {
+      log(`[runMonitor] ${op.symbol} 机会推送失败，下轮重试: ${e.message}`);
+    }
+  }
+
+  // 📊 机会榜：每 30 分钟整点轮（北京时间 0/30 分），距上次推送 ≥25 分钟去重
+  const bjMin = new Date(Date.now() + BJ_OFFSET_MS).getUTCMinutes();
+  const top = all.filter((o) => o.score >= OPP_MIN_SCORE).sort((a, b) => b.score - a.score).slice(0, 5);
+  if (bjMin % 30 === 0 && top.length && Date.now() - loadDigestTs() >= 25 * 60_000) {
+    if (dryRun) {
+      log(`[runMonitor][dry] 机会榜 ${top.map((o) => `${o.symbol} ${o.type}(${o.score})`).join(", ")}`);
+      return;
+    }
+    try {
+      await sendMarkdown(buildOpportunityDigest(top), "5m 机会榜");
+      saveDigestTs(Date.now());
+      log(`[runMonitor] 5m 机会榜已推送（${top.length} 条）`);
+    } catch (e) {
+      log(`[runMonitor] 机会榜推送失败: ${e.message}`);
+    }
+  }
+}
+
+/** 从 overview 中找回某机会对应的环境 item（含 cur/price/confidenceScore） */
+function itemOf(op, overview) {
+  return overview.find((i) => i.symbol === op.symbol) || {};
+}
+
+/** 5m 机会单条消息（🎯）：环境背景 + 入场参考 + 触发链条（钉钉格式规范） */
+export function buildOpportunity(op, env) {
+  const dirCN = op.direction === "BULLISH" ? "多头" : "空头";
+  const cur = env.cur || {};
+  const lines = [
+    `**🎯 ${op.symbol} 5m 机会**  🕐 ${nowHHMM()}`,
+    "",
+    `${ICON[op.direction] || ""} ${dirCN}（${OPP_TYPE_CN[op.type] || op.type}）· 评分 ${op.score}`,
+  ];
+  if (op.zone) lines.push(`执行区: ${op.zone.type} ${fmtPrice(op.zone.bottom)}-${fmtPrice(op.zone.top)}`);
+  // 审计修复：回踩/突破信号只是"价格到达观察位"，入场需执行区确认（反K/收回/结构确认），
+  // 文案用"观察位"避免被理解为可直接市价入场的价位
+  lines.push(`观察位: ${fmtPrice(op.entry)} · 现价 ${fmtPrice(env.price)}（需回踩/突破后确认再入场）`);
+  lines.push(`环境: ${ICON[cur.bias] || ""} ${cur.bias || "-"} · 信心度 ${cur.confidence || "-"}${env.confidenceScore != null ? ` ${env.confidenceScore}` : ""} · 操作 ${cur.decision || "-"} · ${sessionText(cur.session) || "非活跃窗口"}`);
+  lines.push(`触发: ${op.trigger}`);
+  lines.push(`价格: ${env.price}`);
+  return lines.join("<br/>");
+}
+
+/** 5m 机会榜（📊）：每 30 分钟整点汇总当前 Top 5 机会 */
+export function buildOpportunityDigest(list) {
+  const lines = [`**📊 5m 机会榜**  🕐 ${nowHHMM()}`, "", `本时段 ${list.length} 个合约出现 5m 机会（评分 ≥ ${OPP_MIN_SCORE}）：`, ""];
+  for (let i = 0; i < list.length; i++) {
+    const o = list[i];
+    const dirCN = o.direction === "BULLISH" ? "多头" : "空头";
+    lines.push(`${i + 1}. ${o.symbol} ${ICON[o.direction] || ""} ${dirCN} ${OPP_TYPE_CN[o.type] || o.type} @ ${fmtPrice(o.entry)}（${o.score}）`);
+  }
+  return lines.join("<br/>");
 }
 
 /**
