@@ -12,7 +12,10 @@
  * 判定规则：
  *   computeActiveWindows(h1) — 输入 1h K 线（含 quoteVol），输出活跃窗口
  *     [{ start, end, ratio }]（start/end 为北京时间小时，半开区间；ratio=窗口成交量占比%）
- *     活跃小时 = 该小时成交量 > 全天均值 × factor（默认 1.2），合并连续小时为窗口。
+ *     活跃小时 = 该小时成交量 > 全天均值 × factor（默认 1.5），合并连续小时为窗口。
+ *     factor 用 1.5（而非 1.2）：三币上周实盘验证（BTC/SNDK/MU），1.2×均值 ≈ 5% 会把
+ *     5-6% 的次级小峰（如 BTC 06/09 点、MU 08 点）误判为"活跃窗口"，与 15-17% 主峰
+ *     同等待遇，产生碎片窗口误导 Session 展示；1.5×均值（≈6.25%）下碎片消失、主峰完整保留。
  *   killzoneOfK(k, windows)  — K 覆盖时段与活跃窗口的重叠时长，取重叠最长者；无 → null
  *
  * 兼容性：旧缓存 K 线无 quoteVol 字段（视为 0）→ 无数据时返回 []，调用方降级为"非 Killzone"。
@@ -52,10 +55,11 @@ export function lastTradingWeek(h1, now = Date.now()) {
  * 由 1h K 线计算该合约的活跃窗口（真实 Killzone）。
  * @param {Array} h1 1h K 线（{time, quoteVol}，时间升序，任意天数——越久分布越稳）
  * @param {Object} [opt]
- * @param {number} [opt.factor=1.2] 活跃阈值：小时成交量 > 全天均值 × factor 记为活跃
+ * @param {number} [opt.factor=1.5] 活跃阈值：小时成交量 > 全天均值 × factor 记为活跃
+ *   1.5 为数据实证值（1.2 会把 5-6% 次级小峰误判为活跃窗口，见文件头注释）
  * @returns {Array<{start:number, end:number, ratio:number}>} 活跃窗口（北京小时半开区间），按占比降序
  */
-export function computeActiveWindows(h1, { factor = 1.2 } = {}) {
+export function computeActiveWindows(h1, { factor = 1.5 } = {}) {
   if (!h1 || h1.length < 24) return [];
   const hourVol = new Array(24).fill(0);
   const ratio = new Array(24).fill(0);

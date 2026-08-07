@@ -202,3 +202,21 @@ test("P0-2 对照组: 结构失效的 TRANSITION → 硬门槛 LOW 0 不变", ()
   assert.equal(c.score, 0);
   assert.equal(c.level, "LOW");
 });
+
+test("Session: 当前 4H 处于活跃窗口（Killzone）→ confidence +10（ICT：Killzone 内信号更有效）", () => {
+  const base = {
+    bias: "BULLISH",
+    structure: { direction: "BULLISH" },
+    structureStatus: "VALID",
+    location: { location: "DISCOUNT", context: "UNKNOWN", high: 120, low: 100 },
+    draw: null,
+    pdArray: null,
+    price: 110,
+    scenario: { state: "TRANSITION", htfDirection: "NEUTRAL" },
+  };
+  const without = computeConfidence(base);
+  assert.equal(without.score, 20); // 基准（P0-2 base 20，无 Killzone）
+  const inKz = computeConfidence({ ...base, session: { start: 21, end: 24, ratio: 26.7 } });
+  assert.equal(inKz.score, 30); // +10 Killzone active
+  assert.ok(inKz.factors.some((f) => f.name === "Killzone active" && f.value === "+10"));
+});

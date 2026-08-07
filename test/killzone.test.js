@@ -3,7 +3,7 @@
  *
  * 覆盖 computeActiveWindows（1h 成交量 → 活跃窗口合并/占比/降级）
  * 与 killzoneOfK（K 覆盖时段与活跃窗口重叠时长取最长）。
- * 活跃小时 = 该小时成交量 > 全天均值 × factor（默认 1.2）。
+ * 活跃小时 = 该小时成交量 > 全天均值 × factor（默认 1.5）。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -51,7 +51,7 @@ test("lastTradingWeek：今天是周一 → 上周 = 前一个完整周", () => 
 });
 
 test("computeActiveWindows：单段活跃窗口 — 20:00-23:00 高量 → [20,24]", () => {
-  // 4 小时 200 vs 其余 100 → mean = 116.67，阈值 140 → 仅 20-23 活跃
+  // 4 小时 200 vs 其余 100 → mean = 116.67，阈值 1.5×mean ≈ 175 → 仅 20-23 活跃
   const w = computeActiveWindows(buildH1({ 20: 200, 21: 200, 22: 200, 23: 200 }));
   assert.deepEqual(w, [{ start: 20, end: 24, ratio: 28.6 }]); // 800/2800
 });
@@ -65,9 +65,10 @@ test("computeActiveWindows：多段窗口 — 亚洲 + 美股时段，按占比�
   ]);
 });
 
-test("computeActiveWindows：阈值过滤 — 略高于均值的小时不计入窗口", () => {
-  // 全天 100，仅 20 点 115（>mean 100 但 <120 阈值）→ 无窗口
-  assert.deepEqual(computeActiveWindows(buildH1({ 20: 115 })), []);
+test("computeActiveWindows：阈值过滤 — 1.5×均值以下的小时不入窗口（1.2 会误判的次级峰）", () => {
+  // 全天 100，20 点 130（1.3×mean 100）：旧 factor 1.2 会算活跃（130>120），
+  // 1.5 修正后（阈值 150）不计入——对应实盘 5-6% 次级峰（BTC 06/09 点、MU 08 点）误报修复
+  assert.deepEqual(computeActiveWindows(buildH1({ 20: 130 })), []);
 });
 
 test("computeActiveWindows：降级 — 空/不足 24 根/无成交量数据 → []", () => {

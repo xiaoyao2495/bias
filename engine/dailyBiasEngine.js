@@ -35,7 +35,7 @@ import { buildDecision } from "./decision.js";
  * 第一版明确不做：MSS / BOS 分类 / Displacement / 5m Entry / Gate / Notification / Score / AI 判断
  */
 
-export function computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection }) {
+export function computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection, session }) {
   const reason = [];
   const direction = structure.direction;
   const status = validateProtectedStructure(structure, price);
@@ -136,7 +136,7 @@ export function computeDailyBias({ structure, liquidity, location, price, pdArra
   // V2.0：Scenario State（HTF 参照，只描述状态）+ Bias Confidence（只描述可信度）
   const scenario = computeScenario({ direction: bias, structureStatus, htfDirection });
   // V2.3：Confidence 改为成功概率评分（Scenario Base + HTF Alignment + Quality − Risk），输出 score/level/factors
-  const confidence = computeConfidence({ bias, structure, structureStatus, location, draw, pdArray: pdArrayRank, price, scenario });
+  const confidence = computeConfidence({ bias, structure, structureStatus, location, draw, pdArray: pdArrayRank, price, scenario, session });
 
   // V2.1：Bias Explanation Chain（把各组件的依据翻译成人类可读的解释链，不改判定）
   const explanation = buildExplanation({ structure, draw, location, pdArray: pdArrayRank, bias, invalidation, structureStatus });

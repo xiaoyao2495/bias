@@ -18,16 +18,17 @@
  *
  *   Confidence = Base(Scenario) + Alignment(HTF) + Quality(PD/Liquidity) ± 位置因子
  *
- *   Base        : CONTINUATION +25 / REVERSAL_ATTEMPT +5 / TRANSITION +10
+ *   Base        : CONTINUATION +25 / REVERSAL_ATTEMPT +5 / TRANSITION +10（结构确认但 HTF 中性 +20）
  *   Alignment   : HTF 同向 +15（CONTINUATION 必触发），HTF 反向 -10
  *   Quality     : PD array aligned +25（最强）、Liquidity +10
  *   位置因子    : LATE_IMPULSE +15（趋势惯性）、VALID 折价/溢价位 -10（回撤/反抽）
+ *   时机因子    : Killzone（Session）内 +10（ICT：活跃窗口内信号有效性更高）
  *   微调        : 距目标 <2% +5（近目标惯性）、Wide range -10（防御）
  *
  * 输出 score(0-100) + level(HIGH/MEDIUM/LOW) + factors(因子明细)。
  * HIGH ≥ 75，MEDIUM ≥ 40，LOW < 40（经 BTC/ETH 双标的扫描验证：HIGH 75-79% > MEDIUM > LOW）。
  */
-export function computeConfidence({ bias, structure, structureStatus, location, draw, pdArray, price, scenario }) {
+export function computeConfidence({ bias, structure, structureStatus, location, draw, pdArray, price, scenario, session }) {
   const checks = {
     structureConfirmed: structure.direction !== "NEUTRAL",
     protectedValid: structureStatus === "VALID",
@@ -93,7 +94,13 @@ export function computeConfidence({ bias, structure, structureStatus, location, 
     factors.push({ name: "Retrace location (weak)", value: "-10" });
   }
 
-  // 5. 微调：近目标惯性 +5；宽区间防御 -10
+  // 5. 时机因子：当前 4H 处于该合约活跃窗口（Killzone）内 → 信号有效性更高（ICT 2022）
+  if (session) {
+    score += 10;
+    factors.push({ name: "Killzone active", value: "+10" });
+  }
+
+  // 6. 微调：近目标惯性 +5；宽区间防御 -10
   const dist = drawDist(bias, price, draw);
   if (dist != null && dist < NEAR_DRAW_PCT) {
     score += 5;

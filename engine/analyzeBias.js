@@ -16,6 +16,7 @@ import { computeLiquidity } from "../indicators/liquidity.js";
 import { computeDealingRange } from "../indicators/dealingRange.js";
 import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
 import { computeHtfDirection } from "../indicators/scenario.js";
+import { lastTradingWeek, computeActiveWindows, killzoneOfK } from "../indicators/killzone.js";
 import { computeDailyBias } from "./dailyBiasEngine.js";
 
 /**
@@ -25,10 +26,13 @@ import { computeDailyBias } from "./dailyBiasEngine.js";
  * @param {Array}  p.weekly   周线 K 线（可传完整历史，内部按 time 截断）
  * @param {number} p.price    当前价（4H 收盘 / 实时价）
  * @param {number} p.time     分析时刻（ms，取 closeTime <= time 的已收盘日/周 K）
+ * @param {Array}  [p.h1]     1h K 线（可选，数据驱动 Killzone：上周交易周成交量 → 活跃窗口）。
+ *                            传入后统一计算 session（Killzone 标注 + confidence 时机因子）；
+ *                            不传（回放/审计）→ session null，无 Killzone 因子，行为不变。
  * @param {number} [p.pdArrayLimit=6] PD Array（FVG/OB）截取数量
- * @returns {{ structure, liquidity, location, pdArray, htfDirection, bias }}
+ * @returns {{ structure, liquidity, location, pdArray, htfDirection, session, bias }}
  */
-export function analyzeBias({ candles, daily, weekly, price, time, pdArrayLimit = 6 }) {
+export function analyzeBias({ candles, daily, weekly, price, time, h1, pdArrayLimit = 6 }) {
   const day = daily.filter((c) => c.closeTime <= time);
   const week = weekly.filter((c) => c.closeTime <= time);
 
@@ -41,7 +45,16 @@ export function analyzeBias({ candles, daily, weekly, price, time, pdArrayLimit 
   const obs = findOrderBlocks(candles);
   const pdArray = annotatePDArray({ fvg: fvgs.slice(-pdArrayLimit), ob: obs.slice(-pdArrayLimit) }, location, candles);
   const htfDirection = computeHtfDirection(day, week, price);
-  const bias = computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection });
+  // Session（数据驱动 Killzone）：上周交易周（周一~五）1h 成交量 → 活跃窗口 →
+  // 当前 4H K（candles 末根）覆盖的最长重叠窗口；h1 不传/数据不足 → null（非 Killzone）
+  let session = null;
+  if (h1 && h1.length) {
+    const wk = lastTradingWeek(h1);
+    if (wk.length >= 24) {
+      session = killzoneOfK(candles[candles.length - 1], computeActiveWindows(wk));
+    }
+  }
+  const bias = computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection, session });
 
-  return { structure, liquidity, location, pdArray, htfDirection, bias };
+  return { structure, liquidity, location, pdArray, htfDirection, session, bias };
 }

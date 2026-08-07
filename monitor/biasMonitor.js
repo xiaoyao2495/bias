@@ -24,7 +24,6 @@ import { getHistory, getKlines } from "../data/binance.js";
 import { detectSweeps } from "../indicators/sweep.js";
 import { findDisplacements } from "../indicators/displacement.js";
 import { detectStructureEvents } from "../indicators/mss.js";
-import { computeActiveWindows, lastTradingWeek, killzoneOfK } from "../indicators/killzone.js";
 import { analyzeBias } from "../engine/analyzeBias.js";
 import { pathToFileURL } from "node:url";
 
@@ -64,7 +63,9 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const price = price5m ?? price4h;
 
   // 核心判定链路（与 Historical Scanner 共用 analyzeBias，见 engine/analyzeBias.js）
-  const { structure, liquidity, location, pdArray, bias } = analyzeBias({ candles: h4, daily, weekly, price, time });
+  // session（数据驱动 Killzone）在 analyzeBias 内统一计算：h1 → 上周交易周成交量 →
+  // 当前 4H K 覆盖的活跃窗口，同时供 confidence 时机因子与展示使用
+  const { structure, liquidity, location, pdArray, session, bias } = analyzeBias({ candles: h4, daily, weekly, price, time, h1 });
 
   // P1-A：流动性扫损（5m K 线：进行中 5m 实时检测 + 最近 48 根已收盘 5m 确认，≈4 小时窗口）
   // 用 5m 粒度：扫损是分钟级价格行为（刺破流动性后收回），4H 单根 K 会把整个过程包住，粒度过粗
@@ -107,11 +108,8 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     ? { type: ob.type, kind: ob.kind, state: ob.state, high: ob.high, low: ob.low, status: ob.status, location: ob.location }
     : null;
 
-  // 数据驱动 Killzone（真实活跃窗口）：上周交易周（周一~五）1h 成交量聚合 →
-  // 当前 4H K 覆盖的活跃窗口 { start, end, ratio } | null（ratio = 窗口成交量占比%）；
-  // 上周数据不足 24 根（如 1h 拉取失败/缓存旧）→ null → 显示"非 Killzone"
-  const wk = lastTradingWeek(h1);
-  const session = wk.length >= 24 ? killzoneOfK(lastK, computeActiveWindows(wk)) : null;
+  // 数据驱动 Killzone（真实活跃窗口）：由 analyzeBias 计算（见上）。
+  // 返回 { start, end, ratio } | null（ratio = 窗口成交量占比%）；无数据 → null → "非 Killzone"
 
   return {
     symbol,
