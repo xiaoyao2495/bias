@@ -12,7 +12,8 @@
  * 判定规则：
  *   computeActiveWindows(h1) — 输入 1h K 线（含 quoteVol），输出活跃窗口
  *     [{ start, end, ratio }]（start/end 为北京时间小时，半开区间；ratio=窗口成交量占比%）
- *     活跃小时 = 该小时成交量 > 全天均值 × factor（默认 1.5），合并连续小时为窗口。
+ *     活跃小时 = 该小时成交量 > 全天均值 × factor（默认 1.5），合并连续小时为窗口；
+ *     窗口占比 < 10%（不足全天 1/10）的窗口视为碎片丢弃（Killzone = 流动性高峰）。
  *     factor 用 1.5（而非 1.2）：三币上周实盘验证（BTC/SNDK/MU），1.2×均值 ≈ 5% 会把
  *     5-6% 的次级小峰（如 BTC 06/09 点、MU 08 点）误判为"活跃窗口"，与 15-17% 主峰
  *     同等待遇，产生碎片窗口误导 Session 展示；1.5×均值（≈6.25%）下碎片消失、主峰完整保留。
@@ -23,6 +24,8 @@
 
 const BJ_OFFSET_MS = 8 * 3600_000;
 const DAY_MS = 24 * 3600_000;
+/** 碎片窗口过滤：窗口成交量占比 < 10%（不足全天 1/10）视为噪声丢弃（见 computeActiveWindows） */
+const WINDOW_MIN_RATIO = 10;
 
 /** ms → 北京时间小时（小数） */
 function bjHour(ms) {
@@ -94,7 +97,10 @@ export function computeActiveWindows(h1, { factor = 1.5 } = {}) {
     i = j;
   }
   windows.sort((a, b) => b.ratio - a.ratio);
-  return windows;
+  // 碎片过滤：Killzone = 流动性高峰时段，占比 < 10%（不足全天 1/10）的窗口视为次级小峰
+  // 碎片丢弃（实盘：XAG 02-03 点 7%、09-10 点 6.3% 相对主峰 17% 是噪声；factor 再提会
+  // 误杀部分主峰尾部小时，如 BTC 23 点 5.9%）。真实主峰窗口（21-23 占 17-41%）不受影响。
+  return windows.filter((w) => w.ratio >= WINDOW_MIN_RATIO);
 }
 
 /**

@@ -361,6 +361,11 @@ export function buildOverview(list) {
   return lines.join("<br/>");
 }
 
+/** 结构状态描述（中文）：当前 Bias 对应 ICT 结构形态 */
+function structureDesc(bias) {
+  return bias === "BULLISH" ? "新多头结构形成（HH+HL）" : bias === "BEARISH" ? "新空头结构形成（LH+LL）" : "结构方向未确认";
+}
+
 /**
  * 状态变化消息（bias 翻转 → ⚠️，其余 → ℹ️）。
  * 变化原因分层：Bias 变化 → 市场状态（结构失效/新结构），与 Confidence 原因分离，
@@ -384,11 +389,13 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
       const level = invalidation && invalidation.price != null ? invalidation.price : "-";
       lines.push(`结构: INVALIDATED（价格突破${broken ? "保护高位" : "保护低位"} ${level}，原 ${prev.bias} 结构失效）`);
     } else {
-      const desc =
-        cur.bias === "BULLISH" ? "新多头结构形成（HH+HL）" :
-        cur.bias === "BEARISH" ? "新空头结构形成（LH+LL）" : "结构方向未确认";
-      lines.push(`结构: ${structureStatus || "-"}（${desc}）`);
+      lines.push(`结构: ${structureStatus || "-"}（${structureDesc(cur.bias)}）`);
     }
+    lines.push("");
+  } else {
+    // ℹ️ 更新：补当前 Bias 与结构状态背景（bias 未变，无 旧→新 对比，但用户需一眼看到当前环境）
+    lines.push(`${ICON[cur.bias] || ""} ${cur.bias}`);
+    lines.push(`结构: ${structureStatus || "-"}（${structureDesc(cur.bias)}）`);
     lines.push("");
   }
   if (cur.session) lines.push(`Session: ${sessionText(cur.session)}`);

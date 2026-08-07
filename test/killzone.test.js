@@ -71,6 +71,13 @@ test("computeActiveWindows：阈值过滤 — 1.5×均值以下的小时不入�
   assert.deepEqual(computeActiveWindows(buildH1({ 20: 130 })), []);
 });
 
+test("computeActiveWindows：碎片过滤 — 占比 <10% 的窗口丢弃（XAG 02-03 点 7%、09-10 点 6.3% 场景）", () => {
+  // 21-23 三小时 300（主峰 29.1%）+ 02 点 195（过 1.5 阈值但占比仅 6.3%）+ 其余 100
+  // → 只保留主峰窗口，碎片窗口丢弃
+  const w = computeActiveWindows(buildH1({ 21: 300, 22: 300, 23: 300, 2: 195 }));
+  assert.deepEqual(w, [{ start: 21, end: 24, ratio: 29.1 }]);
+});
+
 test("computeActiveWindows：降级 — 空/不足 24 根/无成交量数据 → []", () => {
   assert.deepEqual(computeActiveWindows([]), []);
   assert.deepEqual(computeActiveWindows(buildH1({}).slice(0, 10)), []); // 不足 24 根

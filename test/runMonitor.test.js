@@ -37,6 +37,9 @@ test("buildChanged: 非 bias 变化 — ℹ️ 头、信心度/操作 旧→新�
     confidenceScore: 52, structureStatus: "VALID", invalidation: null, mss: null,
   });
   assert.match(msg, /\*\*ℹ️ ETHUSDT 4H Bias 更新\*\*/);
+  // ℹ️ 更新也带背景：当前 Bias + 结构状态（bias 未变，无 旧→新 对比）
+  assert.match(msg, /🟢 BULLISH/);
+  assert.match(msg, /结构: VALID（新多头结构形成（HH\+HL））/);
   assert.match(msg, /信心度: LOW → MEDIUM 52/);
   assert.match(msg, /操作: WAIT → WATCH_FOR_ENTRY/);
   assert.match(msg, /机会质量: MEDIUM \(planR 1.20\)/);
