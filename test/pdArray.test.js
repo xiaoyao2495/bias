@@ -194,3 +194,38 @@ test("V1.6 rankPDArray: 反向 FVG（Bearish）+ Bullish bias → Ignore", () =>
   assert.equal(r.primary, null);
   assert.deepEqual(r.alternatives, []);
 });
+
+// ---- V2.0 OB-Displacement 关联（ICT 2022：OB = 导致 Displacement 的 K 的前一根）----
+// 构造：前 20 根小实体横盘（avg body ≈ 0.21）→ K20 阴线（位移前一根）→ K21 大阳线
+// （body 14.2，收盘突破 K19 swing high 101.5，且 low 102 > K19.high → 三条件位移）
+// 期望：仅生成 1 个 BULLISH_OB（displacement: true），fallback 简化规则因区间重叠被去重
+
+function dispCandle(o, h, l, c, i) {
+  return { time: i * 1000, open: o, high: h, low: l, close: c, closeTime: i * 1000 + 500 };
+}
+
+test("V2.0 位移驱动 OB：三条件位移 K 的前一根生成 OB（displacement: true），fallback 去重", () => {
+  const candles = [];
+  for (let i = 0; i < 19; i++) candles.push(dispCandle(100, 100.6, 99.8, 100.2, i)); // 横盘小实体
+  candles.push(dispCandle(100.2, 101.5, 100.0, 100.4, 19)); // K19: swing high 101.5
+  candles.push(dispCandle(101.2, 101.4, 100.6, 100.8, 20)); // K20: 阴线（位移 K 的前一根 → OB 区间 [100.6,101.4]）
+  candles.push(dispCandle(100.8, 116, 102, 115, 21)); // K21: 大阳线位移（BOS 101.5 + FVG 101.5-102）
+
+  const obs = findOrderBlocks(candles);
+  assert.equal(obs.length, 1);
+  assert.equal(obs[0].type, "BULLISH_OB");
+  assert.equal(obs[0].high, 101.4);
+  assert.equal(obs[0].low, 100.6);
+  assert.equal(obs[0].displacement, true);
+});
+
+test("V2.0 无位移时 fallback 简化规则仍工作（displacement: false）", () => {
+  const candles = [
+    candle(102, 103, 98, 99, 0), // 阴线
+    candle(100, 107, 99, 106, 1), // 阳线突破 prev.high（无位移三条件 → 走 fallback）
+  ];
+  const obs = findOrderBlocks(candles);
+  assert.equal(obs.length, 1);
+  assert.equal(obs[0].type, "BULLISH_OB");
+  assert.equal(obs[0].displacement, false);
+});

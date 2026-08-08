@@ -73,6 +73,9 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // session（数据驱动 Killzone）在 analyzeBias 内统一计算：h1 → 上周交易周成交量 →
   // 当前 4H K 覆盖的活跃窗口，同时供 confidence 时机因子与展示使用
   const { structure, liquidity, location, pdArray, session, bias } = analyzeBias({ candles: h4, daily, weekly, price, time, h1 });
+  // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导；
+  // 同时供扫损 Judas Swing 判定（方向与 bias 相反的 NY Open 扫损 = 开盘假动作）
+  const effectiveBias = bias.effectiveBias || bias.bias;
 
   // P1-A：流动性扫损（5m K 线：进行中 5m 实时检测 + 最近 48 根已收盘 5m 确认，≈4 小时窗口）
   // 用 5m 粒度：扫损是分钟级价格行为（刺破流动性后收回），4H 单根 K 会把整个过程包住，粒度过粗
@@ -82,7 +85,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const sellLevels = (liquidity.sellSide || []).concat(
     structure.externalSwingLow != null ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow }] : []
   );
-  const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48);
+  const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48, effectiveBias);
 
   // P1-B：5m 层 MSS/BOS（周期无关检测；5m 用 ICT 最小 swing 窗口每侧 1 根，收盘确认）
   // 仅检测不生成信号：在扫损消息中标注（扫损→收回→MSS 是 ICT 经典链条），供人工判断结构转向。
@@ -126,7 +129,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     // 最后已收盘 4H（收盘报告用：收于开盘上方/下方）
     last4h: { open: lastClosed.open, close: lastClosed.close, time: lastClosed.closeTime },
     // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导
-    bias: bias.effectiveBias || bias.bias,
+    bias: effectiveBias,
     structureStatus: bias.structureStatus,
     invalidation: bias.invalidation || null, // { type, price }：结构失效时用于解释"突破哪个保护位"
     mss: bias.mss

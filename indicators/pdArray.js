@@ -5,8 +5,9 @@
  *   Bullish FVG : K1.high < K3.low  → 向上缺口，top = K3.low, bottom = K1.high
  *   Bearish FVG : K1.low  > K3.high → 向下缺口，top = K1.low,  bottom = K3.high
  *
- * Order Block（EXPERIMENTAL）：简单版（阴线后强阳突破 / 阳线后强阴跌破），仅用于展示。
- *   ICT 中 OB 应关注导致 Displacement / MSS / BOS 的根 K。V1.6 增加 confirmed 标记，不参与 Bias。
+ * Order Block：ICT 2022 定义 OB = 导致 Displacement / MSS / BOS 的根 K 的前一根（机构推动起点）。
+ *   V2.0：优先用位移 K 关联生成（displacement: true，标记质量更高）；原简化规则（阴线后强阳突破 /
+ *   阳线后强阴跌破）保留为 fallback，与位移 OB 区间重叠的跳过。不参与 Bias（仅执行区/展示）。
  *
  * V1.6：FVG/OB 增加 direction / age / location / status（OPEN-FILLED），并新增 rankPDArray
  *   用于把 PD Array 作为"执行区域"（不参与 bias 判定）：同向 + 在顺位一侧 → VALID Primary。
@@ -37,8 +38,82 @@ export function findFvgs(candles) {
  *   state = FRESH | USED
  *     后续任一根 K 回踩过 OB 区间 → USED（已消费），否则 FRESH（未访问，效力更强）
  */
+import { findDisplacements } from "./displacement.js";
+
+/**
+ * 生成一个 OB（共用：位移驱动 / fallback 简化规则都走这里）。
+ * @param {Array} candles 完整 K 线（用于后续 K 的穿透/回踩判定）
+ * @param {Object} prev OB 所在 K（其 high/low 构成 OB 区间）
+ * @param {number} i OB 确认 K 的索引（后续扫描从 i 开始，含确认 K 自身）
+ * @param {"BULLISH_OB"|"BEARISH_OB"} type
+ * @param {boolean} bullish true=BULLISH_OB
+ * @param {boolean} displacement true=由位移 K 驱动生成
+ */
+function buildOb(candles, prev, i, type, bullish, displacement) {
+  const high = prev.high;
+  const low = prev.low;
+  const body = Math.abs(prev.close - prev.open);
+
+  // 后续 K：穿透后收回（BREAKER）+ 是否被回踩（USED）
+  let broken = false;
+  let recovered = false;
+  let used = false;
+  for (let j = i; j < candles.length; j++) {
+    const k = candles[j];
+    if (k.low <= high && k.high >= low) used = true; // 价格访问过 OB 区间
+    if (bullish) {
+      if (!broken && k.close < low) broken = true; // 收盘跌破 OB 下沿（穿透）
+      else if (broken && k.close >= low) recovered = true; // 之后收盘收回 OB 内/上方
+    } else {
+      if (!broken && k.close > high) broken = true; // 收盘涨破 OB 上沿（穿透）
+      else if (broken && k.close <= high) recovered = true; // 之后收盘收回 OB 内/下方
+    }
+  }
+  // 影线拒绝：BULLISH_OB 看长下影（下方抛压被拒回），BEARISH_OB 看长上影
+  const reject = body > 0
+    ? bullish
+      ? Math.min(prev.open, prev.close) - prev.low >= 2 * body
+      : prev.high - Math.max(prev.open, prev.close) >= 2 * body
+    : false;
+  const kind = broken && recovered ? "BREAKER" : reject ? "REJECTION" : "STANDARD";
+
+  return {
+    type,
+    direction: bullish ? "BULLISH" : "BEARISH",
+    high,
+    low,
+    index: i,
+    time: prev.time,
+    experimental: true,
+    confirmed: true,
+    kind,
+    state: used ? "USED" : "FRESH",
+    displacement,
+  };
+}
+
+/**
+ * 找出所有 Order Block（ICT 2022：OB = 导致 Displacement 的 K 的前一根）。
+ *   - 优先：位移 K（displacement.js 三条件）的前一根 → OB，标记 displacement: true
+ *   - fallback：简化规则（阴线后强阳突破 / 阳线后强阴跌破），与位移 OB 区间重叠的跳过
+ * kind = STANDARD | BREAKER | REJECTION；state = FRESH | USED（语义见 buildOb）
+ */
 export function findOrderBlocks(candles) {
   const obs = [];
+
+  // 1) 位移驱动 OB：UP 位移 → 前一根 BULLISH_OB；DOWN 位移 → 前一根 BEARISH_OB
+  const dispList = findDisplacements(candles);
+  const timeToIndex = new Map();
+  for (let i = 0; i < candles.length; i++) timeToIndex.set(candles[i].closeTime, i);
+  for (const d of dispList) {
+    const idx = timeToIndex.get(d.time);
+    if (idx == null || idx <= 0) continue;
+    const prev = candles[idx - 1];
+    const bullish = d.direction === "UP";
+    obs.push(buildOb(candles, prev, idx, bullish ? "BULLISH_OB" : "BEARISH_OB", bullish, true));
+  }
+
+  // 2) fallback 简化规则：阴线后强阳突破 / 阳线后强阴跌破（与位移 OB 区间重叠的跳过，避免重复标注）
   for (let i = 1; i < candles.length; i++) {
     const prev = candles[i - 1];
     const cur = candles[i];
@@ -51,46 +126,11 @@ export function findOrderBlocks(candles) {
     const bullish = prevBearish && curBullish && cur.close > prev.high;
     const bearish = prevBullish && curBearish && cur.close < prev.low;
     if (!bullish && !bearish) continue;
+    // 与位移 OB 区间重叠 → 已由位移驱动生成，跳过 fallback
+    const dup = obs.some((o) => o.displacement && o.low <= prev.high && prev.low <= o.high);
+    if (dup) continue;
 
-    const high = prev.high;
-    const low = prev.low;
-    const body = Math.abs(prev.close - prev.open);
-
-    // 后续 K：穿透后收回（BREAKER）+ 是否被回踩（USED）
-    let broken = false;
-    let recovered = false;
-    let used = false;
-    for (let j = i; j < candles.length; j++) {
-      const k = candles[j];
-      if (k.low <= high && k.high >= low) used = true; // 价格访问过 OB 区间
-      if (bullish) {
-        if (!broken && k.close < low) broken = true; // 收盘跌破 OB 下沿（穿透）
-        else if (broken && k.close >= low) recovered = true; // 之后收盘收回 OB 内/上方
-      } else {
-        if (!broken && k.close > high) broken = true; // 收盘涨破 OB 上沿（穿透）
-        else if (broken && k.close <= high) recovered = true; // 之后收盘收回 OB 内/下方
-      }
-    }
-    // 影线拒绝：BULLISH_OB 看长下影（下方抛压被拒回），BEARISH_OB 看长上影
-    const reject = body > 0
-      ? bullish
-        ? Math.min(prev.open, prev.close) - prev.low >= 2 * body
-        : prev.high - Math.max(prev.open, prev.close) >= 2 * body
-      : false;
-    const kind = broken && recovered ? "BREAKER" : reject ? "REJECTION" : "STANDARD";
-
-    obs.push({
-      type: bullish ? "BULLISH_OB" : "BEARISH_OB",
-      direction: bullish ? "BULLISH" : "BEARISH",
-      high,
-      low,
-      index: i,
-      time: prev.time,
-      experimental: true,
-      confirmed: true,
-      kind,
-      state: used ? "USED" : "FRESH",
-    });
+    obs.push(buildOb(candles, prev, i, bullish ? "BULLISH_OB" : "BEARISH_OB", bullish, false));
   }
   return obs;
 }

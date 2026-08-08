@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detectSweeps } from "../indicators/sweep.js";
+import { detectSweeps, isJudasWindow } from "../indicators/sweep.js";
 
 const M5 = 300_000;
 const now = Date.now();
@@ -123,4 +123,36 @@ test("历史 wick 刺破但收盘未越过 → 不算消费，扫损仍上报", 
   assert.equal(s.type, "EQH");
   assert.equal(s.level, 105);
   assert.equal(s.sweptPrice, 107);
+});
+
+// —— Judas Swing（ICT 2022）：NY Open 窗口判定 ——
+// 窗口 = 美股开盘后 90 分钟（北京时间）：夏令时（4-10 月）21:30-23:00，冬令时 22:30-24:00
+
+test("isJudasWindow: 夏令时 北京 21:35（2026-08 月中）→ true", () => {
+  assert.equal(isJudasWindow(new Date("2026-08-08T13:35:00Z")), true); // 北京 21:35
+});
+
+test("isJudasWindow: 夏令时 北京 21:30 整 → true（含边界）", () => {
+  assert.equal(isJudasWindow(new Date("2026-08-08T13:30:00Z")), true); // 北京 21:30
+});
+
+test("isJudasWindow: 夏令时 北京 23:00 → false（窗口已过）", () => {
+  assert.equal(isJudasWindow(new Date("2026-08-08T15:00:00Z")), false); // 北京 23:00
+});
+
+test("isJudasWindow: 冬令时 北京 22:35（2026-01 月中）→ true", () => {
+  assert.equal(isJudasWindow(new Date("2026-01-08T14:35:00Z")), true); // 北京 22:35
+});
+
+test("isJudasWindow: 冬令时 北京 22:15 → false（窗口未开始）", () => {
+  assert.equal(isJudasWindow(new Date("2026-01-08T14:15:00Z")), false); // 北京 22:15
+});
+
+test("detectSweeps: 传入 bias 时返回 judas 字段（默认 false，不改变既有扫损行为）", () => {
+  // 基础收盘 115 > 111（EQL 未消费），扫损 K 跌破后收回
+  const bars = Array.from({ length: 50 }, (_, i) => closedK(i, 114, 116, 113, 115));
+  bars[48] = closedK(48, 113, 114, 110, 112); // SSL 扫损：low 110 < 111，close 112 > 111
+  const s = detectSweeps([...bars, liveK(112, 113, 111, 112)], [], [{ type: "EQL", price: 111 }], 112, 48, "BULLISH");
+  assert.equal(s.side, "SSL");
+  assert.equal(typeof s.judas, "boolean");
 });

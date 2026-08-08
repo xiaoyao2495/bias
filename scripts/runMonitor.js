@@ -310,11 +310,19 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
     `${sideText}被扫：${sweptText}，收 ${sweep.close}`,
     `${timeText} · 现价 ${price}`,
     "",
+  ];
+  // Judas Swing（ICT 2022）：NY Open 窗口内、方向与 4H Bias 相反的扫损 = 开盘假动作，
+  // 先插针扫流动性（止损），随后反转走真方向 → 提醒别把假动作当方向信号
+  if (sweep.judas) {
+    lines.push(`⚠️ 开盘假动作（NY Open 窗口）: 方向与 4H Bias 相反，留意反转`);
+    lines.push("");
+  }
+  lines.push(
     "市场背景:",
     `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,
     `Session: ${sessionText(cur.session) || "非 Killzone"}`,
     `Scenario: ${scenarioCN(cur.scenario)}`,
-  ];
+  );
   // P1-B：5m 结构事件（扫损→收回→MSS 是 ICT 经典链条，标注当前 5m 结构状态）
   if (mss5m && mss5m.lastEvent) {
     const ev = mss5m.lastEvent;
