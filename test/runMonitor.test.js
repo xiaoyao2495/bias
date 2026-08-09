@@ -106,6 +106,44 @@ test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据�
   assert.match(msg, /\*\*ETHUSDT\*\* 收下 -0.50% · 🔴 BEARISH · LOW 10/);
 });
 
+test("buildCloseReport: 位移方向与收线方向相反 → ⚠️背离标注（先冲高后回落）", () => {
+  const msg = buildCloseReport([
+    { symbol: "SPCXUSDT", last4h: { open: 137, close: 136.5 }, displacement: { direction: "UP", ratio: 2.4, structureBreak: { type: "BOS", direction: "UP", level: 138 }, fvg: { top: 136.8, bottom: 136.5 } }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 65 },
+  ]);
+  assert.match(msg, /收下 -0.36% · 🟢 BULLISH · MEDIUM 65 · 位移↑2.4x ⚠️背离（先冲高后回落）/);
+});
+
+test("buildCloseReport: 异动合约（|幅度|≥5%）置顶加 ⚡，按幅度降序", () => {
+  const msg = buildCloseReport([
+    { symbol: "BTCUSDT", last4h: { open: 100, close: 101 }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 50 },
+    { symbol: "BICOUSDT", last4h: { open: 1, close: 0.685 }, cur: { bias: "NEUTRAL", confidence: "LOW" }, confidenceScore: 0 },
+    { symbol: "BLUAIUSDT", last4h: { open: 1, close: 0.869 }, cur: { bias: "NEUTRAL", confidence: "LOW" }, confidenceScore: 0 },
+  ]);
+  assert.match(msg, /⚡ \*\*BICOUSDT\*\* 收下 -31.50%/);
+  assert.ok(msg.indexOf("⚡ **BICOUSDT**") < msg.indexOf("⚡ **BLUAIUSDT**"), "异动按幅度降序（-31.5% 在 -13.1% 前）");
+  assert.ok(msg.indexOf("⚡ **BLUAIUSDT**") < msg.indexOf("**BTCUSDT**"), "异动在普通合约前");
+});
+
+test("buildCloseReport: FVG 极窄（1 tick 级）→ 只显示单值", () => {
+  const msg = buildCloseReport([
+    { symbol: "BICOUSDT", last4h: { open: 1, close: 1.05 }, displacement: { direction: "UP", ratio: 4.3, structureBreak: { type: "BOS", direction: "UP", level: 0.054 }, fvg: { top: 0.054, bottom: 0.054 } }, cur: { bias: "NEUTRAL", confidence: "LOW" }, confidenceScore: 0 },
+  ]);
+  assert.match(msg, /FVG 0\.054/);
+  assert.ok(!msg.includes("FVG 0.054-0.054"), "极窄缺口不应显示区间");
+});
+
+test("buildCloseReport: 无合约处于活跃窗口 → 头部省略统计；有 → 显示", () => {
+  const none = buildCloseReport([
+    { symbol: "BTCUSDT", last4h: { open: 100, close: 101 }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 50 },
+  ]);
+  assert.match(none, /\*\*4H 收盘报告\*\*（北京/);
+  assert.ok(!none.includes("本时段"), "0 个活跃窗口时省略统计");
+  const some = buildCloseReport([
+    { symbol: "BTCUSDT", last4h: { open: 100, close: 101 }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 50, session: { start: 20, end: 24, ratio: 23.4 } },
+  ]);
+  assert.match(some, /本时段 1\/1 合约处于活跃窗口/);
+});
+
 test("buildOverview: 首轮全览字段布局（Scenario · 信心度 · 机会质量 · 操作）", () => {
   const msg = buildOverview([
     { symbol: "BTCUSDT", cur: { bias: "BULLISH", scenario: "BULLISH_CONTINUATION", confidence: "MEDIUM", quality: "MEDIUM", planR: 1.2, decision: "WATCH_FOR_ENTRY" }, confidenceScore: 52 },

@@ -273,25 +273,37 @@ function saveCloseReport(boundaryMs) {
 /**
  * 4H 收盘报告：每根 4H 收线后的固定状态播报（即使无变化也推）。
  * 每合约一行：收于开盘上方/下方 + 幅度 + 当前 Bias + 信心度（ICT Daily Bias 的 open/close 视角）。
+ * 优化：异动（|幅度| ≥ 5%）置顶加 ⚡ 并按幅度降序；位移方向与收线方向相反时标注背离；
+ *      无合约处于活跃窗口时省略头部统计。
  */
 export function buildCloseReport(overview) {
   const boundary = new Date(latestBjBoundaryMs());
   const bjBoundary = new Date(boundary.getTime() + BJ_OFFSET_MS);
   const label = `${String(bjBoundary.getUTCHours()).padStart(2, "0")}:00`;
-  // 数据驱动后无全局 Killzone 窗口：统计本时段处于自身活跃窗口的合约数，反映整体活跃度
+  // 数据驱动后无全局 Killzone 窗口：统计本时段处于自身活跃窗口的合约数，反映整体活跃度（0 时省略）
   const activeCount = overview.filter((r) => r.session).length;
-  const kzText = `本时段 ${activeCount}/${overview.length} 合约处于活跃窗口`;
-  const lines = [`**4H 收盘报告** · ${kzText}（北京 ${label} 收线）`, `本根 4H 收盘：`, ""];
+  const kzText = activeCount > 0 ? ` · 本时段 ${activeCount}/${overview.length} 合约处于活跃窗口` : "";
+  const lines = [`**4H 收盘报告**${kzText}（北京 ${label} 收线）`, `本根 4H 收盘：`, ""];
+  const rows = [];
   for (const r of overview) {
     const k = r.last4h;
     if (!k || k.open == null) continue;
     const pct = ((k.close - k.open) / k.open) * 100;
     const up = k.close >= k.open;
-    const disp = r.displacement
-      ? ` · 位移${r.displacement.direction === "UP" ? "↑" : "↓"}${r.displacement.ratio.toFixed(1)}x（${dispEvidence(r.displacement)}）`
-      : "";
-    lines.push(`**${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · ${ICON[r.cur.bias] || ""} ${r.cur.bias} · ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}${disp}`);
+    const spike = Math.abs(pct) >= 5; // 异动（±5%）：置顶 + ⚡
+    let disp = "";
+    if (r.displacement) {
+      const upDisp = r.displacement.direction === "UP";
+      disp = ` · 位移${upDisp ? "↑" : "↓"}${r.displacement.ratio.toFixed(1)}x`;
+      // 背离：位移方向与收线方向相反（先冲高后回落 / 先下探后收回）——ICT 里是流动性扫动信号
+      if (up !== upDisp) disp += ` ⚠️背离（${up ? "先下探后收回" : "先冲高后回落"}）`;
+      disp += `（${dispEvidence(r.displacement)}）`;
+    }
+    const line = `**${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · ${ICON[r.cur.bias] || ""} ${r.cur.bias} · ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}${disp}`;
+    rows.push({ abs: Math.abs(pct), spike, line });
   }
+  rows.sort((a, b) => (b.spike - a.spike) || (b.abs - a.abs)); // 异动优先，同组按幅度降序
+  for (const row of rows) lines.push(`${row.spike ? "⚡ " : ""}${row.line}`);
   return lines.join("<br/>");
 }
 
@@ -334,17 +346,24 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
   return lines.join("<br/>");
 }
 
-/** 位移证据摘要：结构突破位（BOS）+ 缺口区间（FVG），让用户确认是否真为 ICT 三条件位移 */
+/** 位移证据摘要：结构突破位（BOS）+ 缺口区间（FVG），让用户确认是否真为 ICT 三条件位移。
+ *  FVG 极窄（宽度 ≤ 价格 0.02%，1 tick 级）时只显示单值，避免 0.05-0.05 噪音 */
 function dispEvidence(d) {
   const parts = [];
   if (d.structureBreak && d.structureBreak.level != null) parts.push(`BOS ${fmtPrice(d.structureBreak.level)}`);
-  if (d.fvg && d.fvg.top != null && d.fvg.bottom != null) parts.push(`FVG ${fmtPrice(d.fvg.bottom)}-${fmtPrice(d.fvg.top)}`);
+  if (d.fvg && d.fvg.top != null && d.fvg.bottom != null) {
+    const narrow = d.fvg.top - d.fvg.bottom <= d.fvg.top * 0.0002;
+    parts.push(narrow ? `FVG ${fmtPrice(d.fvg.bottom)}` : `FVG ${fmtPrice(d.fvg.bottom)}-${fmtPrice(d.fvg.top)}`);
+  }
   return parts.join("，");
 }
 
-/** 价格显示：整数原样，小数保留 2 位去尾零 */
+/** 价格格式化：按量级自适应小数位（BTC 千级 1 位、百级 2 位、个位 3 位、低价币 5 位） */
 function fmtPrice(n) {
-  return String(Number(n.toFixed(2)));
+  if (n == null) return "-";
+  const abs = Math.abs(n);
+  const digits = abs >= 1000 ? 1 : abs >= 100 ? 2 : abs >= 1 ? 3 : 5;
+  return String(Number(n.toFixed(digits)));
 }
 
 /** 流动性位类型 → 中文标签 */
