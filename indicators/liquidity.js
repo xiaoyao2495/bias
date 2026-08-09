@@ -1,12 +1,12 @@
 /**
- * liquidity.js — 流动性目标：PDH/PDL、PWH/PWL、EQH/EQL
+ * liquidity.js — 流动性目标：PDH/PDL、PWH/PWL、EQH/EQL、盘前区间（PRE_MARKET_HIGH/LOW）
  *
  * 输出：
  *   {
- *     buySide:  [{ type: "PDH"|"PWH"|"EQH", price, touches?, firstIndex?, lastIndex? }...], // 上方（买方）流动性，按价格从高到低
- *     sellSide: [{ type: "PDL"|"PWL"|"EQL", price, touches?, firstIndex?, lastIndex? }...], // 下方（卖方）流动性，按价格从低到高
- *     primaryBuyDraw:  { type, price } | null,  // 上方主 Draw（按 ICT 优先级 PWH > PDH > EQH）
- *     primarySellDraw: { type, price } | null,  // 下方主 Draw（按 ICT 优先级 PWL > PDL > EQL）
+ *     buySide:  [{ type: "PDH"|"PWH"|"PRE_MARKET_HIGH"|"EQH", price, touches?, firstIndex?, lastIndex? }...], // 上方（买方）流动性，按价格从高到低
+ *     sellSide: [{ type: "PDL"|"PWL"|"PRE_MARKET_LOW"|"EQL", price, touches?, firstIndex?, lastIndex? }...], // 下方（卖方）流动性，按价格从低到高
+ *     primaryBuyDraw:  { type, price } | null,  // 上方主 Draw（按 ICT 优先级 PWH > PDH > PRE_MARKET_HIGH > EQH）
+ *     primarySellDraw: { type, price } | null,  // 下方主 Draw（按 ICT 优先级 PWL > PDL > PRE_MARKET_LOW > EQL）
  *   }
  *
  * EQH / EQL：两个以上接近的 Swing High / Low（误差默认 0.2%）视为等高点。
@@ -14,20 +14,27 @@
  *   摆动点聚出"远高于现价"的假等低点（Case Replay 审计发现）。
  *   额外记录形成时间信息：touches（触点数量）、firstIndex / lastIndex（在 4H K 线中的位置），
  *   因为 ICT 流动性中"时间"很重要（越近的等高点越有效）。
+ *
+ * V2.0 盘前区间（PRE_MARKET_HIGH/LOW）：ICT 2022 Asian Range 在美股代币上的对应物。
+ *   美股盘前（北京 16:00-21:30）形成的区间高低是开盘后最常被扫的流动性位，
+ *   优先级置于 PDH/PDL 之后、EQH/EQL 之前。需要 1h K 线（analyzeBias 的 h1）计算。
  */
 
 const EQ_TOLERANCE = 0.002; // 0.2%
 const EQ_LOOKBACK_BARS = 150; // EQH/EQL 只统计最近 150 根 4H K 线的 swing（≈25 天）
-const BUY_PRIORITY = ["PWH", "PDH", "EQH"]; // ICT Draw on Liquidity 优先级（不含 external/internal swing，见 rankLiquidityTargets）
-const SELL_PRIORITY = ["PWL", "PDL", "EQL"];
+// V2.0：Draw on Liquidity 优先级（不含 external/internal swing，见 rankLiquidityTargets）
+const BUY_PRIORITY = ["PWH", "PDH", "PRE_MARKET_HIGH", "EQH"];
+const SELL_PRIORITY = ["PWL", "PDL", "PRE_MARKET_LOW", "EQL"];
 
 // V1.5：目标类型的人类可读 reason
 const TYPE_REASON = {
   PWH: "Previous Week High (HTF objective)",
   PDH: "Previous Day High",
+  PRE_MARKET_HIGH: "Pre-market High (session liquidity)",
   EQH: "Equal Highs (liquidity cluster)",
   PWL: "Previous Week Low (HTF objective)",
   PDL: "Previous Day Low",
+  PRE_MARKET_LOW: "Pre-market Low (session liquidity)",
   EQL: "Equal Lows (liquidity cluster)",
 };
 
@@ -107,14 +114,55 @@ function lastCompleted(candles, now = Date.now()) {
 }
 
 /**
+ * V2.0 盘前区间（ICT 2022 Asian Range 的美股对应物）：
+ *   美股盘前（北京 16:00-21:30，夏令时 EDT 4:00-9:30）形成的区间高低，
+ *   是开盘后最常被扫的流动性位（开盘先扫盘前高低 → 再走真方向）。
+ *
+ * 取"最近一个盘前时段"（now 之前、北京 open 小时 16-21 的 1H K）的最高/最低。
+ *   - 无 1h 数据、非美股交易时段（找不到盘前 K）或区间无波动 → null
+ *   - 回放：传历史 now，只认 closeTime <= now 的 1H K，幂等
+ * @param {Array} [h1] 1H K 线（{time,open,high,low,close,closeTime}，time/closeTime 为 ms）
+ * @param {number} [now] 参考时间（ms），默认当前时间
+ * @returns {{ high:number, low:number, date:string, bars:number }|null}
+ */
+export function findPremarketRange(h1, now = Date.now()) {
+  if (!h1 || !h1.length) return null;
+  const BJ = 8 * 3600_000; // 北京时间 = UTC + 8h
+  const bjDate = (k) => new Date(k.time + BJ).toISOString().slice(0, 10); // 北京日期
+  const bjHour = (k) => new Date(k.time + BJ).getUTCHours(); // 北京小时
+  const inWindow = (k) => bjHour(k) >= 16 && bjHour(k) <= 21; // 北京 16:00-21:59（覆盖 21:30 盘前末段）
+
+  const closed = h1.filter((k) => k.closeTime && k.closeTime <= now);
+  if (!closed.length) return null;
+
+  // 最近一个盘前时段：从末尾往前找第一根落在盘前窗口的 K 的北京日期
+  let date = null;
+  for (let i = closed.length - 1; i >= 0; i--) {
+    if (inWindow(closed[i])) {
+      date = bjDate(closed[i]);
+      break;
+    }
+  }
+  if (!date) return null;
+
+  const ks = closed.filter((k) => bjDate(k) === date && inWindow(k));
+  if (!ks.length) return null;
+  const high = Math.max(...ks.map((k) => k.high));
+  const low = Math.min(...ks.map((k) => k.low));
+  if (high === low) return null; // 盘前无波动 → 不构成区间
+  return { high, low, date, bars: ks.length };
+}
+
+/**
  * @param {Array} dailyKlines  日 K 线（data/binance.js 输出）
  * @param {Array} weeklyKlines 周 K 线
  * @param {Array} swings        4H 摆动点（findSwings 输出，时间升序）
  * @param {number} tolerance    等高点容差（0.2% 默认）
  * @param {number} now          参考时间（ms）。回放时传历史时间，只认该时间前已收盘的日/周 K
  * @param {number} eqLookbackBars EQH/EQL 回看窗口（根 4H K 线，默认 150）
+ * @param {Array} [h1Klines]    1H K 线（可选）：美股盘前区间（PRE_MARKET_HIGH/LOW）需要
  */
-export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = EQ_TOLERANCE, now = Date.now(), eqLookbackBars = EQ_LOOKBACK_BARS) {
+export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = EQ_TOLERANCE, now = Date.now(), eqLookbackBars = EQ_LOOKBACK_BARS, h1Klines = null) {
   const buySide = [];
   const sellSide = [];
 
@@ -128,6 +176,13 @@ export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = 
   if (prevWeek) {
     buySide.push({ type: "PWH", price: prevWeek.high });
     sellSide.push({ type: "PWL", price: prevWeek.low });
+  }
+
+  // V2.0 盘前区间（需要 1h K 线；不传/非美股时段 → 忽略）
+  const premkt = findPremarketRange(h1Klines, now);
+  if (premkt) {
+    buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high });
+    sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low });
   }
 
   // EQH/EQL 只取近端 swing（按 4H K 线 index 回看）

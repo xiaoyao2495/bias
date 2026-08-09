@@ -39,7 +39,7 @@ export function analyzeBias({ candles, daily, weekly, price, time, h1, pdArrayLi
   const swings = findSwings(candles);
   const labeled = analyzeSwings(swings);
   const structure = buildStructure(labeled);
-  const liquidity = computeLiquidity(day, week, swings, 0.002, time);
+  const liquidity = computeLiquidity(day, week, swings, 0.002, time, 150, h1);
   const location = computeDealingRange(swings, structure, price);
   const fvgs = findFvgs(candles);
   const obs = findOrderBlocks(candles);

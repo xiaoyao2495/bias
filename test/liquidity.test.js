@@ -3,7 +3,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeLiquidity, findEqualHighs, findEqualLows, rankLiquidityTargets } from "../indicators/liquidity.js";
+import { computeLiquidity, findEqualHighs, findEqualLows, rankLiquidityTargets, findPremarketRange } from "../indicators/liquidity.js";
 
 const now = Date.now();
 
@@ -171,4 +171,97 @@ test("V1.5 已突破的方向侧目标被过滤（价格不在正确一侧）", 
   const r = rankLiquidityTargets(structure, liquidity, "BULLISH", 150);
   assert.equal(r.primary.type, "PDH");
   assert.equal(r.primary.price, 160);
+});
+
+// ---- V2.0 盘前区间（PRE_MARKET_HIGH/LOW，ICT 2022 Asian Range 的美股对应物）----
+// 美股盘前 = 北京 16:00-21:30（夏令时 EDT 4:00-9:30）；1H K open 在北京 16-21 点属于盘前
+
+test("V2.0 findPremarketRange: 取最近盘前时段（北京 16-21 点）的最高/最低", () => {
+  const T0 = Date.UTC(2026, 7, 7, 8, 0); // 北京 2026-08-07 16:00
+  const h1 = [0, 1, 2, 3, 4, 5].map((i) => ({
+    time: T0 + i * 3600_000,
+    open: 100,
+    high: 102 + i * 0.1,
+    low: 98 + i * 0.1,
+    close: 101,
+    closeTime: T0 + (i + 1) * 3600_000,
+  }));
+  const r = findPremarketRange(h1, Date.UTC(2026, 7, 7, 14, 30)); // 北京 22:30（盘后）
+  assert.equal(r.high, 102.5); // 最高 high
+  assert.equal(r.low, 98); // 最低 low
+  assert.equal(r.bars, 6);
+  assert.equal(r.date, "2026-08-07");
+});
+
+test("V2.0 findPremarketRange: 回放幂等 — now 只认已收盘 1H K", () => {
+  const T0 = Date.UTC(2026, 7, 7, 8, 0);
+  const h1 = [0, 1, 2, 3, 4, 5].map((i) => ({
+    time: T0 + i * 3600_000,
+    open: 100,
+    high: 102 + i * 0.1,
+    low: 98 + i * 0.1,
+    close: 101,
+    closeTime: T0 + (i + 1) * 3600_000,
+  }));
+  const r = findPremarketRange(h1, Date.UTC(2026, 7, 7, 10, 0)); // 北京 18:00：只有前 2 根收盘
+  assert.equal(r.bars, 2);
+  assert.equal(r.high, 102.1);
+  assert.equal(r.low, 98);
+});
+
+test("V2.0 findPremarketRange: 无盘前时段 K（如全部为北京 22 点后）→ null", () => {
+  const T0 = Date.UTC(2026, 7, 7, 14, 0); // 北京 22:00
+  const h1 = [0, 1, 2, 3].map((i) => ({
+    time: T0 + i * 3600_000,
+    open: 100,
+    high: 102,
+    low: 98,
+    close: 101,
+    closeTime: T0 + (i + 1) * 3600_000,
+  }));
+  assert.equal(findPremarketRange(h1, Date.UTC(2026, 7, 7, 20, 0)), null);
+});
+
+test("V2.0 computeLiquidity: 传 h1 → buySide/sellSide 含 PRE_MARKET_HIGH/LOW", () => {
+  const daily = [mkCandle(0, 50000, 48000, true)];
+  const weekly = [mkCandle(0, 60000, 52000, true)];
+  const T0 = Date.UTC(2026, 7, 7, 8, 0);
+  const h1 = [0, 1, 2, 3, 4, 5].map((i) => ({
+    time: T0 + i * 3600_000,
+    open: 100,
+    high: 102 + i * 0.1,
+    low: 98 + i * 0.1,
+    close: 101,
+    closeTime: T0 + (i + 1) * 3600_000,
+  }));
+  const l = computeLiquidity(daily, weekly, [], 0.002, Date.UTC(2026, 7, 7, 14, 30), 150, h1);
+  assert.ok(l.buySide.some((t) => t.type === "PRE_MARKET_HIGH" && t.price === 102.5));
+  assert.ok(l.sellSide.some((t) => t.type === "PRE_MARKET_LOW" && t.price === 98));
+});
+
+test("V2.0 rankLiquidityTargets: 优先级 PWH > PDH > PRE_MARKET_HIGH > EQH", () => {
+  // 无 PWH：PDH 优先于盘前高
+  const l1 = {
+    buySide: [
+      { type: "PDH", price: 160 },
+      { type: "PRE_MARKET_HIGH", price: 155 },
+      { type: "EQH", price: 150 },
+    ],
+    sellSide: [],
+  };
+  const r1 = rankLiquidityTargets(structNoExt, l1, "BULLISH", 100);
+  assert.equal(r1.primary.type, "PDH");
+  assert.equal(r1.primary.priority, 3);
+  // 无 PWH/PDH：盘前高优先于 EQH
+  const l2 = {
+    buySide: [
+      { type: "PRE_MARKET_HIGH", price: 155 },
+      { type: "EQH", price: 150 },
+    ],
+    sellSide: [],
+  };
+  const r2 = rankLiquidityTargets(structNoExt, l2, "BULLISH", 100);
+  assert.equal(r2.primary.type, "PRE_MARKET_HIGH");
+  assert.equal(r2.primary.priority, 4);
+  assert.ok(r2.primary.reason.includes("Pre-market"));
 });
