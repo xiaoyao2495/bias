@@ -10,8 +10,9 @@
  *   }
  *
  * 形成时间字段（扫损消息"被扫的流动性是什么时候的"用，用户要对照图表定位该位）：
- *   time  — 形成 K 的开盘时间（ms）：PDH/PDL=昨日日 K、PWH/PWL=上周周 K、EQH/EQL=首个触点 4H K、EXTERNAL=外部 swing 4H K
- *   date  — 盘前区间（PRE_MARKET_HIGH/LOW）的北京日期字符串 "YYYY-MM-DD"（无单一形成 K，用盘前日期）
+ *   time  — 形成 K 的开盘时间（ms）：PDH/PDL=昨日日 K、PWH/PWL=上周周 K、EQH/EQL=首个触点 4H K、
+ *           EXTERNAL=外部 swing 4H K、PRE_MARKET=盘前区间形成极值的那根 1H K
+ *   date  — 盘前区间（PRE_MARKET_HIGH/LOW）的北京日期字符串 "YYYY-MM-DD"（无 highTime/lowTime 的兜底）
  *   firstTime/lastTime — EQH/EQL 首个/最后触点的 4H K 开盘时间
  *
  * EQH / EQL：两个以上接近的 Swing High / Low（误差默认 0.2%）视为等高点。
@@ -128,7 +129,9 @@ function lastCompleted(candles, now = Date.now()) {
  *   - 回放：传历史 now，只认 closeTime <= now 的 1H K，幂等
  * @param {Array} [h1] 1H K 线（{time,open,high,low,close,closeTime}，time/closeTime 为 ms）
  * @param {number} [now] 参考时间（ms），默认当前时间
- * @returns {{ high:number, low:number, date:string, bars:number }|null}
+ * @returns {{ high:number, low:number, date:string, bars:number, highTime:number, lowTime:number }|null}
+ *   highTime/lowTime：盘前区间内形成最高/最低的那根 1H K 的开盘时间（整点），
+ *   供扫损消息精确展示"这个盘前位是几点形成的"（仅日期用户在图上找不到）
  */
 export function findPremarketRange(h1, now = Date.now()) {
   if (!h1 || !h1.length) return null;
@@ -155,7 +158,10 @@ export function findPremarketRange(h1, now = Date.now()) {
   const high = Math.max(...ks.map((k) => k.high));
   const low = Math.min(...ks.map((k) => k.low));
   if (high === low) return null; // 盘前无波动 → 不构成区间
-  return { high, low, date, bars: ks.length };
+  // 取形成极值的那根 1H K（并列时取最近一根）：扫损消息要精确到"几点形成"
+  const highK = [...ks].reverse().find((k) => k.high === high);
+  const lowK = [...ks].reverse().find((k) => k.low === low);
+  return { high, low, date, bars: ks.length, highTime: highK ? highK.time : null, lowTime: lowK ? lowK.time : null };
 }
 
 /**
@@ -186,8 +192,8 @@ export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = 
   // V2.0 盘前区间（需要 1h K 线；不传/非美股时段 → 忽略）
   const premkt = findPremarketRange(h1Klines, now);
   if (premkt) {
-    buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high, date: premkt.date });
-    sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low, date: premkt.date });
+    buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high, date: premkt.date, time: premkt.highTime });
+    sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low, date: premkt.date, time: premkt.lowTime });
   }
 
   // EQH/EQL 只取近端 swing（按 4H K 线 index 回看）

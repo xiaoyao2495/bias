@@ -609,18 +609,23 @@ function klineSpan(openMs) {
  * 各类流动性位的时间语义不同：
  *   PDH/PDL/PWH/PWL → 日/周 K（显示日期，日 K 恒为北京 08:00 开盘，时间无信息量）
  *   EQH/EQL/EXTERNAL → 4H swing K（显示日期+时间，精确到该根 4H）
- *   PRE_MARKET_HIGH/LOW → 盘前时段（无单一形成 K，显示盘前日期）
+ *   PRE_MARKET_HIGH/LOW → 盘前区间（跨 5-6 小时，只显示日期找不到）→ 精确到形成极值的
+ *     那根 1H K（显示日期+时间）；仅旧数据无 highTime/lowTime 时回退到盘前日期
  * 无形成时间（旧数据/未注入）→ null，消息里省略该段。
  */
 function levelFormedText(sweep) {
-  const d = sweep.levelDate; // 盘前区间："2026-08-09"
+  if (sweep.levelTime != null) {
+    const isDayK = sweep.type === "PDH" || sweep.type === "PDL" || sweep.type === "PWH" || sweep.type === "PWL";
+    const isPremkt = sweep.type === "PRE_MARKET_HIGH" || sweep.type === "PRE_MARKET_LOW";
+    const opts = { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour12: false };
+    if (!isDayK) Object.assign(opts, { hour: "2-digit", minute: "2-digit" });
+    const t = new Date(sweep.levelTime).toLocaleString("zh-CN", opts);
+    const suffix = isPremkt ? "（盘前）" : isDayK ? "（日/周 K）" : "（4H K）";
+    return `流动性位形成: ${t}${suffix}`;
+  }
+  const d = sweep.levelDate; // 盘前区间旧数据兜底："2026-08-09"
   if (d) return `流动性位形成: ${d.slice(5, 7)}/${d.slice(8, 10)} 盘前`;
-  if (sweep.levelTime == null) return null;
-  const isDayK = sweep.type === "PDH" || sweep.type === "PDL" || sweep.type === "PWH" || sweep.type === "PWL";
-  const opts = { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour12: false };
-  if (!isDayK) Object.assign(opts, { hour: "2-digit", minute: "2-digit" });
-  const t = new Date(sweep.levelTime).toLocaleString("zh-CN", opts);
-  return `流动性位形成: ${t}${isDayK ? "（日/周 K）" : "（4H K）"}`;
+  return null;
 }
 
 // CLI 入口：pm2 fork 模式下 argv[1] 是 pm2 容器脚本（ProcessContainerFork.js），

@@ -202,6 +202,9 @@ test("V2.0 findPremarketRange: 取最近盘前时段（北京 16-21 点）的最
   assert.equal(r.low, 98); // 最低 low
   assert.equal(r.bars, 6);
   assert.equal(r.date, "2026-08-07");
+  // 极值形成时间：high 在 i=5（北京 21:00），low 在 i=0（北京 16:00）——扫损消息精确到"几点形成"
+  assert.equal(r.highTime, T0 + 5 * 3600_000);
+  assert.equal(r.lowTime, T0);
 });
 
 test("V2.0 findPremarketRange: 回放幂等 — now 只认已收盘 1H K", () => {
@@ -246,8 +249,13 @@ test("V2.0 computeLiquidity: 传 h1 → buySide/sellSide 含 PRE_MARKET_HIGH/LOW
     closeTime: T0 + (i + 1) * 3600_000,
   }));
   const l = computeLiquidity(daily, weekly, [], 0.002, Date.UTC(2026, 7, 7, 14, 30), 150, h1);
-  assert.ok(l.buySide.some((t) => t.type === "PRE_MARKET_HIGH" && t.price === 102.5));
-  assert.ok(l.sellSide.some((t) => t.type === "PRE_MARKET_LOW" && t.price === 98));
+  const pmh = l.buySide.find((t) => t.type === "PRE_MARKET_HIGH");
+  const pml = l.sellSide.find((t) => t.type === "PRE_MARKET_LOW");
+  assert.ok(pmh && pmh.price === 102.5);
+  assert.ok(pml && pml.price === 98);
+  // 形成时间：high 在 i=5（北京 21:00），low 在 i=0（北京 16:00）
+  assert.equal(pmh.time, T0 + 5 * 3600_000);
+  assert.equal(pml.time, T0);
 });
 
 test("V2.0 rankLiquidityTargets: 优先级 PWH > PDH > PRE_MARKET_HIGH > EQH", () => {
