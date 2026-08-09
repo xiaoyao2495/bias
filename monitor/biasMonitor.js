@@ -100,12 +100,13 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
 
   // P1-A：流动性扫损（5m K 线：进行中 5m 实时检测 + 最近 48 根已收盘 5m 确认，≈4 小时窗口）
   // 用 5m 粒度：扫损是分钟级价格行为（刺破流动性后收回），4H 单根 K 会把整个过程包住，粒度过粗
-  const buyLevels = (liquidity.buySide || []).concat(
-    structure.externalSwingHigh != null ? [{ type: "EXTERNAL_HIGH", price: structure.externalSwingHigh }] : []
-  );
-  const sellLevels = (liquidity.sellSide || []).concat(
-    structure.externalSwingLow != null ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow }] : []
-  );
+  // 外部结构位补形成时间（externalSwingHighTime/LowTime，4H swing 开盘时间），供扫损消息展示"被扫的流动性是什么时候形成的"
+  const extHigh = structure.externalSwingHigh != null ? [{ type: "EXTERNAL_HIGH", price: structure.externalSwingHigh }] : [];
+  if (extHigh.length && structure.externalSwingHighTime != null) extHigh[0].time = structure.externalSwingHighTime;
+  const extLow = structure.externalSwingLow != null ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow }] : [];
+  if (extLow.length && structure.externalSwingLowTime != null) extLow[0].time = structure.externalSwingLowTime;
+  const buyLevels = (liquidity.buySide || []).concat(extHigh);
+  const sellLevels = (liquidity.sellSide || []).concat(extLow);
   const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48, effectiveBias);
 
   // P1-B：5m 层 MSS/BOS（周期无关检测；5m 用 ICT 最小 swing 窗口每侧 1 根，收盘确认）

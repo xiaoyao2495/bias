@@ -3,11 +3,16 @@
  *
  * 输出：
  *   {
- *     buySide:  [{ type: "PDH"|"PWH"|"PRE_MARKET_HIGH"|"EQH", price, touches?, firstIndex?, lastIndex? }...], // 上方（买方）流动性，按价格从高到低
- *     sellSide: [{ type: "PDL"|"PWL"|"PRE_MARKET_LOW"|"EQL", price, touches?, firstIndex?, lastIndex? }...], // 下方（卖方）流动性，按价格从低到高
+ *     buySide:  [{ type: "PDH"|"PWH"|"PRE_MARKET_HIGH"|"EQH", price, time?, date?, touches?, firstIndex?, lastIndex?, firstTime?, lastTime? }...], // 上方（买方）流动性，按价格从高到低
+ *     sellSide: [{ type: "PDL"|"PWL"|"PRE_MARKET_LOW"|"EQL", price, time?, date?, touches?, firstIndex?, lastIndex?, firstTime?, lastTime? }...], // 下方（卖方）流动性，按价格从低到高
  *     primaryBuyDraw:  { type, price } | null,  // 上方主 Draw（按 ICT 优先级 PWH > PDH > PRE_MARKET_HIGH > EQH）
  *     primarySellDraw: { type, price } | null,  // 下方主 Draw（按 ICT 优先级 PWL > PDL > PRE_MARKET_LOW > EQL）
  *   }
+ *
+ * 形成时间字段（扫损消息"被扫的流动性是什么时候的"用，用户要对照图表定位该位）：
+ *   time  — 形成 K 的开盘时间（ms）：PDH/PDL=昨日日 K、PWH/PWL=上周周 K、EQH/EQL=首个触点 4H K、EXTERNAL=外部 swing 4H K
+ *   date  — 盘前区间（PRE_MARKET_HIGH/LOW）的北京日期字符串 "YYYY-MM-DD"（无单一形成 K，用盘前日期）
+ *   firstTime/lastTime — EQH/EQL 首个/最后触点的 4H K 开盘时间
  *
  * EQH / EQL：两个以上接近的 Swing High / Low（误差默认 0.2%）视为等高点。
  *   只统计近端 swing（默认最近 150 根 4H ≈ 25 天），避免把历史价位区间的
@@ -168,21 +173,21 @@ export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = 
 
   const prevDay = lastCompleted(dailyKlines, now);
   if (prevDay) {
-    buySide.push({ type: "PDH", price: prevDay.high });
-    sellSide.push({ type: "PDL", price: prevDay.low });
+    buySide.push({ type: "PDH", price: prevDay.high, time: prevDay.time });
+    sellSide.push({ type: "PDL", price: prevDay.low, time: prevDay.time });
   }
 
   const prevWeek = lastCompleted(weeklyKlines, now);
   if (prevWeek) {
-    buySide.push({ type: "PWH", price: prevWeek.high });
-    sellSide.push({ type: "PWL", price: prevWeek.low });
+    buySide.push({ type: "PWH", price: prevWeek.high, time: prevWeek.time });
+    sellSide.push({ type: "PWL", price: prevWeek.low, time: prevWeek.time });
   }
 
   // V2.0 盘前区间（需要 1h K 线；不传/非美股时段 → 忽略）
   const premkt = findPremarketRange(h1Klines, now);
   if (premkt) {
-    buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high });
-    sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low });
+    buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high, date: premkt.date });
+    sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low, date: premkt.date });
   }
 
   // EQH/EQL 只取近端 swing（按 4H K 线 index 回看）
@@ -217,7 +222,8 @@ function pickPrimary(list, priority) {
 
 /**
  * 等高点聚类（并查集/传递闭包）：两两价格在容差内视为同簇。
- * 返回 { price, touches, firstIndex, lastIndex }，或 null。
+ * 返回 { price, touches, firstIndex, lastIndex, firstTime, lastTime }，或 null。
+ * firstTime/lastTime 为触点 swing 所在 4H K 的开盘时间（swing 无 time 时省略，兼容旧输入）。
  */
 function clusterByPrice(items, tolerance, pick) {
   if (items.length < 2) return null;
@@ -248,15 +254,20 @@ function clusterByPrice(items, tolerance, pick) {
   if (!best) return null;
   const price = pick === "max" ? Math.max(...best.map((x) => x.price)) : Math.min(...best.map((x) => x.price));
   const indexes = best.map((x) => x.index).sort((a, b) => a - b);
-  return { price, touches: best.length, firstIndex: indexes[0], lastIndex: indexes[indexes.length - 1] };
+  const first = best.find((x) => x.index === indexes[0]);
+  const last = best.find((x) => x.index === indexes[indexes.length - 1]);
+  const result = { price, touches: best.length, firstIndex: indexes[0], lastIndex: indexes[indexes.length - 1] };
+  if (first && first.time != null) result.firstTime = first.time;
+  if (last && last.time != null) result.lastTime = last.time;
+  return result;
 }
 
 export function findEqualHighs(swings, tolerance = EQ_TOLERANCE) {
-  const items = swings.filter((s) => s.type === "HIGH").map((s) => ({ price: s.price, index: s.index }));
+  const items = swings.filter((s) => s.type === "HIGH").map((s) => ({ price: s.price, index: s.index, time: s.time }));
   return clusterByPrice(items, tolerance, "max");
 }
 
 export function findEqualLows(swings, tolerance = EQ_TOLERANCE) {
-  const items = swings.filter((s) => s.type === "LOW").map((s) => ({ price: s.price, index: s.index }));
+  const items = swings.filter((s) => s.type === "LOW").map((s) => ({ price: s.price, index: s.index, time: s.time }));
   return clusterByPrice(items, tolerance, "min");
 }

@@ -78,6 +78,9 @@ export function buildStructure(labeled, sequenceLength = 5) {
     protectedHighInfo: ph ? { invalidationType: "STRUCTURE_PROTECTED_HIGH", source: ph.source } : null,
     externalSwingHigh: ext.high,
     externalSwingLow: ext.low,
+    // 外部结构位形成时间（swing 所在 4H K 的开盘时间；labeled 无 time 时省略）：扫损消息"被扫的流动性是什么时候的"
+    ...(ext.highTime != null ? { externalSwingHighTime: ext.highTime } : {}),
+    ...(ext.lowTime != null ? { externalSwingLowTime: ext.lowTime } : {}),
   };
 }
 
@@ -153,7 +156,7 @@ export function validateProtectedStructure(structure, price) {
   return { status: "VALID", brokenLevel: null };
 }
 
-/** 寻找外部结构关键位 */
+/** 寻找外部结构关键位（返回 price + 形成时间，时间来自 swing 的 time 字段） */
 function findExternalLevels(labeled, direction) {
   if (direction === "BULLISH") {
     // 外部启动点 = 最近一个 LL（下跌阶段的最后低点）
@@ -165,14 +168,19 @@ function findExternalLevels(labeled, direction) {
       }
     }
     if (lowIdx === -1) return { high: null, low: null };
-    let high = null;
+    let highSwing = null;
     for (let i = lowIdx - 1; i >= 0; i--) {
       if (labeled[i].type === "HIGH") {
-        high = labeled[i].price;
+        highSwing = labeled[i];
         break;
       }
     }
-    return { high, low: labeled[lowIdx].price };
+    return {
+      high: highSwing ? highSwing.price : null,
+      highTime: highSwing ? highSwing.time : null,
+      low: labeled[lowIdx].price,
+      lowTime: labeled[lowIdx].time,
+    };
   }
 
   if (direction === "BEARISH") {
@@ -185,14 +193,19 @@ function findExternalLevels(labeled, direction) {
       }
     }
     if (highIdx === -1) return { high: null, low: null };
-    let low = null;
+    let lowSwing = null;
     for (let i = highIdx - 1; i >= 0; i--) {
       if (labeled[i].type === "LOW") {
-        low = labeled[i].price;
+        lowSwing = labeled[i];
         break;
       }
     }
-    return { high: labeled[highIdx].price, low };
+    return {
+      high: labeled[highIdx].price,
+      highTime: labeled[highIdx].time,
+      low: lowSwing ? lowSwing.price : null,
+      lowTime: lowSwing ? lowSwing.time : null,
+    };
   }
 
   return { high: null, low: null };

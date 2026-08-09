@@ -26,45 +26,49 @@ test("PDH/PDL/PWH/PWL: 取最近已收盘的日/周 K 线", () => {
   const l = computeLiquidity(daily, weekly, [], 0.002);
 
   assert.deepEqual(l.buySide, [
-    { type: "PWH", price: 60000 },
-    { type: "PDH", price: 50000 },
+    { type: "PWH", price: 60000, time: 0 },
+    { type: "PDH", price: 50000, time: 0 },
   ]);
   assert.deepEqual(l.sellSide, [
-    { type: "PDL", price: 48000 },
-    { type: "PWL", price: 52000 },
+    { type: "PDL", price: 48000, time: 0 },
+    { type: "PWL", price: 52000, time: 0 },
   ]);
-  // ICT 优先级：买侧 PWH > PDH，卖侧 PWL > PDL
-  assert.deepEqual(l.primaryBuyDraw, { type: "PWH", price: 60000 });
-  assert.deepEqual(l.primarySellDraw, { type: "PWL", price: 52000 });
+  // ICT 优先级：买侧 PWH > PDH，卖侧 PWL > PDL（time = 形成该位 K 线的开盘时间）
+  assert.deepEqual(l.primaryBuyDraw, { type: "PWH", price: 60000, time: 0 });
+  assert.deepEqual(l.primarySellDraw, { type: "PWL", price: 52000, time: 0 });
 });
 
 test("EQH: 0.2% 容差内的多个高点归为等高点（含时间信息）", () => {
   const swings = [
-    { type: "HIGH", price: 95, index: 1 },
-    { type: "HIGH", price: 100.1, index: 2 },
-    { type: "HIGH", price: 100.2, index: 3 },
-    { type: "HIGH", price: 100.3, index: 4 },
+    { type: "HIGH", price: 95, index: 1, time: 1001 },
+    { type: "HIGH", price: 100.1, index: 2, time: 1002 },
+    { type: "HIGH", price: 100.2, index: 3, time: 1003 },
+    { type: "HIGH", price: 100.3, index: 4, time: 1004 },
   ];
   assert.deepEqual(findEqualHighs(swings, 0.002), {
     price: 100.3,
     touches: 3,
     firstIndex: 2,
     lastIndex: 4,
+    firstTime: 1002,
+    lastTime: 1004,
   });
 });
 
 test("EQL: 同理，取聚类中的最低点", () => {
   const swings = [
-    { type: "LOW", price: 90.1, index: 1 },
-    { type: "LOW", price: 90.2, index: 2 },
-    { type: "LOW", price: 90.3, index: 3 },
-    { type: "LOW", price: 110, index: 4 },
+    { type: "LOW", price: 90.1, index: 1, time: 1001 },
+    { type: "LOW", price: 90.2, index: 2, time: 1002 },
+    { type: "LOW", price: 90.3, index: 3, time: 1003 },
+    { type: "LOW", price: 110, index: 4, time: 1004 },
   ];
   assert.deepEqual(findEqualLows(swings, 0.002), {
     price: 90.1,
     touches: 3,
     firstIndex: 1,
     lastIndex: 3,
+    firstTime: 1001,
+    lastTime: 1003,
   });
 });
 
@@ -80,15 +84,22 @@ test("computeLiquidity: 输出包含 EQH/EQL", () => {
   const daily = [mkCandle(0, 50000, 48000, true)];
   const weekly = [mkCandle(0, 60000, 52000, true)];
   const swings = [
-    { type: "HIGH", price: 100.1, index: 1 },
-    { type: "HIGH", price: 100.2, index: 2 },
-    { type: "LOW", price: 90.1, index: 3 },
-    { type: "LOW", price: 90.2, index: 4 },
+    { type: "HIGH", price: 100.1, index: 1, time: 1001 },
+    { type: "HIGH", price: 100.2, index: 2, time: 1002 },
+    { type: "LOW", price: 90.1, index: 3, time: 1003 },
+    { type: "LOW", price: 90.2, index: 4, time: 1004 },
   ];
   const l = computeLiquidity(daily, weekly, swings, 0.002);
 
-  assert.ok(l.buySide.some((t) => t.type === "EQH" && t.price === 100.2));
-  assert.ok(l.sellSide.some((t) => t.type === "EQL" && t.price === 90.1));
+  const eqh = l.buySide.find((t) => t.type === "EQH");
+  const eql = l.sellSide.find((t) => t.type === "EQL");
+  assert.ok(eqh && eqh.price === 100.2);
+  assert.ok(eql && eql.price === 90.1);
+  // 形成时间贯通：EQH/EQL 带触点 swing 的 4H K 开盘时间（扫损消息"被扫的流动性是什么时候的"）
+  assert.equal(eqh.firstTime, 1001);
+  assert.equal(eqh.lastTime, 1002);
+  assert.equal(eql.firstTime, 1003);
+  assert.equal(eql.lastTime, 1004);
 });
 
 // ---- V1.5 rankLiquidityTargets ----

@@ -315,12 +315,13 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
   const tag = sweep.realtime ? "实时" : "已确认";
   const timeText = sweep.realtime
     ? `检测于 ${nowHHMM()}（本根 5m 进行中）`
-    : `时间: ${bjTime(sweep.closedTime)}（已收盘确认）`;
+    : `扫损 K: ${klineSpan(sweep.time)}（已收盘确认）`;
+  const formedText = levelFormedText(sweep); // 被扫流动性位是"哪根 K/哪天"形成的（用户对照图表定位用）
   const lines = [
     `**⚡ ${symbol} 流动性扫损（${tag}）**  🕐 ${nowHHMM()}`,
     "",
     `${sideText}被扫：${sweptText}，收 ${sweep.close}`,
-    `${timeText} · 现价 ${price}`,
+    `${[formedText, timeText, `现价 ${price}`].filter(Boolean).join(" · ")}`,
     "",
   ];
   // Judas Swing（ICT 2022）：NY Open 窗口内、方向与 4H Bias 相反的扫损 = 开盘假动作，
@@ -590,16 +591,36 @@ function nowHHMM() {
   });
 }
 
-/** 时间戳 → 北京时间 "MM-DD hh:mm"（与消息其他时间统一北京时间，避免 UTC/北京混用） */
-function bjTime(ms) {
-  return new Date(ms).toLocaleString("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
+/**
+ * 5m K 时段（北京时间）："MM-DD hh:mm - hh:mm"（开盘带日期，结束只显时刻）。
+ * 扫损消息要明确"发生在哪根 K"，用户对照图表 5 分钟刻度即可定位——
+ * 直接用 closeTime 会显示成 22:34 这类非整刻度（Binance closeTime = 开盘+5min−1ms），
+ * 在 5m 图上找不到对应 K。
+ */
+function klineSpan(openMs) {
+  const opts = { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false };
+  const open = new Date(openMs).toLocaleString("zh-CN", { ...opts, month: "2-digit", day: "2-digit" });
+  const end = new Date(openMs + 5 * 60_000).toLocaleString("zh-CN", opts);
+  return `${open} - ${end}`;
+}
+
+/**
+ * 被扫流动性位的形成时间（北京时间）——用户要对照图表定位"这个位是哪天/哪根 K 形成的"。
+ * 各类流动性位的时间语义不同：
+ *   PDH/PDL/PWH/PWL → 日/周 K（显示日期，日 K 恒为北京 08:00 开盘，时间无信息量）
+ *   EQH/EQL/EXTERNAL → 4H swing K（显示日期+时间，精确到该根 4H）
+ *   PRE_MARKET_HIGH/LOW → 盘前时段（无单一形成 K，显示盘前日期）
+ * 无形成时间（旧数据/未注入）→ null，消息里省略该段。
+ */
+function levelFormedText(sweep) {
+  const d = sweep.levelDate; // 盘前区间："2026-08-09"
+  if (d) return `流动性位形成: ${d.slice(5, 7)}/${d.slice(8, 10)} 盘前`;
+  if (sweep.levelTime == null) return null;
+  const isDayK = sweep.type === "PDH" || sweep.type === "PDL" || sweep.type === "PWH" || sweep.type === "PWL";
+  const opts = { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour12: false };
+  if (!isDayK) Object.assign(opts, { hour: "2-digit", minute: "2-digit" });
+  const t = new Date(sweep.levelTime).toLocaleString("zh-CN", opts);
+  return `流动性位形成: ${t}${isDayK ? "（日/周 K）" : "（4H K）"}`;
 }
 
 // CLI 入口：pm2 fork 模式下 argv[1] 是 pm2 容器脚本（ProcessContainerFork.js），

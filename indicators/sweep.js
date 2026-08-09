@@ -44,22 +44,32 @@ function judasOf(side, bias) {
 
 /**
  * @param {Array} h5m 5m K 线（{time,open,high,low,close,closeTime}）
- * @param {Array} buySide 上方流动性 [{type, price}]（如 PDH/PWH/EQH/外部高点）
- * @param {Array} sellSide 下方流动性 [{type, price}]（如 PDL/PWL/EQL/外部低点）
+ * @param {Array} buySide 上方流动性 [{type, price, time?, date?}]（如 PDH/PWH/EQH/外部高点）
+ * @param {Array} sellSide 下方流动性 [{type, price, time?, date?}]（如 PDL/PWL/EQL/外部低点）
  * @param {number} [price] 当前最新价（实时检测的"收回"依据；缺省则只做已收盘检测）
  * @param {number} [window=48] 已收盘确认的回看窗口（根 5m，48 ≈ 4 小时）
  * @param {"BULLISH"|"BEARISH"|null} [bias] 4H 有效 Bias（用于 Judas Swing 判定；缺省则不做方向判断）
  * @returns {Object|null}
- *   { side: "BSL"|"SSL", type, level, sweptPrice, close, time, key, realtime, closedTime?, judas? }
+ *   { side: "BSL"|"SSL", type, level, sweptPrice, close, time, key, realtime, closedTime?, judas?, levelTime?, levelDate? }
  *   time    — K 开盘时间（标识）
  *   key     — 事件去重键（`${openTime}_${side}`，同一根 5m 内同一侧只推一次）
  *   realtime— true=进行中 K 实时检测；false=已收盘 K 收盘确认
  *   closedTime — 已收盘事件确认时的 K 收盘时间（实时事件无此字段）
  *   judas   — true=NY Open 窗口内且方向与 bias 相反的扫损（开盘假动作）
+ *   levelTime/levelDate — 被扫流动性位的形成时间（透传自流动性项：levelTime=形成 K 开盘 ms，
+ *     如 PDH 的昨日日 K；levelDate=盘前区间北京日期 "YYYY-MM-DD"），供消息层展示"这个流动性是什么时候形成的"
  */
 export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = null) {
   const now = Date.now();
   const cur = h5m[h5m.length - 1];
+
+  /** 透传流动性位的形成时间（lv 无 time/date 时省略，不产生 undefined 字段） */
+  const levelMeta = (lv) => {
+    const m = {};
+    if (lv.time != null) m.levelTime = lv.time;
+    if (lv.date != null) m.levelDate = lv.date;
+    return m;
+  };
 
   // 流动性位是否早已被消费（此前任一根已收盘 K 收在 level 外侧）：
   //   BSL 只要历史收在 level 上方 → 该位已破位/被扫，之后插针只是回测旧位，不算新扫损；SSL 对称。
@@ -79,12 +89,12 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
     const lastIdx = h5m.length - 1;
     for (const lv of buySide || []) {
       if (cur.high > lv.price && price < lv.price && !alreadyTaken(lv, true, lastIdx)) {
-        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: cur.high, close: price, time: cur.time, key: `${cur.time}_BSL`, realtime: true, judas: judasOf("BSL", bias) && isJudasWindow() };
+        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: cur.high, close: price, time: cur.time, key: `${cur.time}_BSL`, realtime: true, judas: judasOf("BSL", bias) && isJudasWindow(), ...levelMeta(lv) };
       }
     }
     for (const lv of sellSide || []) {
       if (cur.low < lv.price && price > lv.price && !alreadyTaken(lv, false, lastIdx)) {
-        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: cur.low, close: price, time: cur.time, key: `${cur.time}_SSL`, realtime: true, judas: judasOf("SSL", bias) && isJudasWindow() };
+        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: cur.low, close: price, time: cur.time, key: `${cur.time}_SSL`, realtime: true, judas: judasOf("SSL", bias) && isJudasWindow(), ...levelMeta(lv) };
       }
     }
   }
@@ -97,12 +107,12 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
     const idx = h5m.indexOf(k);
     for (const lv of buySide || []) {
       if (k.high > lv.price && k.close < lv.price && !alreadyTaken(lv, true, idx)) {
-        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: k.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("BSL", bias) && isJudasWindow() };
+        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: k.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(), ...levelMeta(lv) };
       }
     }
     for (const lv of sellSide || []) {
       if (k.low < lv.price && k.close > lv.price && !alreadyTaken(lv, false, idx)) {
-        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: k.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("SSL", bias) && isJudasWindow() };
+        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: k.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(), ...levelMeta(lv) };
       }
     }
   }

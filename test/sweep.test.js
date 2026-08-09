@@ -18,13 +18,15 @@ const normal = (i) => closedK(i, 100, 101, 99, 100);
 
 test("实时：BSL 被扫 — 进行中 K 刺破上方流动性且现价收回下方", () => {
   const h5m = [...Array.from({ length: 50 }, (_, i) => normal(i)), liveK(101, 106, 100, 104)];
-  const s = detectSweeps(h5m, [{ type: "PDH", price: 105 }], [], 104); // 现价 104 < 105 已收回
+  const s = detectSweeps(h5m, [{ type: "PDH", price: 105, time: 1234 }], [], 104); // 现价 104 < 105 已收回
   assert.equal(s.side, "BSL");
   assert.equal(s.type, "PDH");
   assert.equal(s.level, 105);
   assert.equal(s.sweptPrice, 106);
   assert.equal(s.realtime, true);
   assert.equal(s.key, `${h5m.at(-1).time}_BSL`);
+  // 透传被扫流动性位的形成时间（PDH=昨日日 K 开盘）
+  assert.equal(s.levelTime, 1234);
 });
 
 test("实时：SSL 被扫 — 进行中 K 刺破下方流动性且现价收回上方", () => {
@@ -40,7 +42,7 @@ test("已收盘确认：SSL — 最近 48 根内跌破 EQL 后收盘收回", () 
   // 常态收盘 115 > 111（位未消费，保证扫损事件是新鲜的）
   const bars = Array.from({ length: 50 }, (_, i) => closedK(i, 114, 116, 113, 115));
   bars[48] = closedK(48, 113, 114, 110, 112); // 扫损 K：low 110 < 111，close 112 > 111
-  const s = detectSweeps([...bars, liveK(112, 113, 111, 112)], [], [{ type: "EQL", price: 111 }], 112);
+  const s = detectSweeps([...bars, liveK(112, 113, 111, 112)], [], [{ type: "EQL", price: 111, time: 5555 }], 112);
   assert.equal(s.side, "SSL");
   assert.equal(s.type, "EQL");
   assert.equal(s.level, 111);
@@ -49,6 +51,8 @@ test("已收盘确认：SSL — 最近 48 根内跌破 EQL 后收盘收回", () 
   assert.equal(s.realtime, false);
   assert.equal(s.closedTime, bars[48].closeTime);
   assert.equal(s.key, `${bars[48].time}_SSL`);
+  // 透传被扫流动性位的形成时间（EQL=触点 swing 的 4H K 开盘）
+  assert.equal(s.levelTime, 5555);
 });
 
 test("已收盘确认：BSL — 从近到远取最近一次事件", () => {
@@ -123,6 +127,24 @@ test("历史 wick 刺破但收盘未越过 → 不算消费，扫损仍上报", 
   assert.equal(s.type, "EQH");
   assert.equal(s.level, 105);
   assert.equal(s.sweptPrice, 107);
+});
+
+test("detectSweeps: 透传盘前流动性位的形成日期（levelDate）", () => {
+  // 常态收盘 100 > 99（未消费），48 号 K 刺破 106 后收盘收回 97 → BSL 扫损
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[48] = closedK(48, 100, 107, 99, 97);
+  const s = detectSweeps([...bars, liveK(98, 99, 97, 98)], [{ type: "PRE_MARKET_HIGH", price: 106, date: "2026-08-09" }], [], 98);
+  assert.equal(s.type, "PRE_MARKET_HIGH");
+  assert.equal(s.levelDate, "2026-08-09");
+});
+
+test("detectSweeps: 流动性位无形成时间 → 不产生 levelTime/levelDate 字段", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[48] = closedK(48, 100, 107, 99, 97);
+  const s = detectSweeps([...bars, liveK(98, 99, 97, 98)], [{ type: "EQH", price: 106 }], [], 98);
+  assert.equal(s.type, "EQH");
+  assert.equal(s.levelTime, undefined);
+  assert.equal(s.levelDate, undefined);
 });
 
 // —— Judas Swing（ICT 2022）：NY Open 窗口判定 ——

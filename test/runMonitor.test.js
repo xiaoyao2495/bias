@@ -63,11 +63,14 @@ test("buildChanged: Scenario 值 + 原因英译中（ETHUSDT 08-06 通知场景�
 test("buildSweep: SSL 已收盘确认 — 侧/位/价/回收/背景字段齐全", () => {
   const msg = buildSweep({
     symbol: "SPCXUSDT", price: 111.56,
-    sweep: { side: "SSL", type: "EQL", level: 111.01, sweptPrice: 110.67, close: 111.56, time: 111111, key: "k", realtime: false, closedTime: 111222 },
+    sweep: { side: "SSL", type: "EQL", level: 111.01, sweptPrice: 110.67, close: 111.56, time: 111111, key: "k", realtime: false, closedTime: 111222, levelTime: 111000 },
     cur: baseCur, confidenceScore: 0, mss5m: null,
   });
   assert.match(msg, /\*\*⚡ SPCXUSDT 流动性扫损（已确认）\*\*/);
   assert.match(msg, /下方卖方流动性（SSL）被扫：跌破 等低点 111.01（低 110.67）后收回，收 111.56/);
+  // 被扫流动性位的形成时间（EQH/EQL=触点 4H K，显示日期+时间）+ 扫损 K 时段（5m 整刻度）
+  assert.match(msg, /流动性位形成: \d{2}\/\d{2} \d{2}:\d{2}（4H K）/);
+  assert.match(msg, /扫损 K: \d{2}\/\d{2} \d{2}:\d{2} - \d{2}:\d{2}（已收盘确认）/, "已确认扫损应显示 5m K 时段（开盘-收盘整刻度），便于对照图表定位");
   assert.match(msg, /市场背景:/);
   assert.match(msg, /Bias: ⚪ NEUTRAL/);
   assert.match(msg, /Scenario: 区间/);
@@ -88,11 +91,22 @@ test("buildSweep: 带 5m 结构事件标注（C3）— 扫损消息展示 5m MSS
 test("buildSweep: BSL 实时 — 刺破上方流动性且现价收回", () => {
   const msg = buildSweep({
     symbol: "BTCUSDT", price: 104,
-    sweep: { side: "BSL", type: "PDH", level: 105, sweptPrice: 106, close: 104, time: 1, key: "k", realtime: true },
+    sweep: { side: "BSL", type: "PDH", level: 105, sweptPrice: 106, close: 104, time: 1, key: "k", realtime: true, levelTime: 5 },
     cur: baseCur, confidenceScore: 0, mss5m: null,
   });
   assert.match(msg, /\*\*⚡ BTCUSDT 流动性扫损（实时）\*\*/);
   assert.match(msg, /上方买方流动性（BSL）被扫：刺破 昨日高点 105（高 106）后收回，收 104/);
+  // PDH/PDL/PWH/PWL 是日/周 K → 只显示日期
+  assert.match(msg, /流动性位形成: \d{2}\/\d{2}（日\/周 K）/);
+});
+
+test("buildSweep: 盘前流动性位（PRE_MARKET）— 显示盘前日期", () => {
+  const msg = buildSweep({
+    symbol: "BICOUSDT", price: 0.0401,
+    sweep: { side: "SSL", type: "PRE_MARKET_LOW", level: 0.04, sweptPrice: 0.0399, close: 0.0401, time: 111111, key: "k", realtime: false, closedTime: 111222, levelDate: "2026-08-09" },
+    cur: baseCur, confidenceScore: 0, mss5m: null,
+  });
+  assert.match(msg, /流动性位形成: 08\/09 盘前/);
 });
 
 test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据）", () => {

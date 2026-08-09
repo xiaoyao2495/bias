@@ -6,7 +6,7 @@
  *   若 K3.low  < K1,K2,K4,K5 的 low  → Swing Low
  *
  * 输出：
- *   { type: "HIGH"|"LOW", price, index }
+ *   { type: "HIGH"|"LOW", price, index, time }（time = 该 swing 所在 4H K 的开盘时间，供流动性形成时间展示）
  *
  * 再对相邻 Swing 打标：HH / HL / LH / LL
  */
@@ -26,8 +26,8 @@ export function findSwings(candles, left = 2, right = 2) {
       if (candles[j].low <= c.low) isLow = false;
       if (!isHigh && !isLow) break;
     }
-    if (isHigh) swings.push({ type: "HIGH", price: c.high, index: i });
-    else if (isLow) swings.push({ type: "LOW", price: c.low, index: i });
+    if (isHigh) swings.push({ type: "HIGH", price: c.high, index: i, time: c.time });
+    else if (isLow) swings.push({ type: "LOW", price: c.low, index: i, time: c.time });
   }
 
   return dedupeAlternating(swings);
