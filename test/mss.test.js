@@ -267,3 +267,31 @@ test("P1 位移确认：中间根位移（FVG 由下一根确认）且确认 K �
   assert.ok(mssUp, "历史扫描应包含位移确认的 MSS UP");
   assert.equal(mssUp.atIndex, 22, "事件应标在位移 K 而非确认 K");
 });
+
+test("P1: 去重保留首次突破时间（同 level 连续 MSS 不把事件起点推后，防伪造 Sweep→MSS 顺序）", () => {
+  // BEARISH（lastHigh=102）→ 三根连续收盘突破 102（价格持续在 swing 外）→ 合并为一条 MSS：
+  // atIndex/time 必须保留首次突破根（否则 time 被推到最后仍突破的根，opportunity 的
+  // `e.time >= sweepTime` 会误判 Sweep 发生在 MSS 之前而生成 CHAIN）
+  const tiny = { open: 100, close: 101, high: 102, low: 99 };
+  const rows = [
+    [100, 100, 100, 100],
+    [100, 105, 100, 105], // swing high 105 → HH
+    [104, 104, 98, 100], // swing low 98 → LL
+    [100, 100, 99, 100], // 确认 idx2
+    [100, 102, 99, 101], // swing high 102 → LH（MSS 参照 lastHigh=102）
+    [98, 99, 97, 98], // swing low 97 → LL
+    [100, 105, 100, 104], // 首次突破：close 104 > 102；high 105 与下根等高 → 不构成新 swing
+    [101, 105, 101, 103], // 仍收在 102 外（close 103）
+    [102, 104, 102, 102.5], // 仍收在 102 外（close 102.5）
+  ];
+  const data = [
+    ...Array(16).fill(tiny),
+    ...rows.map(([o, h, l, c]) => ({ open: o, high: h, low: l, close: c })),
+  ].map((k, i) => ({ time: i, closeTime: now - 1, ...k }));
+  const events = scanStructureEvents(data, { lookback: 50, left: 1, right: 1 });
+  const mssUps = events.filter((e) => e.type === "MSS" && e.direction === "UP");
+  assert.equal(mssUps.length, 1, "同 level 连续突破应合并为一条事件");
+  assert.equal(mssUps[0].atIndex, 22, "事件起点保留首次突破根（不得被推后）");
+  assert.equal(mssUps[0].time, data[22].closeTime, "time 保持首次突破时间");
+  assert.equal(mssUps[0].lastSeenAt, 24, "持续状态记录最后仍突破的根");
+});

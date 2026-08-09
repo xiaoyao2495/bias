@@ -205,6 +205,30 @@ test("P1 annotatePDArray: FVG 四态 Bearish 对称", () => {
   assert.equal(filled.fvg[0].status, "FILLED"); // 触及远端（high ≥ top 105）＝完全回补
 });
 
+test("P1: FVG 消耗单向递增——先触及中点（CE_REACHED）后浅回踩不得降回 TOUCHED", () => {
+  // Bullish FVG [100,108]（mid=104）：K3 low=102 触及中点 → CE_REACHED；K4 low=105 浅回踩（>mid）
+  // 旧逐根覆盖会把状态降回 TOUCHED（扣分 −15 回升 −10，抬高 Confidence）
+  const bullRows = [
+    candle(99, 100, 98, 99, 0),
+    candle(108, 110, 105, 109, 1),
+    candle(110, 112, 108, 111, 2),
+    candle(103, 105, 102, 104, 3), // 触及中点 low=102 ≤ mid 104
+    candle(106, 108, 105, 107, 4), // 浅回踩 low=105 > mid
+  ];
+  const a = annotatePDArray({ fvg: findFvgs(bullRows), ob: [] }, { equilibrium: 110 }, bullRows);
+  assert.equal(a.fvg[0].status, "CE_REACHED");
+  // Bearish 对称：BEARISH FVG [103,105]（mid=104）high 触及中点后浅回踩不得降回 TOUCHED
+  const bearRows = [
+    candle(106, 107, 105, 106, 0),
+    candle(104, 105, 103, 104, 1),
+    candle(99, 103, 98, 99, 2),
+    candle(100, 104.5, 103.5, 101, 3), // 触及中点 high=104.5 ≥ mid 104
+    candle(99, 103.5, 102, 102, 4), // 浅回踩 high=103.5 < mid
+  ];
+  const ba = annotatePDArray({ fvg: findFvgs(bearRows), ob: [] }, { equilibrium: 110 }, bearRows);
+  assert.equal(ba.fvg[0].status, "CE_REACHED");
+});
+
 test("P1 rankPDArray: FVG 消耗分级扣分（OPEN 90 > TOUCHED 80 > CE_REACHED 75），FILLED 彻底失效排除", () => {
   const pd = (status) => ({ fvg: [{ type: "BULLISH_FVG", direction: "BULLISH", top: 108, bottom: 100, index: 2, age: 5, status }], ob: [] });
   const s = (status) => rankPDArray({ bias: "BULLISH", range: { equilibrium: 110 }, pdArray: pd(status) }).primary.score;

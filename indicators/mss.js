@@ -195,20 +195,23 @@ export function scanStructureEvents(candles, { lookback = 50, left = 2, right = 
     }
   }
 
-  // 去重：同类型同方向且 level 接近的连续事件合并（保留最后一条，即该事件的终点）。
-  // 位移确认状态取并集：位移补事件（确认 K 收回 swing 内）可能与"突破时未确认位移"的事件合并，
-  // 合并后只要任一条是位移确认（confirmedByDisplacement=true），该事件即视为带位移。
+  // 去重：同类型同方向且 level 接近的连续事件合并——保留首次突破起点（atIndex/time），
+  // 另设 lastSeenAt/lastSeenTime 记录"最后仍处于突破侧"的持续状态。
+  // P1：不得用合并覆盖事件起点——否则连续同 level 突破会把 atIndex/time 不断推后（价格
+  // 10:00 首次 MSS 突破、10:30 仍在 swing 外 → time 被改到 10:30），而 opportunity 用
+  // `e.time >= sweepTime` 判定链条时序，时间被推后会伪造"Sweep(10:20) 在 MSS 之前"的 CHAIN。
+  // 位移确认 OR 合并（任一腿为位移确认即成立），但不覆盖事件起点。
   const deduped = [];
   for (const e of events) {
     const last = deduped[deduped.length - 1];
     if (last && last.type === e.type && last.direction === e.direction && Math.abs(last.level - e.level) / last.level < 0.0005) {
       last.price = e.price;
-      last.atIndex = e.atIndex;
-      last.time = e.time;
+      last.lastSeenAt = e.atIndex;
+      last.lastSeenTime = e.time;
       last.confirmedByDisplacement = last.confirmedByDisplacement || e.confirmedByDisplacement;
       continue;
     }
-    deduped.push(e);
+    deduped.push({ ...e, lastSeenAt: e.atIndex, lastSeenTime: e.time });
   }
   return deduped;
 }

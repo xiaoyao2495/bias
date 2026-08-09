@@ -140,11 +140,13 @@ export function findOrderBlocks(candles) {
  *   location：区间中点相对 dealing range 中线 → PREMIUM / DISCOUNT / AT_EQ
  *   age     ：距当前 K 的根数（越小越新）
  *   status ：
- *     FVG 四态（P1 语义修正：CE 是触及中点，FILLED 才是触及远端）——
+ *     FVG 四态（P1 语义修正：CE 是触及中点，FILLED 才是触及远端；消耗单向递增不降级）——
  *       OPEN      未进入缺口（Bullish: low 恒 > top；Bearish: high 恒 < bottom）
  *       TOUCHED   进入缺口但未到中点（Bullish: low ≤ top 且 low > mid；Bearish 对称）
  *       CE_REACHED触及中点（Bullish: low ≤ mid；Bearish: high ≥ mid）
  *       FILLED    触及远端（Bullish: low ≤ bottom；Bearish: high ≥ top）＝缺口完全回补＝彻底失效
+ *     消耗深度由整个形成后区间的最深触及一次性决定，只允许升级、不允许降级
+ *     （先触及中点后浅回踩的 FVG 不得从 CE_REACHED 降回 TOUCHED）。
  *     OB 两态（无"填补"概念，保持原语义）：OPEN / FILLED（价格回到区间）
  */
 export function annotatePDArray(pdArray, range, candles) {
@@ -157,19 +159,20 @@ export function annotatePDArray(pdArray, range, candles) {
     const age = currentIndex - item.index;
     let status = "OPEN";
     if (item.type === "BULLISH_FVG") {
-      for (let i = item.index + 1; i <= currentIndex; i++) {
-        const k = candles[i];
-        if (k.low <= item.bottom) { status = "FILLED"; break; } // 触及远端 = 完全回补
-        if (k.low <= mid) status = "CE_REACHED"; // 触及中点（继续看后续是否更深）
-        else if (k.low <= item.top) status = "TOUCHED"; // 仅进入缺口（未到中点）
-      }
+      // P1：消耗深度由整个形成后区间的最低 low 一次性决定（单向递增，OPEN < TOUCHED < CE_REACHED < FILLED）。
+      // 逐根覆盖会让"先触及中点后浅回踩"的 FVG 从 CE_REACHED 降回 TOUCHED（扣分 −15 回升 −10）。
+      let deepest = Infinity;
+      for (let i = item.index + 1; i <= currentIndex; i++) deepest = Math.min(deepest, candles[i].low);
+      if (deepest <= item.bottom) status = "FILLED"; // 触及远端 = 完全回补
+      else if (deepest <= mid) status = "CE_REACHED"; // 触及中点
+      else if (deepest <= item.top) status = "TOUCHED"; // 仅进入缺口（未到中点）
     } else if (item.type === "BEARISH_FVG") {
-      for (let i = item.index + 1; i <= currentIndex; i++) {
-        const k = candles[i];
-        if (k.high >= item.top) { status = "FILLED"; break; } // 触及远端 = 完全回补
-        if (k.high >= mid) status = "CE_REACHED"; // 触及中点（继续看后续是否更深）
-        else if (k.high >= item.bottom) status = "TOUCHED"; // 仅进入缺口（未到中点）
-      }
+      // P1：对称——消耗深度由整个形成后区间的最高 high 一次性决定
+      let deepest = -Infinity;
+      for (let i = item.index + 1; i <= currentIndex; i++) deepest = Math.max(deepest, candles[i].high);
+      if (deepest >= item.top) status = "FILLED"; // 触及远端 = 完全回补
+      else if (deepest >= mid) status = "CE_REACHED"; // 触及中点
+      else if (deepest >= item.bottom) status = "TOUCHED"; // 仅进入缺口（未到中点）
     } else {
       for (let i = item.index + 1; i <= currentIndex; i++) {
         if (candles[i].low <= item.high && candles[i].high >= item.low) { status = "FILLED"; break; }
