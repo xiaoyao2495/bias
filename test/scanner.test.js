@@ -63,6 +63,27 @@ test("evaluator: SKIP — NEUTRAL / 无保护位 / 无未来 K 线", () => {
   assert.equal(evaluateOutcome({ bias: "BULLISH", entry: 100, invalidation: 90, futureCandles: [] }).futures[7].outcome, "SKIP");
 });
 
+test("P0-2 evaluator: 同根 4H 同时触及目标与保护位 → AMBIGUOUS（不判 WIN，r=null）", () => {
+  // entry=100，drawPrice=110（目标线 min(110,105)=105），invalidation=90
+  // 单根 high=111 ≥ 105 且 low=89 ≤ 90：OHLC 只知高低都到过、不知先后 → AMBIGUOUS
+  const r = evaluateOutcome({ bias: "BULLISH", entry: 100, invalidation: 90, drawPrice: 110, futureCandles: [bar(1, 100, 111, 89, 100)], windows: [1] });
+  assert.equal(r.futures[1].outcome, "AMBIGUOUS");
+  assert.equal(r.futures[1].r, null, "AMBIGUOUS 不参与 R 统计");
+  assert.equal(r.futures[1].hitInvalidation, true);
+});
+
+test("P0-2 evaluator: 空头同根双触及 → AMBIGUOUS", () => {
+  // entry=100，drawPrice=90（目标线 max(90,95)=95），invalidation=110
+  const r = evaluateOutcome({ bias: "BEARISH", entry: 100, invalidation: 110, drawPrice: 90, futureCandles: [bar(1, 100, 112, 88, 100)], windows: [1] });
+  assert.equal(r.futures[1].outcome, "AMBIGUOUS");
+});
+
+test("P0-2 evaluator: 只触及目标未触及保护位 → 仍判 WIN（AMBIGUOUS 不误伤）", () => {
+  const r = evaluateOutcome({ bias: "BULLISH", entry: 100, invalidation: 90, drawPrice: 110, futureCandles: [bar(1, 100, 112, 98, 110)], windows: [1] });
+  assert.equal(r.futures[1].outcome, "WIN"); // high 112 ≥ 105，low 98 > 90
+  assert.equal(r.futures[1].hitDraw, true);
+});
+
 test("evaluator: 多窗口独立评估 + maxR（最佳浮盈/风险）", () => {
   const candles = [bar(1, 100, 104, 98, 102), bar(2, 102, 110, 100, 108)];
   const r = evaluateOutcome({ bias: "BULLISH", entry: 100, invalidation: 96, drawPrice: null, targetPct: 0.05, futureCandles: candles, windows: [7, 14] });

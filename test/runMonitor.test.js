@@ -183,16 +183,17 @@ test("buildChanged: OB STANDARD·USED → 不显示辅助行（避免噪音）",
 
 test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发链）", () => {
   const op = {
-    symbol: "MUUSDT", type: "BOS", direction: "BULLISH", entry: 882.43, zone: null,
-    trigger: "5m BOS 向上突破 882.43（收盘确认）", score: 70, key: "k", time: Date.now(),
+    symbol: "MUUSDT", type: "RETRACE", direction: "BULLISH", entry: 880.5,
+    zone: { type: "FVG", top: 882.5, bottom: 880.5 },
+    trigger: "价格回踩 FVG 880.5-882.5（5 根 5m 前形成，未消耗）", score: 70, key: "k", time: Date.now(),
   };
   const env = { price: 884.1, confidenceScore: 45, cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", session: { start: 20, end: 24, ratio: 23.4 } } };
   const msg = buildOpportunity(op, env);
   assert.match(msg, /\*\*🎯 MUUSDT 5m 机会\*\*/);
-  assert.match(msg, /🟢 多头（结构突破 BOS）· 评分 70/);
-  assert.match(msg, /观察位: 882\.43 · 现价 884\.1（需回踩\/突破后确认再入场）/);
+  assert.match(msg, /🟢 多头（执行区回踩）· 评分 70/);
+  assert.match(msg, /观察位: 880\.5 · 现价 884\.1（需回踩\/突破后确认再入场）/);
   assert.match(msg, /环境: 🟢 BULLISH · 信心度 MEDIUM 45 · 操作 WATCH · 活跃窗口 20:00-24:00（占比 23.4%）/);
-  assert.match(msg, /触发: 5m BOS 向上突破 882.43（收盘确认）/);
+  assert.match(msg, /触发: 价格回踩 FVG 880.5-882.5/);
   assert.match(msg, /价格: 884.1/);
 });
 
@@ -210,12 +211,12 @@ test("buildOpportunity: 带执行区（CHAIN 链）— 显示执行区行与 4H 
 
 test("buildOpportunityDigest: 📊 机会榜汇总 Top 列表", () => {
   const list = [
-    { symbol: "MUUSDT", type: "BOS", direction: "BULLISH", entry: 882.43, score: 70 },
+    { symbol: "MUUSDT", type: "RETRACE", direction: "BULLISH", entry: 880.5, score: 70 },
     { symbol: "ETHUSDT", type: "RETRACE", direction: "BEARISH", entry: 3500, score: 65 },
   ];
   const msg = buildOpportunityDigest(list);
   assert.match(msg, /\*\*📊 5m 机会榜\*\*/);
   assert.match(msg, /本时段 2 个合约出现 5m 机会（评分 ≥ 60）：/);
-  assert.match(msg, /1\. MUUSDT 🟢 多头 结构突破 BOS @ 882\.43（70）/);
+  assert.match(msg, /1\. MUUSDT 🟢 多头 执行区回踩 @ 880\.5（70）/);
   assert.match(msg, /2\. ETHUSDT 🔴 空头 执行区回踩 @ 3500（65）/);
 });

@@ -139,7 +139,13 @@ export function findOrderBlocks(candles) {
  * V1.6：给 FVG/OB 标注执行属性。
  *   location：区间中点相对 dealing range 中线 → PREMIUM / DISCOUNT / AT_EQ
  *   age     ：距当前 K 的根数（越小越新）
- *   status  ：OPEN / FILLED（Bullish FVG 被后续 K 的 low 刺入 → FILLED；Bearish 反之；OB 价格回到区间 → FILLED）
+ *   status ：
+ *     FVG 四态（P1 语义修正：CE 是触及中点，FILLED 才是触及远端）——
+ *       OPEN      未进入缺口（Bullish: low 恒 > top；Bearish: high 恒 < bottom）
+ *       TOUCHED   进入缺口但未到中点（Bullish: low ≤ top 且 low > mid；Bearish 对称）
+ *       CE_REACHED触及中点（Bullish: low ≤ mid；Bearish: high ≥ mid）
+ *       FILLED    触及远端（Bullish: low ≤ bottom；Bearish: high ≥ top）＝缺口完全回补＝彻底失效
+ *     OB 两态（无"填补"概念，保持原语义）：OPEN / FILLED（价格回到区间）
  */
 export function annotatePDArray(pdArray, range, candles) {
   const currentIndex = candles.length - 1;
@@ -152,11 +158,17 @@ export function annotatePDArray(pdArray, range, candles) {
     let status = "OPEN";
     if (item.type === "BULLISH_FVG") {
       for (let i = item.index + 1; i <= currentIndex; i++) {
-        if (candles[i].low <= item.top) { status = "FILLED"; break; }
+        const k = candles[i];
+        if (k.low <= item.bottom) { status = "FILLED"; break; } // 触及远端 = 完全回补
+        if (k.low <= mid) status = "CE_REACHED"; // 触及中点（继续看后续是否更深）
+        else if (k.low <= item.top) status = "TOUCHED"; // 仅进入缺口（未到中点）
       }
     } else if (item.type === "BEARISH_FVG") {
       for (let i = item.index + 1; i <= currentIndex; i++) {
-        if (candles[i].high >= item.bottom) { status = "FILLED"; break; }
+        const k = candles[i];
+        if (k.high >= item.top) { status = "FILLED"; break; } // 触及远端 = 完全回补
+        if (k.high >= mid) status = "CE_REACHED"; // 触及中点（继续看后续是否更深）
+        else if (k.high >= item.bottom) status = "TOUCHED"; // 仅进入缺口（未到中点）
       }
     } else {
       for (let i = item.index + 1; i <= currentIndex; i++) {
@@ -189,6 +201,11 @@ export function rankPDArray({ bias, range, pdArray }) {
   for (const item of items) {
     if (item.direction !== bias) continue; // 反向 → Ignore
 
+    // P1：FVG 触及远端（FILLED）＝缺口完全回补，彻底失效 → 不进入候选，
+    // 不能成为 Primary/Alternative（否则已失效 FVG 仍被当作执行目标抬高 Confidence）。
+    // OB 的 FILLED（价格回到区间）≠ 失效，仍保留低分参与。
+    if (item.type.includes("FVG") && item.status === "FILLED") continue;
+
     const top = item.top ?? item.high; // OB 项用 high/low
     const bottom = item.bottom ?? item.low;
     const mid = (top + bottom) / 2;
@@ -196,7 +213,11 @@ export function rankPDArray({ bias, range, pdArray }) {
     const inFavor = isBuyBias ? loc === "DISCOUNT" : loc === "PREMIUM";
 
     let score = 60 + (inFavor ? 30 : -20);
-    if (item.status === "FILLED") score -= 25;
+    // P1：FVG 消耗分级扣分——FILLED（已触及远端）在 rankPDArray 已排除；
+    // CE_REACHED（触及中点）/TOUCHED（进入未到中点）仍保留参考价值，按消耗程度扣分
+    if (item.status === "FILLED") score -= 25; // 仅 OB（FVG FILLED 已排除）
+    else if (item.status === "CE_REACHED") score -= 15;
+    else if (item.status === "TOUCHED") score -= 10;
     if (item.age > 60) score -= 10; // 太旧的执行区价值低
 
     candidates.push({

@@ -25,14 +25,21 @@
  * Swing 窗口按周期（ICT：5m 用最小定义每侧 1 根，4H 保持每侧 2 根）：
  *   detectStructureEvents(candles, { left: 1, right: 1 })  // 5m 入场层
  *   detectStructureEvents(candles)                          // 4H 环境层（默认 2/2）
+ *
+ * 位移确认（P1）：close beyond 只是"最小结构转移"，ICT 2022 更关注"带位移"的结构转移。
+ * 每个事件额外输出 confirmedByDisplacement：
+ *   触发 K（或紧邻前一已收盘根）同时满足位移三条件（大实体 × 结构突破 × FVG，见 displacement.js）
+ *   → true；否则（低动能、贴线式突破）→ false。
+ * CHAIN 链至少要求 MSS 突破腿为位移确认（实体扩张 + FVG），过滤噪音结构转移。
  */
 
 import { findSwings, analyzeSwings } from "./swing.js";
 import { buildStructure } from "./structure.js";
+import { findDisplacements } from "./displacement.js";
 
-function mkEvent(type, direction, level, price, swingIndex, reason, confirmed, realtime) {
+function mkEvent(type, direction, level, price, swingIndex, reason, confirmed, realtime, confirmedByDisplacement) {
   // 事件基准均为最近 swing（lastHigh/lastLow）→ INTERNAL；external 位只存在于 structureLayer 审计
-  return { type, direction, level, levelType: "INTERNAL", price, swingIndex, reason, confirmed, realtime };
+  return { type, direction, level, levelType: "INTERNAL", price, swingIndex, reason, confirmed, realtime, confirmedByDisplacement };
 }
 
 /**
@@ -43,15 +50,17 @@ function mkEvent(type, direction, level, price, swingIndex, reason, confirmed, r
  * @param {number} [opt.price] 实时触发价（末根未收盘时用；缺省取末根 close）
  * @param {number} [opt.left=2]  swing 左侧确认 K 数（5m 用 1）
  * @param {number} [opt.right=2] swing 右侧确认 K 数（5m 用 1）
+ * @param {Array} [opt.displacements] 预计算的位移 K 列表（findDisplacements 输出；高频调用
+ *   （scanStructureEvents）时传入避免重复计算，缺省内部计算一次
  * @returns {{
  *   direction: "BULLISH"|"BEARISH"|"NEUTRAL",  // swing 判定的当前结构方向
  *   structureStatus: "VALID"|"INVALIDATED",     // 最近 swing 是否被反势打破（= 是否已触发 MSS）
  *   structureLayer: { internal, external },     // Internal / External 分层
- *   events: Array,                              // 当前触发的 MSS/BOS 事件
+ *   events: Array,                              // 当前触发的 MSS/BOS 事件（含 confirmedByDisplacement）
  *   lastEvent: Object|null                      // 最近一次事件（消息层直接渲染）
  * }}
  */
-export function detectStructureEvents(candles, { price, left = 2, right = 2 } = {}) {
+export function detectStructureEvents(candles, { price, left = 2, right = 2, displacements } = {}) {
   const now = Date.now();
   // 修复（等待 K 收盘）：swing 判定只用已收盘 K。
   // 进行中 K 的 high/low/close 会随实时成交变动，若参与 Pivot 右侧确认，
@@ -67,23 +76,74 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2 } = 
   // 判定价：优先实时 price（进行中提示），缺省末根 close（收盘确认）
   const p = price != null ? price : last ? last.close : null;
 
+  // 位移确认索引（index → {index, dir, confirmationIndex, level, close}）：触发事件的那根已收盘 K
+  // （或紧邻前一已收盘根）为同向位移 K（实体扩张 × 结构突破 × FVG）→ 该事件"带位移"。
+  // P1 防前视：位移 K 的 FVG 可能由"下一根"确认（中间根位移）——逐根历史扫描若读完整
+  // 数组预计算结果，会在确认 K 到来之前就提前打标。只有 confirmationIndex <= 当前
+  // 已收盘索引（lastIdx）时该位移才成立；进行中 K（realtime）同理不可确认位移。
+  // P1 位移保存突破事件：位移 K 的 MSS/BOS 在确认点（confirmationIndex）即成立，不要求
+  // 确认 K 再次收在 swing 外——确认 K 可能收回 swing 内（位移 K 的突破依然真实发生过）。
+  const dispSet = new Map();
+  const dispList = displacements ?? findDisplacements(closed);
+  for (const d of dispList) dispSet.set(d.index, { index: d.index, dir: d.direction, confirmationIndex: d.confirmationIndex, level: d.structureBreak.level, close: d.close });
+  const lastIdx = closed.length - 1;
+  const dNear = (dir) => {
+    const d0 = dispSet.get(lastIdx);
+    const d1 = dispSet.get(lastIdx - 1);
+    if (d0 && d0.dir === dir && d0.confirmationIndex <= lastIdx) return d0;
+    if (d1 && d1.dir === dir && d1.confirmationIndex <= lastIdx) return d1;
+    return null;
+  };
+  const levelMatch = (level, price) => Math.abs(level - price) / Math.max(price, 1e-9) < 0.0005;
+
   const events = [];
   const direction = structure.direction;
   const lastHigh = structure.lastHigh;
   const lastLow = structure.lastLow;
 
   // BOS：顺趋势（或 NEUTRAL 首次突破）打破最近 swing
-  if (p != null && lastHigh && p > lastHigh.price && (direction === "BULLISH" || direction === "NEUTRAL")) {
-    events.push(mkEvent("BOS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price}`, lastClosed, !lastClosed && price != null));
-  } else if (p != null && lastLow && p < lastLow.price && (direction === "BEARISH" || direction === "NEUTRAL")) {
-    events.push(mkEvent("BOS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price}`, lastClosed, !lastClosed && price != null));
+  // P1：broke 分支用当前 p 判定（收盘确认/实时）；dispBroke 分支是"位移已确认（confirmationIndex
+  // 已到）但确认 K 收盘已收回 swing 内"——位移 K 的突破真实发生过，事件仍成立（price 用位移 K
+  // 收盘价，atIndex 标位移 K 而非确认 K）。
+  if (lastHigh && (direction === "BULLISH" || direction === "NEUTRAL")) {
+    const d = dNear("UP");
+    if (p != null && p > lastHigh.price) {
+      events.push(mkEvent("BOS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price}`, lastClosed, !lastClosed && price != null, lastClosed && !!d));
+    } else if (lastClosed && d && levelMatch(d.level, lastHigh.price)) {
+      const ev = mkEvent("BOS", "UP", lastHigh.price, d.close, lastHigh.index, `Displacement broke swing high ${lastHigh.price}`, true, false, true);
+      ev.atIndex = d.index;
+      events.push(ev);
+    }
+  } else if (lastLow && (direction === "BEARISH" || direction === "NEUTRAL")) {
+    const d = dNear("DOWN");
+    if (p != null && p < lastLow.price) {
+      events.push(mkEvent("BOS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price}`, lastClosed, !lastClosed && price != null, lastClosed && !!d));
+    } else if (lastClosed && d && levelMatch(d.level, lastLow.price)) {
+      const ev = mkEvent("BOS", "DOWN", lastLow.price, d.close, lastLow.index, `Displacement broke swing low ${lastLow.price}`, true, false, true);
+      ev.atIndex = d.index;
+      events.push(ev);
+    }
   }
 
   // MSS：反势打破最近 swing（BULLISH 跌破最近 swing low / BEARISH 突破最近 swing high）
-  if (direction === "BULLISH" && p != null && lastLow && p < lastLow.price) {
-    events.push(mkEvent("MSS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price} — structure shift`, lastClosed, !lastClosed && price != null));
-  } else if (direction === "BEARISH" && p != null && lastHigh && p > lastHigh.price) {
-    events.push(mkEvent("MSS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price} — structure shift`, lastClosed, !lastClosed && price != null));
+  if (direction === "BULLISH" && lastLow) {
+    const d = dNear("DOWN");
+    if (p != null && p < lastLow.price) {
+      events.push(mkEvent("MSS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price} — structure shift`, lastClosed, !lastClosed && price != null, lastClosed && !!d));
+    } else if (lastClosed && d && levelMatch(d.level, lastLow.price)) {
+      const ev = mkEvent("MSS", "DOWN", lastLow.price, d.close, lastLow.index, `Displacement broke swing low ${lastLow.price} — structure shift`, true, false, true);
+      ev.atIndex = d.index;
+      events.push(ev);
+    }
+  } else if (direction === "BEARISH" && lastHigh) {
+    const d = dNear("UP");
+    if (p != null && p > lastHigh.price) {
+      events.push(mkEvent("MSS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price} — structure shift`, lastClosed, !lastClosed && price != null, lastClosed && !!d));
+    } else if (lastClosed && d && levelMatch(d.level, lastHigh.price)) {
+      const ev = mkEvent("MSS", "UP", lastHigh.price, d.close, lastHigh.index, `Displacement broke swing high ${lastHigh.price} — structure shift`, true, false, true);
+      ev.atIndex = d.index;
+      events.push(ev);
+    }
   }
 
   return {
@@ -122,16 +182,22 @@ export function scanStructureEvents(candles, { lookback = 50, left = 2, right = 
   if (closed.length < left + right + 1) return [];
 
   const startIdx = Math.max(0, closed.length - lookback);
+  // 位移预计算一次复用（位移三条件仅依赖已收盘 K，与扫描逐根共享同一视图）
+  const displacements = findDisplacements(closed);
   const events = [];
   for (let i = startIdx; i < closed.length; i++) {
-    const r = detectStructureEvents(closed.slice(0, i + 1), { left, right });
+    const r = detectStructureEvents(closed.slice(0, i + 1), { left, right, displacements });
     for (const e of r.events) {
       if (!e.confirmed) continue; // 只保留收盘确认事件
-      events.push({ ...e, atIndex: i, time: closed[i].closeTime });
+      // 位移补事件（确认 K 收回 swing 内）携带 atIndex = 位移 K 索引，事件标在位移 K 而非确认 K
+      const at = e.atIndex ?? i;
+      events.push({ ...e, atIndex: at, time: closed[at].closeTime });
     }
   }
 
-  // 去重：同类型同方向且 level 接近的连续事件合并（保留最后一条，即该事件的终点）
+  // 去重：同类型同方向且 level 接近的连续事件合并（保留最后一条，即该事件的终点）。
+  // 位移确认状态取并集：位移补事件（确认 K 收回 swing 内）可能与"突破时未确认位移"的事件合并，
+  // 合并后只要任一条是位移确认（confirmedByDisplacement=true），该事件即视为带位移。
   const deduped = [];
   for (const e of events) {
     const last = deduped[deduped.length - 1];
@@ -139,6 +205,7 @@ export function scanStructureEvents(candles, { lookback = 50, left = 2, right = 
       last.price = e.price;
       last.atIndex = e.atIndex;
       last.time = e.time;
+      last.confirmedByDisplacement = last.confirmedByDisplacement || e.confirmedByDisplacement;
       continue;
     }
     deduped.push(e);

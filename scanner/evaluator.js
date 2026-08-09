@@ -2,17 +2,20 @@
  * evaluator.js — V2.2 未来表现评估 + V2.4 盈亏质量
  *
  * 对一个 Bias 样本，判断未来 N 根 4H K 线内的结果：
- *   WIN     : 先触及目标（Draw Target 或 +targetPct 幅度，取更近者）
- *   LOSS    : 先触及 Invalidation（保护位）
- *   NEUTRAL : 窗口内两者都未触及
- *   SKIP    : 无方向 / 无保护位 / 无未来数据（不参与统计）
+ *   WIN       : 先触及目标（Draw Target 或 +targetPct 幅度，取更近者）
+ *   LOSS      : 先触及 Invalidation（保护位）
+ *   NEUTRAL   : 窗口内两者都未触及
+ *   AMBIGUOUS : 同一根 K 同时触及目标与保护位（P0-2：OHLC 只知高低都到过、
+ *               不知先后，无法判定 → 不参与 WIN/LOSS 统计，避免系统性偏 WIN）
+ *   SKIP      : 无方向 / 无保护位 / 无未来数据（不参与统计）
  *
  * 逐根 K 线按时间顺序判定，先到先判（避免"既到目标又破位"的歧义）。
  * 同时记录每个窗口的高/低/收盘、最大 R（最佳浮盈 / 风险）。
  *
  * V2.4 新增三个质量维度（方向正确性 ≠ 盈亏质量）：
  *   planR   : 理论盈亏比 = |Draw − Entry| / Risk（回答"值不值得交易"）
- *   r       : 每窗口结果盈亏比（WIN→实际触及幅度/风险，LOSS→−1，NEUTRAL→收盘相对风险）
+ *   r       : 每窗口结果盈亏比（WIN→实际触及幅度/风险，LOSS→−1，NEUTRAL→收盘相对风险，
+ *             AMBIGUOUS→null 不计入）
  *   MAE/MFE: 整个窗口最大逆行/顺行百分比（路径质量）
  * 只做评估，不参与 Bias 判定。
  */
@@ -108,28 +111,25 @@ function evaluateWindow({ bias, entry, invalidation, drawPrice, targetPct, candl
   let hitInvalidation = false;
 
   for (const k of candles) {
-    if (bull) {
-      if (k.high >= target) {
-        outcome = "WIN";
-        if (drawPrice != null && k.high >= drawPrice) hitDraw = true;
-        break;
-      }
-      if (k.low <= invalidation) {
-        outcome = "LOSS";
-        hitInvalidation = true;
-        break;
-      }
-    } else {
-      if (k.low <= target) {
-        outcome = "WIN";
-        if (drawPrice != null && k.low <= drawPrice) hitDraw = true;
-        break;
-      }
-      if (k.high >= invalidation) {
-        outcome = "LOSS";
-        hitInvalidation = true;
-        break;
-      }
+    const hitTarget = bull ? k.high >= target : k.low <= target;
+    const hitInvalid = bull ? k.low <= invalidation : k.high >= invalidation;
+    if (hitTarget && hitInvalid) {
+      // P0-2：同根 4H 同时触及目标与保护位——OHLC 只知高低都到过、不知先后，
+      // 原实现先查目标后查保护位 → 系统性偏 WIN。统一标记 AMBIGUOUS（不计入胜率/R）。
+      outcome = "AMBIGUOUS";
+      hitInvalidation = true;
+      if (drawPrice != null && (bull ? k.high >= drawPrice : k.low <= drawPrice)) hitDraw = true;
+      break;
+    }
+    if (hitTarget) {
+      outcome = "WIN";
+      if (drawPrice != null && (bull ? k.high >= drawPrice : k.low <= drawPrice)) hitDraw = true;
+      break;
+    }
+    if (hitInvalid) {
+      outcome = "LOSS";
+      hitInvalidation = true;
+      break;
     }
   }
 
@@ -141,10 +141,11 @@ function evaluateWindow({ bias, entry, invalidation, drawPrice, targetPct, candl
       else if (riskPct != null && riskPct > 0) r = targetPct / riskPct; // 只到 ±targetPct 幅度线
     } else if (outcome === "LOSS") {
       r = -1; // 触及保护位 = 全损
-    } else {
+    } else if (outcome === "NEUTRAL") {
       const close = candles[candles.length - 1].close; // NEUTRAL：最终收盘相对风险
       r = (bull ? close - entry : entry - close) / risk;
     }
+    // AMBIGUOUS：先后不可知 → r 保持 null，不参与 R 统计
   }
 
   return {

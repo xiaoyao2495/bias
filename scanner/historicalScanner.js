@@ -84,9 +84,15 @@ function analyzeAt(bars, daily, weekly, i, k, targetPct, windows) {
 
   const { structure, location, bias } = analyzeBias({ candles, daily, weekly, price, time: t });
 
+  // P0-1：统一使用有效方向（effectiveBias）——MSS/保护位失效后 bias.bias 仍是失效前的
+  // 原始方向，实盘展示用 effectiveBias（失效 → NEUTRAL），回测却按旧方向统计 WIN/LOSS，
+  // 破坏"实时与回放一致"并污染 Confidence 的 LOW 组、总体胜率和 R。
+  // 原始方向只保留为审计字段 rawBias。
+  const effectiveBias = bias.effectiveBias || bias.bias;
+
   const future = bars.slice(i + 1, i + 1 + maxWindow(windows));
   const ev = evaluateOutcome({
-    bias: bias.bias,
+    bias: effectiveBias,
     entry: price,
     invalidation: bias.invalidation ? bias.invalidation.price : null,
     drawPrice: bias.draw && bias.draw.primary ? bias.draw.primary.price : null,
@@ -98,7 +104,8 @@ function analyzeAt(bars, daily, weekly, i, k, targetPct, windows) {
   return {
     time: new Date(t).toISOString().slice(0, 16).replace("T", " "),
     price,
-    bias: bias.bias,
+    bias: effectiveBias,
+    rawBias: bias.bias, // 审计：失效前原始结构方向（与实盘 effectiveBias 逻辑一致）
     structure: `${structure.direction}/${structure.type}`,
     scenario: bias.scenario ? bias.scenario.label : null,
     confidence: bias.confidence ? bias.confidence.level : null,

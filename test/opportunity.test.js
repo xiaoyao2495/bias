@@ -1,10 +1,10 @@
 /**
  * opportunity.test.js — 5m 机会扫描器（纯函数层）
  *
- * 覆盖 scanOpportunities 三类信号：
+ * 覆盖 scanOpportunities 两类信号：
  *   RETRACE — 价格回踩同向 5m FVG
- *   BOS     — 最近 5m 收盘确认顺势突破
  *   CHAIN   — 扫损(SSL) → 5m MSS 向上 → 回踩多头 FVG（完整链条）
+ * 结构证据（BOS/MSS）不直接产生入场。
  * 环境过滤：NEUTRAL bias 不出机会。
  */
 import { test } from "node:test";
@@ -59,24 +59,6 @@ test("RETRACE：价格回踩同向 5m FVG → 出现回踩机会（顺位端为�
   assert.ok(retrace.score >= 60, `score ${retrace.score} 应达推送门槛`);
 });
 
-test("BOS：最近 5m 收盘确认向上突破 → 出现突破机会（NEUTRAL 结构首突也认）", () => {
-  // idx1 形成 swing high 110，idx4 收盘 111 越过 → BOS UP（收盘确认）
-  const m5 = mkCandles([
-    [100, 100, 100, 100],
-    [100, 110, 100, 110], // swing high 110（邻居 100 / 108）
-    [105, 108, 105, 107],
-    [106, 109, 106, 108],
-    [108, 111, 108, 111], // close 111 > 110 → BOS UP
-  ]);
-  const env = baseEnv({ price: 111 });
-  const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
-  const bos = opps.find((o) => o.type === "BOS");
-  assert.ok(bos, "应出现 BOS 机会");
-  assert.equal(bos.direction, "BULLISH");
-  assert.equal(bos.entry, 110); // 突破位 = 最近 swing high
-  assert.ok(bos.score >= 60, `score ${bos.score} 应达推送门槛`);
-});
-
 test("CHAIN：SSL 扫损 → 5m MSS 向上 → 回踩多头 FVG（完整 ICT 链条）", () => {
   // 先 BEARISH 结构（HH→LL→LH→LL），idx6 收盘 103 突破 lastHigh 102 → MSS UP
   // 随后 idx7-9 形成 bullish FVG [101,102]，idx10 价格回踩到区间内
@@ -87,7 +69,7 @@ test("CHAIN：SSL 扫损 → 5m MSS 向上 → 回踩多头 FVG（完整 ICT 链
     [100, 100, 99, 100], // low 99 > 98，确认 idx2 是 swing low
     [100, 102, 99, 101], // swing high 102 → LH（102 < 105）
     [98, 99, 97, 98], // swing low 97 → LL（97 < 98）
-    [100, 103, 100, 103], // close 103 > lastHigh 102 → MSS UP（收盘确认）
+    [102, 103, 103, 103], // 位移 MSS UP：实体 1、突破 102、FVG [102,103]（分支 1，位移 K 自身确认）
     [101, 101, 100, 100], // FVG 起点 high=101
     [100, 100, 99, 99],
     [102, 102, 102, 102], // low=102 > 101 → bullish FVG [101,102]
@@ -102,6 +84,52 @@ test("CHAIN：SSL 扫损 → 5m MSS 向上 → 回踩多头 FVG（完整 ICT 链
   assert.ok(chain.zone && chain.zone.type === "FVG", "CHAIN 应带执行区");
   assert.ok(chain.trigger.includes("MSS"), `trigger 应含 MSS：${chain.trigger}`);
   assert.ok(chain.score >= 60, `score ${chain.score} 应达推送门槛`);
+});
+
+test("P1: CHAIN 要求 MSS 位移确认 —— 贴线（非位移）MSS 不触发 CHAIN", () => {
+  // 与 CHAIN 用例同结构，但 idx6 改为小实体贴线突破（close 102.2 刚过 lastHigh 102，
+  // 实体 0.7 < 1.5×avg）→ MSS 无位移确认 → 完整链条不成立
+  const m5 = mkCandles([
+    [100, 100, 100, 100],
+    [100, 105, 100, 105], // swing high 105 → HH
+    [104, 104, 98, 100], // swing low 98 → LL
+    [100, 100, 99, 100],
+    [100, 102, 99, 101], // swing high 102 → LH（MSS 参照）
+    [98, 99, 97, 98], // swing low 97 → LL
+    [101.5, 103, 101.5, 102.2], // 贴线 MSS UP：实体 0.7，收盘 102.2 > lastHigh 102（不构成位移）
+    [101, 101, 100, 100], // FVG 起点 high=101
+    [100, 100, 99, 99],
+    [102, 102, 102, 102], // bullish FVG [101,102]
+    [101.5, 102, 101.5, 101.8], // 回踩到 FVG 内，price=101.8
+  ]);
+  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 101.8, time: T0 };
+  const env = baseEnv({ price: 101.8, sweep });
+  const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
+  assert.ok(!opps.find((o) => o.type === "CHAIN"), "贴线（非位移）MSS 不应触发 CHAIN");
+});
+
+test("P1: CHAIN 的 MSS 位移在事件根即可确认（第三根位移 FVG）→ 触发 CHAIN", () => {
+  // 与 CHAIN 用例同结构，但 idx6 改为第三根位移（low=103 > idx4.high=102 → FVG 由位移 K 自身确认，
+  // confirmationIndex = 位移 K 自身）→ MSS UP 位移确认成立 → CHAIN 触发
+  const m5 = mkCandles([
+    [100, 100, 100, 100],
+    [100, 105, 100, 105], // swing high 105 → HH
+    [104, 104, 98, 100], // swing low 98 → LL
+    [100, 100, 99, 100],
+    [100, 102, 99, 101], // swing high 102 → LH（MSS 参照）
+    [98, 99, 97, 98], // swing low 97 → LL
+    [102, 103, 103, 103], // 位移 MSS UP：实体 1、突破 102、FVG [102,103]（分支 1，自身确认）
+    [101, 101, 100, 100], // FVG 起点 high=101
+    [100, 100, 99, 99],
+    [102, 102, 102, 102], // bullish FVG [101,102]
+    [101.5, 102, 101.5, 101.8], // 回踩到 FVG 内，price=101.8
+  ]);
+  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 101.8, time: T0 };
+  const env = baseEnv({ price: 101.8, sweep });
+  const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
+  const chain = opps.find((o) => o.type === "CHAIN");
+  assert.ok(chain, "位移确认的 MSS 应触发 CHAIN");
+  assert.match(chain.trigger, /位移确认/);
 });
 
 test("环境过滤：4H decision NO_TRADE → 无机会（决策层拦截，避免两层信号矛盾）", () => {

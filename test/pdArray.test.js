@@ -146,20 +146,75 @@ test("L4 OB 细类: BEARISH_OB 穿透后收回 → BREAKER", () => {
   assert.equal(obs[0].kind, "BREAKER");
 });
 
-test("V1.6 annotatePDArray: location / age / status(FILLED)", () => {
+test("V1.6 annotatePDArray: location / age / status", () => {
   // eq = 110：FVG 108-100 中点 104 < 110 → DISCOUNT
   const range = { equilibrium: 110 };
   const candles = [
     candle(99, 100, 98, 99, 0), // K1
     candle(108, 110, 105, 109, 1), // K2
     candle(110, 112, 108, 111, 2), // K3 → FVG 100-108
-    candle(111, 113, 105, 112, 3), // 刺入 108 → FILLED
+    candle(111, 113, 105, 112, 3), // 刺入 108（low 105 进入缺口但未到顺位端 100）→ TOUCHED
   ];
   const fvgs = findFvgs(candles);
   const annotated = annotatePDArray({ fvg: fvgs, ob: [] }, range, candles);
   assert.equal(annotated.fvg[0].location, "DISCOUNT");
   assert.equal(annotated.fvg[0].age, 1); // currentIndex 3 - index 2
-  assert.equal(annotated.fvg[0].status, "FILLED");
+  assert.equal(annotated.fvg[0].status, "TOUCHED"); // P1：仅进入缺口，未填平
+});
+
+test("P1 annotatePDArray: FVG 四态（OPEN/TOUCHED/CE_REACHED/FILLED）Bullish", () => {
+  const range = { equilibrium: 110 };
+  // FVG [100,108]（K2 形成）
+  const base = (fills) => [
+    candle(99, 100, 98, 99, 0),
+    candle(108, 110, 105, 109, 1),
+    candle(110, 112, 108, 111, 2), // → BULLISH_FVG [100,108]
+    ...fills,
+  ];
+  // OPEN：后续 K 未进入缺口（low > 108）
+  const open = annotatePDArray({ fvg: findFvgs(base([candle(111, 113, 109, 112, 3)])), ob: [] }, range, base([candle(111, 113, 109, 112, 3)]));
+  assert.equal(open.fvg[0].status, "OPEN");
+  // TOUCHED：low=105 进入缺口但 > bottom 100
+  const touched = annotatePDArray({ fvg: findFvgs(base([candle(111, 113, 105, 112, 3)])), ob: [] }, range, base([candle(111, 113, 105, 112, 3)]));
+  assert.equal(touched.fvg[0].status, "TOUCHED");
+  // CE_REACHED：low=102 触及中点（mid=104）但未到远端 bottom 100
+  const ce = annotatePDArray({ fvg: findFvgs(base([candle(103, 105, 102, 104, 3)])), ob: [] }, range, base([candle(103, 105, 102, 104, 3)]));
+  assert.equal(ce.fvg[0].status, "CE_REACHED");
+  // FILLED：触及远端（low ≤ bottom 100）＝缺口完全回补
+  const filled = annotatePDArray({ fvg: findFvgs(base([candle(113, 114, 98, 112, 3)])), ob: [] }, range, base([candle(113, 114, 98, 112, 3)]));
+  assert.equal(filled.fvg[0].status, "FILLED");
+});
+
+test("P1 annotatePDArray: FVG 四态 Bearish 对称", () => {
+  const range = { equilibrium: 90 };
+  // BEARISH FVG [95,105]（K2 形成：K2.high=103 < K0.low=105？构造 K0 low=105, K2 high=103）
+  const base = (fills) => [
+    candle(106, 107, 105, 106, 0), // K0 low=105
+    candle(104, 105, 103, 104, 1), // K1
+    candle(99, 103, 98, 99, 2), // K2 high=103 < 105 → BEARISH_FVG [95?,105]（bottom=K2.high=103）
+    ...fills,
+  ];
+  const open = annotatePDArray({ fvg: findFvgs(base([candle(97, 100, 96, 99, 3)])), ob: [] }, range, base([candle(97, 100, 96, 99, 3)]));
+  assert.equal(open.fvg[0].status, "OPEN"); // high 100 < bottom 103？→ OPEN（未进入）
+  const touched = annotatePDArray({ fvg: findFvgs(base([candle(97, 103.5, 96, 99, 3)])), ob: [] }, range, base([candle(97, 103.5, 96, 99, 3)]));
+  assert.equal(touched.fvg[0].status, "TOUCHED"); // high 103.5 进入缺口（≥ bottom 103）但未到中点 104
+  // CE_REACHED：high=104.5 触及中点（mid=104）但未到远端 top 105
+  const ce = annotatePDArray({ fvg: findFvgs(base([candle(100, 104.5, 103.5, 101, 3)])), ob: [] }, range, base([candle(100, 104.5, 103.5, 101, 3)]));
+  assert.equal(ce.fvg[0].status, "CE_REACHED");
+  const filled = annotatePDArray({ fvg: findFvgs(base([candle(107, 108, 97, 99, 3)])), ob: [] }, range, base([candle(107, 108, 97, 99, 3)]));
+  assert.equal(filled.fvg[0].status, "FILLED"); // 触及远端（high ≥ top 105）＝完全回补
+});
+
+test("P1 rankPDArray: FVG 消耗分级扣分（OPEN 90 > TOUCHED 80 > CE_REACHED 75），FILLED 彻底失效排除", () => {
+  const pd = (status) => ({ fvg: [{ type: "BULLISH_FVG", direction: "BULLISH", top: 108, bottom: 100, index: 2, age: 5, status }], ob: [] });
+  const s = (status) => rankPDArray({ bias: "BULLISH", range: { equilibrium: 110 }, pdArray: pd(status) }).primary.score;
+  assert.equal(s("OPEN"), 90);
+  assert.equal(s("TOUCHED"), 80);
+  assert.equal(s("CE_REACHED"), 75);
+  // P1：FILLED（触及远端 = 缺口完全回补）→ 彻底失效，不进入候选（不能成为 Primary/Alternative）
+  const r = rankPDArray({ bias: "BULLISH", range: { equilibrium: 110 }, pdArray: pd("FILLED") });
+  assert.equal(r.primary, null);
+  assert.deepEqual(r.alternatives, []);
 });
 
 test("V1.6 rankPDArray: Bullish bias + Discount Bullish FVG → Primary VALID", () => {

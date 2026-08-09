@@ -5,8 +5,11 @@
  * 在 4H Bias 方向明确（BULLISH/BEARISH）的前提下，扫描 5m 层的 ICT 入场触发器：
  *
  *   RETRACE — 价格正在回踩同向 5m FVG/OB（执行区未过度消耗）→ 回踩入场
- *   BOS     — 最近 5m 收盘确认的顺势结构突破 → 突破入场
- *   CHAIN   — 扫损(SSL/BSL) → 5m MSS 结构转向 → 回踩同向执行区（完整 ICT 链条）→ 最高质量
+ *   CHAIN   — 扫损(SSL/BSL) → 5m MSS（位移确认）→ 回踩同向执行区（完整 ICT 链条）→ 最高质量
+ *
+ * 结构证据（不直接产生入场）：MSS/BOS 仅建立"结构已转移/延续"的证据。
+ * BOS 后价格仍处突破侧就报"突破入场"容易追在位移末端——等价格回踩到该位移产生的
+ * FVG/OB（RETRACE）才构成可执行机会。
  *
  * 环境过滤：4H bias 为 NEUTRAL 不出机会（无方向不交易）。
  * 评分（0-100）：环境（信心度/机会质量/活跃窗口/结构有效）× 信号类型权重 + 位置。
@@ -23,7 +26,6 @@ import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArra
 // ---- 常量 ----
 const ZONE_AGE_MAX = 60; // 执行区最大年龄（根 5m = 5 小时，太旧价值低）
 const ZONE_MARGIN = 0.003; // 执行区贴边容差（±0.3% 视为"正在回踩"）
-const BOS_AGE_MAX_MS = 12 * 5 * 60_000; // BOS 有效窗口（12 根 5m = 1 小时）
 const SWEEP_WINDOW_MS = 4 * 3600_000; // 扫损有效窗口（4 小时，与 sweep.js window=48 一致）
 /** 推送门槛：低于此分不推送（环境差/信号弱 = 噪声） */
 export const OPP_MIN_SCORE = 60;
@@ -77,8 +79,6 @@ export function scanOpportunities({ symbol, env, m5 }) {
   if (chain) opps.push(chain);
   const retrace = detectRetrace({ bias, price, zones });
   if (retrace) opps.push(retrace);
-  const bos = detectBos({ ctx, bias, price });
-  if (bos) opps.push(bos);
 
   for (const o of opps) {
     o.symbol = symbol;
@@ -91,7 +91,8 @@ export function scanOpportunities({ symbol, env, m5 }) {
 
 /**
  * 收集同向执行区池（5m FVG/OB）：同向 + 未过度消耗 + 足够新。
- * 已 FILLED 的旧区（>12 根）视为被消费，不再作为回踩目标。
+ * P1：FILLED（触及远端 = 缺口完全回补）的 FVG 彻底失效，无条件排除，不再作为回踩目标；
+ * CE_REACHED（触及中点）仍保留参考价值，仅过旧的区放弃。
  */
 function collectZones(ctx, bias) {
   const zones = [];
@@ -99,7 +100,10 @@ function collectZones(ctx, bias) {
   for (const it of items) {
     if (it.direction !== bias) continue; // 只做同向执行区（BULLISH → 多头 FVG/OB）
     if (it.age > ZONE_AGE_MAX) continue;
-    if (it.status === "FILLED" && it.age > 12) continue; // 刚被触碰的区仍有效（回踩它本身是信号）
+    // P1：已填平（FILLED）的 FVG 彻底失效 → 无条件排除（此前 12 根以内仍可产生回踩机会）；
+    // CE_REACHED（触及中点）保留参考价值，仅过旧的区放弃
+    if (it.status === "FILLED") continue;
+    if (it.status === "CE_REACHED" && it.age > 12) continue;
     const top = it.top ?? it.high;
     const bottom = it.bottom ?? it.low;
     if (top == null || bottom == null || top <= bottom) continue;
@@ -132,42 +136,25 @@ function detectRetrace({ bias, price, zones }) {
   }
   if (!best) return null;
   const z = best.z;
+  // P1：状态文案分层（OPEN 未消耗 / TOUCHED 刚被触碰 / CE_REACHED 已回补 / FILLED 已填平）
+  const zoneState = z.status === "FILLED" ? "已填平" : z.status === "CE_REACHED" ? "已回补" : z.status === "TOUCHED" ? "刚被触碰" : "未消耗";
   return {
     type: "RETRACE",
     direction: bias,
     entry: bias === "BULLISH" ? z.bottom : z.top,
     zone: { type: z.type, top: z.top, bottom: z.bottom },
-    trigger: `价格回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}（${z.age} 根 5m 前形成，${z.status === "FILLED" ? "刚被触碰" : "未消耗"}）`,
+    trigger: `价格回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}（${z.age} 根 5m 前形成，${zoneState}）`,
     key: `RETRACE_${bias}_${z.bottom.toFixed(2)}_${z.top.toFixed(2)}`,
     time: Date.now(),
   };
 }
 
-/** 信号 2 — 顺势结构突破：最近 5m BOS（收盘确认，方向与 4H bias 一致）且价格仍在突破侧 */
-function detectBos({ ctx, bias, price }) {
-  if (!ctx.events.length) return null;
-  const last = ctx.events[ctx.events.length - 1];
-  if (last.type !== "BOS" || !last.confirmed) return null;
-  if (Date.now() - last.time > BOS_AGE_MAX_MS) return null;
-  const dirOk = bias === "BULLISH" ? last.direction === "UP" : last.direction === "DOWN";
-  if (!dirOk) return null;
-  const priceOk = bias === "BULLISH" ? price > last.level : price < last.level;
-  if (!priceOk) return null;
-  return {
-    type: "BOS",
-    direction: bias,
-    entry: last.level,
-    zone: null,
-    trigger: `5m BOS ${last.direction === "UP" ? "向上" : "向下"}突破 ${fmtNum(last.level)}（收盘确认）`,
-    key: `BOS_${bias}_${last.level.toFixed(2)}_${last.time}`,
-    time: last.time,
-  };
-}
-
 /**
- * 信号 3 — 完整链条：扫损 → 5m MSS 转向 → 回踩同向执行区。
+ * 信号 2 — 完整链条：扫损 → 5m MSS 转向 → 回踩同向执行区。
  * 只认顺 Bias 链：BULLISH 需 SSL 被扫（下方流动性扫掉 → 向上反转）→ MSS UP；
  * BEARISH 需 BSL 被扫 → MSS DOWN。sweep 由 biasMonitor 已计算（env.sweep）。
+ * P1：MSS 突破腿必须为位移确认（实体扩张 + FVG，confirmedByDisplacement=true）——
+ * 低动能、贴线式结构转移不构成机构链条，否则 扫损→MSS→回踩 会频繁误报。
  */
 function detectChain({ env, ctx, bias, price, zones }) {
   const sweep = env.sweep;
@@ -177,7 +164,9 @@ function detectChain({ env, ctx, bias, price, zones }) {
   const expectedMssDir = sweep.side === "BSL" ? "DOWN" : "UP"; // 扫 BSL → 预期向下跌破；扫 SSL → 预期向上突破
   const dirOk = bias === "BULLISH" ? expectedMssDir === "UP" : expectedMssDir === "DOWN";
   if (!dirOk) return null; // 扫损方向与 4H bias 相反 → 反势链，环境不顺 → 不报
-  const mss = ctx.events.find((e) => e.type === "MSS" && e.direction === expectedMssDir && e.time >= sweepTime);
+  const mss = ctx.events.find(
+    (e) => e.type === "MSS" && e.direction === expectedMssDir && e.time >= sweepTime && e.confirmedByDisplacement
+  );
   if (!mss) return null;
   // 且价格已回踩/接近同向执行区
   if (!zones.length) return null;
@@ -189,7 +178,7 @@ function detectChain({ env, ctx, bias, price, zones }) {
     direction: bias,
     entry: bias === "BULLISH" ? z.bottom : z.top,
     zone: { type: z.type, top: z.top, bottom: z.bottom },
-    trigger: `扫损${sweep.side === "BSL" ? "BSL" : "SSL"} → 5m MSS ${expectedMssDir === "UP" ? "向上" : "向下"} → 回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}`,
+    trigger: `扫损${sweep.side === "BSL" ? "BSL" : "SSL"} → 5m MSS（位移确认）${expectedMssDir === "UP" ? "向上" : "向下"} → 回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}`,
     key: `CHAIN_${bias}_${z.bottom.toFixed(2)}_${sweep.key || sweepTime}`,
     time: mss.time,
   };
@@ -205,10 +194,9 @@ function scoreOpportunity(o, env) {
   else if (env.quality === "MEDIUM") s += 8;
   if (env.session) s += 10; // 处于活跃窗口（Killzone）
   if (env.structureStatus === "VALID") s += 5; // 4H 结构有效
-  // 信号类型权重：完整链条 > 突破 > 纯回踩
+  // 信号类型权重：完整链条 > 执行区回踩
   if (o.type === "CHAIN") s += 25;
-  else if (o.type === "BOS") s += 15;
-  else s += 10;
+  else s += 10; // RETRACE
   if (o.zone) s += 5; // 有明确执行区（可挂单）
   return Math.min(100, s);
 }

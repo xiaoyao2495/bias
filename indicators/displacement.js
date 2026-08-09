@@ -77,6 +77,13 @@ export function findDisplacements(h5m, { lookback = 20, threshold = 1.5 } = {}) 
       avgBody,
       ratio,
       close: c.close,
+      index: i, // 在 closed（已收盘）数组中的索引——供 mss.js 与结构事件对齐打标
+      // FVG 真正确认的 K 索引（P1 防前视）：
+      //   位移 K 为第三根 → FVG 由位移 K 自身确认 → confirmationIndex = i
+      //   位移 K 为中间根 → FVG 由下一根（i+1）确认 → confirmationIndex = i + 1
+      // 消费方（mss.js）必须确认 confirmationIndex 已到（<= 当前已收盘索引）才能使用，
+      // 否则逐根历史扫描会提前一根读到"未来的确认 K"。
+      confirmationIndex: fvg.middleIndex + 1,
       structureBreak: { type: "BOS", direction: dir, level: swingRef.price, swingIndex: swingRef.index },
       fvg,
     });

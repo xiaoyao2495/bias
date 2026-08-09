@@ -51,9 +51,14 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   ]);
 
   if (!h4.length) throw new Error(`${symbol} 无 4H 数据`);
-  const lastK = h4[h4.length - 1];
-  // 收盘报告需要"最后已收盘 4H"（最后一根若未收盘则取上一根），用于展示收于开盘上方/下方
-  const lastClosed = lastK.closeTime <= Date.now() ? lastK : h4[h4.length - 2] || lastK;
+  // P0-3：结构/Dealing Range/4H FVG/OB 一律只用已收盘 4H。getHistory 返回的末根通常是
+  // 进行中的 Binance 4H K：未收盘 K 可改变倒数 swing 的右侧确认、提前生成/撤销 FVG/OB，
+  // 且其 closeTime 是未来时间——实盘结果会在 4H 内重绘，而 Historical Scanner 只用已收盘 K，
+  // 造成"实时与回放不一致"。实时 5m 价格仍作为独立 provisional 事件（price）输入，不参与 4H 结构定型。
+  const now = Date.now();
+  const closed4h = h4.filter((k) => k.closeTime <= now);
+  const lastK = closed4h[closed4h.length - 1] || h4[h4.length - 1]; // 兜底：理论上总有已收盘 K
+  const lastClosed = lastK; // 最后已收盘 4H（收盘报告用：收于开盘上方/下方）
   const price4h = lastK.close; // 4H 末根收盘价（缓存下最多陈旧 4 小时）
   const time = lastK.closeTime;
   // 核心判定与展示用"收盘确认价"：最近一根已收盘 5m 的 close（5m TTL 5 分钟 + 最多跳过 1 根未收盘 5m，
@@ -61,18 +66,34 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // 实时插针（瞬时跌破保护位又收回）会在 10 分钟轮内触发结构 INVALIDATED → Bias 翻转刷屏；
   // 收盘确认价与 mss.js"事件需收盘确认"的语义保持一致。5m 拉取失败/无已收盘 5m → 回退 4H 收盘价。
   const price5m = m5.length ? m5[m5.length - 1].close : null; // 实时价：仅供 detectSweeps 实时扫损检测
+  // P1：analysisTime = 当前最近已收盘 5m 的 closeTime（日/周/盘前流动性截断用）。
+  // 若仍用最后已收盘 4H 的结束时间（time），21:30 时盘前区间只统计到 20:00，
+  // 已收盘的 20:00–21:00 1H K 会被遗漏；5m 粒度只滞后 ≤5 分钟。
   let price;
+  let analysisTime = time;
   if (m5.length) {
     const last5m = m5[m5.length - 1];
-    price = last5m.closeTime <= Date.now() ? last5m.close : m5[m5.length - 2] ? m5[m5.length - 2].close : price4h;
+    if (last5m.closeTime <= Date.now()) {
+      price = last5m.close;
+      analysisTime = last5m.closeTime;
+    } else if (m5[m5.length - 2]) {
+      price = m5[m5.length - 2].close;
+      analysisTime = m5[m5.length - 2].closeTime;
+    } else {
+      price = price4h;
+    }
   } else {
     price = price4h;
   }
 
   // 核心判定链路（与 Historical Scanner 共用 analyzeBias，见 engine/analyzeBias.js）
   // session（数据驱动 Killzone）在 analyzeBias 内统一计算：h1 → 上周交易周成交量 →
-  // 当前 4H K 覆盖的活跃窗口，同时供 confidence 时机因子与展示使用
-  const { structure, liquidity, location, pdArray, session, bias } = analyzeBias({ candles: h4, daily, weekly, price, time, h1 });
+  // 当前 4H K 覆盖的活跃窗口，同时供 confidence 时机因子与展示使用。
+  // P0-4：Session 参考 K 与结构参考 K 拆分——sessionCandle 用原始 h4 末根（进行中 4H）的
+  // 时间范围，否则 21:30 会拿 16:00–20:00 那根已收盘 K 判断活跃窗口（滞后最多 4 小时）；
+  // 进行中 K 只提供时间范围，不参与任何结构/FVG/OB 判定（那些仍只用 closed4h）。
+  const sessionCandle = h4[h4.length - 1];
+  const { structure, liquidity, location, pdArray, session, bias } = analyzeBias({ candles: closed4h, daily, weekly, price, time, analysisTime, h1, sessionCandle });
   // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导；
   // 同时供扫损 Judas Swing 判定（方向与 bias 相反的 NY Open 扫损 = 开盘假动作）
   const effectiveBias = bias.effectiveBias || bias.bias;

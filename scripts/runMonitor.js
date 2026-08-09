@@ -411,7 +411,7 @@ function structureDesc(bias) {
 }
 
 /** 5m 机会类型 → 中文标签 */
-const OPP_TYPE_CN = { CHAIN: "扫损→MSS→回踩", BOS: "结构突破 BOS", RETRACE: "执行区回踩" };
+const OPP_TYPE_CN = { CHAIN: "扫损→MSS→回踩", RETRACE: "执行区回踩" };
 
 /** 机会榜上次推送时间记录（monitor/opportunityDigest.json） */
 function loadDigestTs() {

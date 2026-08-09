@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { detectStructureEvents, scanStructureEvents } from "../indicators/mss.js";
+import { findDisplacements } from "../indicators/displacement.js";
 import { findSwings } from "../indicators/swing.js";
 
 const now = Date.now();
@@ -182,4 +183,87 @@ test("Swing 窗口按周期：5m 用每侧 1 根（ICT 最小定义），4H 保�
   assert.ok(w5.some((s) => s.type === "HIGH" && s.price === 110));
   assert.ok(!w4h.some((s) => s.type === "HIGH" && s.price === 110));
   assert.ok(w5.length > w4h.length);
+});
+
+test("P1 位移确认：突破腿为位移 K（大实体+突破+FVG）→ confirmedByDisplacement=true", () => {
+  const tiny = { open: 100, close: 101, high: 102, low: 99 }; // 实体 1
+  const data = [
+    ...Array(16).fill(tiny),
+    { open: 101, close: 101, high: 114, low: 109 }, // swing high 114
+    tiny, tiny, tiny,
+    { open: 105, close: 117, high: 118, low: 105 }, // 位移 K：实体 12、突破 114、FVG
+    { open: 116, close: 117, high: 118, low: 115 }, // 收盘确认 K
+  ].map((k, i) => ({ time: i, closeTime: now - 1, ...k }));
+  const r = detectStructureEvents(data);
+  assert.ok(r.lastEvent, "应触发 BOS");
+  assert.equal(r.lastEvent.type, "BOS");
+  assert.equal(r.lastEvent.confirmed, true);
+  assert.equal(r.lastEvent.confirmedByDisplacement, true);
+});
+
+test("P1 位移确认：贴线突破（小实体，无位移）→ confirmedByDisplacement=false", () => {
+  const tiny = { open: 100, close: 101, high: 102, low: 99 }; // 实体 1
+  const data = [
+    ...Array(16).fill(tiny),
+    { open: 101, close: 101, high: 114, low: 109 }, // swing high 114
+    tiny, tiny, tiny,
+    { open: 113.5, close: 114.5, high: 115, low: 113 }, // 贴线突破：实体 1，close 114.5 刚过 114
+    { open: 114, close: 114.5, high: 115, low: 113.5 },
+  ].map((k, i) => ({ time: i, closeTime: now - 1, ...k }));
+  const r = detectStructureEvents(data);
+  assert.equal(r.lastEvent.confirmed, true);
+  assert.equal(r.lastEvent.confirmedByDisplacement, false);
+});
+
+test("P1 防前视：中间根位移（FVG 由下一根确认）→ 位移 K 自身不提前打标", () => {
+  const tiny = { open: 100, close: 101, high: 102, low: 99 }; // 实体 1
+  const data = [
+    ...Array(16).fill(tiny),
+    { open: 101, close: 101, high: 114, low: 109 }, // swing high 114
+    tiny, tiny, tiny,
+    { open: 105, close: 117, high: 118, low: 100 }, // 位移 K（中间根）：实体 12、突破 114；low 100 不构成第三根 FVG
+    { open: 116, close: 117, high: 118, low: 105 }, // FVG 确认 K：low 105 > idx19.high 102（bullishFvg 分支 2）
+  ].map((k, i) => ({ time: i, closeTime: now - 1, ...k }));
+  // 模拟 scanStructureEvents：完整数组预计算位移，再逐根切片传入（前视源）。
+  // 位移 K 的 FVG 由下一根（confirmationIndex=21）确认——切片到 idx20 时不得提前打标。
+  const displacements = findDisplacements(data);
+  const rPre = detectStructureEvents(data.slice(0, 21), { left: 1, right: 1, displacements });
+  assert.equal(rPre.lastEvent.confirmed, true);
+  assert.equal(rPre.lastEvent.confirmedByDisplacement, false, "位移 K 自身（FVG 未确认）不得提前打标");
+  const rOk = detectStructureEvents(data, { left: 1, right: 1, displacements });
+  assert.equal(rOk.lastEvent.confirmedByDisplacement, true, "FVG 确认 K 到达后打标");
+});
+
+test("P1 位移确认：中间根位移（FVG 由下一根确认）且确认 K 收回 swing 内 → 位移 K 的 MSS 仍成立", () => {
+  // BEARISH 结构（HH→LL→LH→LL，lastHigh=102）→ 位移 K（中间根：实体 4、close 104 突破 102，
+  // low 100 不构成第三根 FVG，FVG 由下一根确认）→ 确认 K（low 100.5 > 前 high 99 构成 FVG 分支 2，
+  // 但收盘 100.5 已收回 102 内）。位移与 MSS 都真实发生过，确认 K 收回 swing 内不得否决该事件。
+  const tiny = { open: 100, close: 101, high: 102, low: 99 };
+  const rows = [
+    [100, 100, 100, 100], // 平盘
+    [100, 105, 100, 105], // swing high 105 → HH
+    [104, 104, 98, 100], // swing low 98 → LL
+    [100, 100, 99, 100], // 确认 idx2 低点
+    [100, 102, 99, 101], // swing high 102 → LH（MSS 参照）
+    [98, 99, 97, 98], // swing low 97 → LL
+    [100, 105, 100, 104], // 位移 K（中间根）：实体 4、close 104 > 102；high 105 与确认 K 等高 → 不构成 swing
+    [101, 105, 100.5, 100.5], // FVG 确认 K：low 100.5 > idx5.high 99 → 分支 2 FVG；收盘 100.5 收回 102 内
+  ];
+  const data = [
+    ...Array(16).fill(tiny),
+    ...rows.map(([o, h, l, c]) => ({ open: o, high: h, low: l, close: c })),
+  ].map((k, i) => ({ time: i, closeTime: now - 1, ...k }));
+  // 实时检测：确认 K 已收盘但收回 swing 内 → 位移 K 的 MSS UP 必须仍成立（P1 修复点）
+  const r = detectStructureEvents(data, { left: 1, right: 1 });
+  assert.ok(r.lastEvent, "应触发事件");
+  assert.equal(r.lastEvent.type, "MSS");
+  assert.equal(r.lastEvent.direction, "UP");
+  assert.equal(r.lastEvent.level, 102);
+  assert.equal(r.lastEvent.price, 104, "价格应取位移 K 收盘价（突破发生时），而非收回的确认 K 收盘价");
+  assert.equal(r.lastEvent.confirmedByDisplacement, true, "位移确认后不得因确认 K 收回 swing 内而否决");
+  // 历史扫描：事件应标在位移 K（closed index 22）而非确认 K，且为位移确认
+  const events = scanStructureEvents(data, { lookback: 50, left: 1, right: 1 });
+  const mssUp = events.find((e) => e.type === "MSS" && e.direction === "UP" && e.confirmedByDisplacement);
+  assert.ok(mssUp, "历史扫描应包含位移确认的 MSS UP");
+  assert.equal(mssUp.atIndex, 22, "事件应标在位移 K 而非确认 K");
 });

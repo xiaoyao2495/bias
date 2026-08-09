@@ -63,6 +63,37 @@ function weeklyBull() {
 /** 覆盖全部日/周线的分析时刻（13 周，12 根周线全部已收盘） */
 const TIME = T0 + 13 * W1;
 
+test("P0-4: sessionCandle 决定 Session —— 进行中 4H 时间范围命中活跃窗口，已收盘末根不命中", () => {
+  const now = Date.now();
+  const BJ = 8 * 3600_000;
+  const bj = new Date(now + BJ);
+  const today0 = Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate()) - BJ; // 北京今天 00:00
+  const back = (bj.getUTCDay() + 6) % 7;
+  const lastMon0 = today0 - back * D1 - 7 * D1; // 上周一 00:00（北京）
+  // 上周一~五 1h 数据：北京 20-23 点高量 → 活跃窗口 [20,24]
+  const h1 = [];
+  for (let d = 0; d < 5; d++) {
+    for (let h = 0; h < 24; h++) {
+      const t = lastMon0 + d * D1 + h * 3600_000;
+      const bjHour = new Date(t + BJ).getUTCHours();
+      h1.push({ time: t, quoteVol: bjHour >= 20 && bjHour <= 23 ? 100 : 0 });
+    }
+  }
+  const candles = h4Bull();
+  const base = { candles, daily: [], weekly: [], price: 118, time: TIME, h1 };
+  // 不传 sessionCandle：回退已收盘 4H 末根（T0 末根北京 06:00-10:00）→ 不命中 20-24 → null
+  const r1 = analyzeBias(base);
+  assert.equal(r1.session, null);
+  // 传 sessionCandle（进行中 4H：北京 20:00-24:00）→ 命中活跃窗口
+  const t20 = Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate(), 12, 0, 0); // UTC 12:00 = 北京 20:00
+  const r2 = analyzeBias({ ...base, sessionCandle: { time: t20, closeTime: t20 + H4, open: 1, high: 1, low: 1, close: 1 } });
+  assert.ok(r2.session, "进行中 4H 时间范围应命中活跃窗口");
+  assert.equal(r2.session.start, 20);
+  assert.equal(r2.session.end, 24);
+  // 进行中 K 只用于 Session，不参与结构（swings 结构应与不传时一致）
+  assert.equal(r1.structure.lastHigh.price, r2.structure.lastHigh.price);
+});
+
 test("4H BULLISH + 日线 BULLISH → htfDirection 注入，Scenario TREND_CONTINUATION，输出字段完整", () => {
   const r = analyzeBias({ candles: h4Bull(), daily: dailyBull(), weekly: weeklyBull(), price: 108, time: TIME });
 
@@ -219,4 +250,29 @@ test("Session: 当前 4H 处于活跃窗口（Killzone）→ confidence +10（IC
   const inKz = computeConfidence({ ...base, session: { start: 21, end: 24, ratio: 26.7 } });
   assert.equal(inKz.score, 30); // +10 Killzone active
   assert.ok(inKz.factors.some((f) => f.name === "Killzone active" && f.value === "+10"));
+});
+
+test("P1: analysisTime 决定盘前流动性截断 —— 21:30 时 20:00–21:00 已收盘 1H K 不再被遗漏", () => {
+  const H1 = 3600_000;
+  const tCut = Date.UTC(2024, 1, 13, 12, 0, 0); // UTC 12:00 = 北京 20:00（最后已收盘 4H 结束时间）
+  const tAnalysis = tCut + 90 * 60_000; // 北京 21:30（最近已收盘 5m 时间）
+  // 北京 16:00~21:00 六根 1H K（UTC 08:00~13:00）；20:00-21:00 那根（UTC 12:00）带极端高低点
+  const h1 = [];
+  for (let h = 0; h < 6; h++) {
+    const t = tCut - 4 * H1 + h * H1;
+    const extreme = h === 4; // 北京 20:00-21:00
+    h1.push({ time: t, open: 100, high: extreme ? 999 : 110, low: extreme ? 1 : 90, close: 100, closeTime: t + H1 - 1 });
+  }
+  const rNo = analyzeBias({ candles: h4Bull(), daily: [], weekly: [], price: 118, time: tCut, h1 });
+  const rYes = analyzeBias({ candles: h4Bull(), daily: [], weekly: [], price: 118, time: tCut, analysisTime: tAnalysis, h1 });
+  const pmh = (liq) => liq.buySide.find((x) => x.type === "PRE_MARKET_HIGH");
+  const pml = (liq) => liq.sellSide.find((x) => x.type === "PRE_MARKET_LOW");
+  // 不传 analysisTime（回退 time = 20:00）→ 20:00-21:00 已收盘 1H K 被遗漏 → 盘前区间不含极端值
+  assert.equal(pmh(rNo.liquidity).price, 110);
+  assert.equal(pml(rNo.liquidity).price, 90);
+  // 传 analysisTime（21:30）→ 盘前区间统计到 21:00 已收盘 K → 含极端值
+  assert.equal(pmh(rYes.liquidity).price, 999);
+  assert.equal(pml(rYes.liquidity).price, 1);
+  // 结构不受 analysisTime 影响（结构仍只用已收盘 4H candles）
+  assert.equal(rNo.structure.direction, rYes.structure.direction);
 });
