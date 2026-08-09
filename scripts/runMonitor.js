@@ -609,8 +609,8 @@ function klineSpan(openMs) {
  * 各类流动性位的时间语义不同：
  *   PDH/PDL/PWH/PWL → 日/周 K（显示日期，日 K 恒为北京 08:00 开盘，时间无信息量）
  *   EQH/EQL/EXTERNAL → 4H swing K（显示日期+时间，精确到该根 4H）
- *   PRE_MARKET_HIGH/LOW → 盘前区间（跨 5-6 小时，只显示日期找不到）→ 精确到形成极值的
- *     那根 1H K（显示日期+时间）；仅旧数据无 highTime/lowTime 时回退到盘前日期
+ *   PRE_MARKET_HIGH/LOW → 16:00-21:00 区间（虚拟币无盘前概念，不标时段名，只显示形成极值的
+ *     那根 1H K 时间）；仅旧数据无 highTime/lowTime 时回退显示日期
  * 无形成时间（旧数据/未注入）→ null，消息里省略该段。
  */
 function levelFormedText(sweep) {
@@ -620,11 +620,11 @@ function levelFormedText(sweep) {
     const opts = { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour12: false };
     if (!isDayK) Object.assign(opts, { hour: "2-digit", minute: "2-digit" });
     const t = new Date(sweep.levelTime).toLocaleString("zh-CN", opts);
-    const suffix = isPremkt ? "（盘前）" : isDayK ? "（日/周 K）" : "（4H K）";
+    const suffix = isDayK ? "（日/周 K）" : isPremkt ? "" : "（4H K）";
     return `流动性位形成: ${t}${suffix}`;
   }
-  const d = sweep.levelDate; // 盘前区间旧数据兜底："2026-08-09"
-  if (d) return `流动性位形成: ${d.slice(5, 7)}/${d.slice(8, 10)} 盘前`;
+  const d = sweep.levelDate; // PRE_MARKET 旧数据兜底："2026-08-07"
+  if (d) return `流动性位形成: ${d.slice(5, 7)}/${d.slice(8, 10)}`;
   return null;
 }
 

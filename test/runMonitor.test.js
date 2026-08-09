@@ -100,23 +100,25 @@ test("buildSweep: BSL 实时 — 刺破上方流动性且现价收回", () => {
   assert.match(msg, /流动性位形成: \d{2}\/\d{2}（日\/周 K）/);
 });
 
-test("buildSweep: 盘前流动性位（PRE_MARKET）— 显示形成极值的 1H K 时间（日期+小时分钟）", () => {
+test("buildSweep: 16:00-21:00 区间流动性位（PRE_MARKET）— 只显形成时间，不标时段名", () => {
   const msg = buildSweep({
     symbol: "BICOUSDT", price: 0.0401,
     sweep: { side: "SSL", type: "PRE_MARKET_LOW", level: 0.04, sweptPrice: 0.0399, close: 0.0401, time: 111111, key: "k", realtime: false, closedTime: 111222, levelTime: 1754604000000, levelDate: "2026-08-07" },
     cur: baseCur, confidenceScore: 0, mss5m: null,
   });
-  // 盘前位精确到形成极值的那根 1H K（北京时间 18:00），只显示日期用户找不到
-  assert.match(msg, /流动性位形成: \d{2}\/\d{2} \d{2}:\d{2}（盘前）/);
+  // 虚拟币无盘前概念：只显示形成极值的那根 1H K 时间（日期+小时分钟），不带"盘前"字样
+  assert.match(msg, /流动性位形成: \d{2}\/\d{2} \d{2}:\d{2}/);
+  assert.ok(!msg.includes("盘前"), "虚拟币消息不应出现盘前字样");
 });
 
-test("buildSweep: 盘前位无 highTime/lowTime（旧数据）→ 回退显示盘前日期", () => {
+test("buildSweep: 16:00-21:00 区间位无 highTime/lowTime（旧数据）→ 回退只显日期", () => {
   const msg = buildSweep({
     symbol: "BICOUSDT", price: 0.0401,
     sweep: { side: "SSL", type: "PRE_MARKET_LOW", level: 0.04, sweptPrice: 0.0399, close: 0.0401, time: 111111, key: "k", realtime: false, closedTime: 111222, levelDate: "2026-08-07" },
     cur: baseCur, confidenceScore: 0, mss5m: null,
   });
-  assert.match(msg, /流动性位形成: 08\/07 盘前/);
+  assert.match(msg, /流动性位形成: 08\/07/);
+  assert.ok(!msg.includes("盘前"), "虚拟币消息不应出现盘前字样");
 });
 
 test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据）", () => {
