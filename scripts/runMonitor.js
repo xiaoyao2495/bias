@@ -69,14 +69,14 @@ function sessionText(s) {
   return `活跃窗口 ${String(s.start).padStart(2, "0")}:00-${String(s.end).padStart(2, "0")}:00（占比 ${s.ratio}%）`;
 }
 
-// 中文化（交互信息规范）：ICT 术语标签（Scenario/Bias 等）保留英文，标签值/原因内容翻译
+// 市场背景直白化：说明 4H 结构与日线优先、周线兜底的高周期方向关系。
 const SCENARIO_CN = {
-  BULLISH_CONTINUATION: "多头延续",
-  BEARISH_CONTINUATION: "空头延续",
-  BULLISH_REVERSAL_ATTEMPT: "多头反转尝试",
-  BEARISH_REVERSAL_ATTEMPT: "空头反转尝试",
-  RANGE: "区间",
-  TRANSITION: "过渡",
+  BULLISH_CONTINUATION: "4H 与大周期一致向上",
+  BEARISH_CONTINUATION: "4H 与大周期一致向下",
+  BULLISH_REVERSAL_ATTEMPT: "4H 正在转多，但大周期仍偏空",
+  BEARISH_REVERSAL_ATTEMPT: "4H 正在转空，但大周期仍偏多",
+  RANGE: "方向不明确，价格处于震荡",
+  TRANSITION: "新方向尚未确认",
 };
 const scenarioCN = (s) => SCENARIO_CN[s] || s || "-";
 /** 决策原因 → 中文（decision.reason 枚举映射，未命中保持原样） */
@@ -331,10 +331,10 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
     lines.push("");
   }
   lines.push(
-    "市场背景:",
+    "环境:",
     `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,
     `Session: ${sessionText(cur.session) || "非 Killzone"}`,
-    `Scenario: ${scenarioCN(cur.scenario)}`,
+    `市场背景: ${scenarioCN(cur.scenario)}`,
   );
   // P1-B：5m 结构事件（扫损→收回→MSS 是 ICT 经典链条，标注当前 5m 结构状态）
   if (mss5m && mss5m.lastEvent) {
@@ -425,7 +425,7 @@ export function buildOverview(list) {
   const lines = [`**4H Bias Monitor**  ${nowHHMM()}`, ""];
   for (const r of list) {
     lines.push(`**${r.symbol}** ${ICON[r.cur.bias] || ""} ${r.cur.bias}`);
-    lines.push(`Scenario: ${scenarioCN(r.cur.scenario)} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
+    lines.push(`市场背景: ${scenarioCN(r.cur.scenario)} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
     lines.push("");
   }
   return lines.join("<br/>");
@@ -585,7 +585,7 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
   else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);
   else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
-  if (!biasFlipped && cur.scenario) lines.push(`Scenario: ${scenarioCN(cur.scenario)}`);
+  if (!biasFlipped && cur.scenario) lines.push(`市场背景: ${scenarioCN(cur.scenario)}`);
   lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
   // 非 bias 变化时 reason 是可信度/空间原因；bias 变化时原因已在结构行解释
   if (!biasFlipped) lines.push(`原因: ${reasonCN(reason)}`);

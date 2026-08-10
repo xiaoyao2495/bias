@@ -55,7 +55,7 @@ test("buildChanged: Scenario 值 + 原因英译中（ETHUSDT 08-06 通知场景�
     cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", quality: "HIGH", planR: 1.26, scenario: "BULLISH_REVERSAL_ATTEMPT", session: { start: 20, end: 24, ratio: 28.6 } },
     confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
   });
-  assert.match(msg, /Scenario: 多头反转尝试/);
+  assert.match(msg, /市场背景: 4H 正在转多，但大周期仍偏空/);
   assert.match(msg, /原因: 方向概率可接受且上方空间充足/);
   assert.match(msg, /Session: 活跃窗口 20:00-24:00（占比 28.6%）/);
 });
@@ -73,7 +73,7 @@ test("buildSweep: SSL 已收盘确认 — 侧/位/价/回收/背景字段齐全"
   assert.match(msg, /扫损 K: \d{2}\/\d{2} \d{2}:\d{2} - \d{2}:\d{2}（已收盘确认）/, "已确认扫损应显示 5m K 时段（开盘-收盘整刻度），便于对照图表定位");
   assert.match(msg, /市场背景:/);
   assert.match(msg, /Bias: ⚪ NEUTRAL/);
-  assert.match(msg, /Scenario: 区间/);
+  assert.match(msg, /市场背景: 方向不明确，价格处于震荡/);
   assert.match(msg, /信心度: LOW 0/);
   assert.match(msg, /操作: WAIT/);
 });
@@ -176,7 +176,7 @@ test("buildOverview: 首轮全览字段布局（Scenario · 信心度 · 机会�
   ]);
   assert.match(msg, /\*\*4H Bias Monitor\*\*/);
   assert.match(msg, /\*\*BTCUSDT\*\* 🟢 BULLISH/);
-  assert.match(msg, /Scenario: 多头延续 · 信心度: MEDIUM 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
+  assert.match(msg, /市场背景: 4H 与大周期一致向上 · 信心度: MEDIUM 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
 });
 
 test("buildChanged: 下方多头 BREAKER → 直白显示位置、作用和消耗状态", () => {
