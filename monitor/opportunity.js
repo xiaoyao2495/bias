@@ -37,13 +37,21 @@ export const OPP_MIN_SCORE = 60;
  * @returns {Object}
  */
 export function computeM5Context(m5, price) {
-  const structure = detectStructureEvents(m5, { price, left: 1, right: 1 });
-  const fvgs = findFvgs(m5);
-  const obs = findOrderBlocks(m5);
+  // P1：统一已收盘 K 基准。未收盘 K 的 high/low 实时变动会重绘 FVG/OB；
+  // 且 FVG/OB（findFvgs/findOrderBlocks 直接扫传入数组）与 MSS 事件（mss.js 内部
+  // filter 已收盘子集）若用不同数组，同一根 K 的 index 会错位（差 1），
+  // CHAIN 的 linkedToMss 按 index 精确匹配会永远失败。
+  const closed = m5.filter((k) => !k.closeTime || k.closeTime <= Date.now());
+  if (closed.length < 3) {
+    return { direction: "NEUTRAL", lastHigh: null, lastLow: null, pd: { fvg: [], ob: [] }, events: [] };
+  }
+  const structure = detectStructureEvents(closed, { price, left: 1, right: 1 });
+  const fvgs = findFvgs(closed);
+  const obs = findOrderBlocks(closed);
   // annotatePDArray 需要 range（dealing range）做 PREMIUM/DISCOUNT 标注；
   // 机会扫描只用 age/status，传 null 即可（location 为 null，不影响）。
-  const pd = annotatePDArray({ fvg: fvgs.slice(-40), ob: obs.slice(-40) }, null, m5);
-  const events = scanStructureEvents(m5, { lookback: 50, left: 1, right: 1 });
+  const pd = annotatePDArray({ fvg: fvgs.slice(-40), ob: obs.slice(-40) }, null, closed);
+  const events = scanStructureEvents(closed, { lookback: 50, left: 1, right: 1 });
   return {
     direction: structure.direction,
     lastHigh: structure.structureLayer ? structure.structureLayer.internal.lastHigh : null,
@@ -109,10 +117,18 @@ function collectZones(ctx, bias) {
     if (top == null || bottom == null || top <= bottom) continue;
     zones.push({
       type: it.type.includes("FVG") ? "FVG" : "OB",
+      sourceType: it.type,
       direction: bias,
       top,
       bottom,
       mid: (top + bottom) / 2,
+      // 来源字段（CHAIN 精确匹配 + 审计）：
+      //   index — FVG：确认 K 索引（findFvgs 的 i）；OB：推动 OB 的位移 K 索引（位移驱动）或突破 K 索引（fallback）
+      //   time — FVG：中间根开盘；OB：OB 所在 K 开盘
+      //   displacement — 仅 OB 有意义（位移驱动生成）；FVG 无此字段 → false
+      index: it.index,
+      time: it.time,
+      displacement: it.displacement === true,
       age: it.age,
       status: it.status,
     });
@@ -150,11 +166,42 @@ function detectRetrace({ bias, price, zones }) {
 }
 
 /**
+ * CHAIN 执行区必须与 MSS 位移腿精确对应——不允许用旧 FVG/OB 拼接虚假链条。
+ * 索引语义对齐（同一已收盘 K 数组基准，见 computeM5Context）：
+ *   FVG：zone.index = FVG 确认 K（findFvgs 的 i）须等于 mss.displacementConfirmationIndex
+ *        （位移 FVG 的确认 K），且区间价格与 mss.displacementFvg 一致
+ *   OB ：zone.displacement（位移驱动 OB）且 zone.index（= 推动该 OB 的位移 K）须等于
+ *        mss.displacementIndex（MSS 位移 K）
+ */
+function linkedToMss(zone, mss) {
+  if (zone.type === "FVG") {
+    if (zone.index !== mss.displacementConfirmationIndex) return false;
+
+    const fvg = mss.displacementFvg;
+    if (!fvg) return false;
+
+    return near(zone.top, fvg.top) && near(zone.bottom, fvg.bottom);
+  }
+
+  if (zone.type === "OB") {
+    return zone.displacement === true && zone.index === mss.displacementIndex;
+  }
+
+  return false;
+}
+
+function near(a, b) {
+  return Math.abs(a - b) / Math.max(Math.abs(b), 1e-9) < 0.000001;
+}
+
+/**
  * 信号 2 — 完整链条：扫损 → 5m MSS 转向 → 回踩同向执行区。
  * 只认顺 Bias 链：BULLISH 需 SSL 被扫（下方流动性扫掉 → 向上反转）→ MSS UP；
  * BEARISH 需 BSL 被扫 → MSS DOWN。sweep 由 biasMonitor 已计算（env.sweep）。
  * P1：MSS 突破腿必须为位移确认（实体扩张 + FVG，confirmedByDisplacement=true）——
  * 低动能、贴线式结构转移不构成机构链条，否则 扫损→MSS→回踩 会频繁误报。
+ * P1：CHAIN 执行区必须由该 MSS 位移腿产生（linkedToMss 按索引/价格精确匹配），
+ * 普通 RETRACE 仍可用全部有效执行区，但高质量 CHAIN 不用旧 FVG/OB 拼凑。
  */
 function detectChain({ env, ctx, bias, price, zones }) {
   const sweep = env.sweep;
@@ -168,16 +215,18 @@ function detectChain({ env, ctx, bias, price, zones }) {
     (e) => e.type === "MSS" && e.direction === expectedMssDir && e.time >= sweepTime && e.confirmedByDisplacement
   );
   if (!mss) return null;
-  // 且价格已回踩/接近同向执行区
+  // 且价格已回踩/接近该 MSS 位移腿产生的执行区
   if (!zones.length) return null;
   const margin = price * ZONE_MARGIN;
-  const z = zones.find((zz) => price >= zz.bottom - margin && price <= zz.top + margin);
+  const z = zones.find((zone) => linkedToMss(zone, mss) && price >= zone.bottom - margin && price <= zone.top + margin);
   if (!z) return null;
   return {
     type: "CHAIN",
     direction: bias,
     entry: bias === "BULLISH" ? z.bottom : z.top,
-    zone: { type: z.type, top: z.top, bottom: z.bottom },
+    // 保留来源便于审计：哪个执行区、由哪条位移腿产生
+    zone: { type: z.type, top: z.top, bottom: z.bottom, index: z.index, displacement: z.displacement },
+    mssIndex: mss.atIndex,
     trigger: `扫损${sweep.side === "BSL" ? "BSL" : "SSL"} → 5m MSS（位移确认）${expectedMssDir === "UP" ? "向上" : "向下"} → 回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}`,
     key: `CHAIN_${bias}_${z.bottom.toFixed(2)}_${sweep.key || sweepTime}`,
     time: mss.time,

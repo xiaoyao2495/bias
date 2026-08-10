@@ -85,7 +85,16 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
   // 确认 K 再次收在 swing 外——确认 K 可能收回 swing 内（位移 K 的突破依然真实发生过）。
   const dispSet = new Map();
   const dispList = displacements ?? findDisplacements(closed);
-  for (const d of dispList) dispSet.set(d.index, { index: d.index, dir: d.direction, confirmationIndex: d.confirmationIndex, level: d.structureBreak.level, close: d.close });
+  for (const d of dispList) {
+    dispSet.set(d.index, {
+      index: d.index,
+      dir: d.direction,
+      confirmationIndex: d.confirmationIndex,
+      level: d.structureBreak.level,
+      close: d.close,
+      fvg: d.fvg,
+    });
+  }
   const lastIdx = closed.length - 1;
   const dNear = (dir) => {
     const d0 = dispSet.get(lastIdx);
@@ -95,6 +104,26 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
     return null;
   };
   const levelMatch = (level, price) => Math.abs(level - price) / Math.max(price, 1e-9) < 0.0005;
+
+  /**
+   * 统一绑定位移证据到结构事件（MSS/BOS）：
+   *   - confirmedByDisplacement：事件由位移腿确认
+   *   - atIndex：事件标在位移 K（而非确认/触发 K）——位移 K 的突破真实发生过
+   *   - displacementIndex / displacementConfirmationIndex / displacementFvg：
+   *     供 CHAIN 精确匹配"该位移产生的执行区"——FVG 按确认 K（confirmationIndex）对齐，
+   *     OB 按位移 K（displacementIndex）对齐，避免用旧 FVG/OB 拼接虚假链条
+   * @param {Object} event mkEvent 输出
+   * @param {Object|null} d 匹配的位移（dispSet 项）；null 时原样返回
+   */
+  function attachDisplacement(event, d) {
+    if (!d) return event;
+    event.confirmedByDisplacement = true;
+    event.atIndex = d.index;
+    event.displacementIndex = d.index;
+    event.displacementConfirmationIndex = d.confirmationIndex;
+    event.displacementFvg = d.fvg;
+    return event;
+  }
 
   const events = [];
   const direction = structure.direction;
@@ -108,20 +137,19 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
   if (lastHigh && (direction === "BULLISH" || direction === "NEUTRAL")) {
     const d = dNear("UP");
     if (p != null && p > lastHigh.price) {
-      events.push(mkEvent("BOS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price}`, lastClosed, !lastClosed && price != null, lastClosed && !!d));
+      // P1：位移确认必须匹配突破价位——附近同向位移不一定突破的是同一个 swing
+      const matchedD = d && levelMatch(d.level, lastHigh.price) ? d : null;
+      events.push(attachDisplacement(mkEvent("BOS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price}`, lastClosed, !lastClosed && price != null, !!matchedD), matchedD));
     } else if (lastClosed && d && levelMatch(d.level, lastHigh.price)) {
-      const ev = mkEvent("BOS", "UP", lastHigh.price, d.close, lastHigh.index, `Displacement broke swing high ${lastHigh.price}`, true, false, true);
-      ev.atIndex = d.index;
-      events.push(ev);
+      events.push(attachDisplacement(mkEvent("BOS", "UP", lastHigh.price, d.close, lastHigh.index, `Displacement broke swing high ${lastHigh.price}`, true, false, true), d));
     }
   } else if (lastLow && (direction === "BEARISH" || direction === "NEUTRAL")) {
     const d = dNear("DOWN");
     if (p != null && p < lastLow.price) {
-      events.push(mkEvent("BOS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price}`, lastClosed, !lastClosed && price != null, lastClosed && !!d));
+      const matchedD = d && levelMatch(d.level, lastLow.price) ? d : null;
+      events.push(attachDisplacement(mkEvent("BOS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price}`, lastClosed, !lastClosed && price != null, !!matchedD), matchedD));
     } else if (lastClosed && d && levelMatch(d.level, lastLow.price)) {
-      const ev = mkEvent("BOS", "DOWN", lastLow.price, d.close, lastLow.index, `Displacement broke swing low ${lastLow.price}`, true, false, true);
-      ev.atIndex = d.index;
-      events.push(ev);
+      events.push(attachDisplacement(mkEvent("BOS", "DOWN", lastLow.price, d.close, lastLow.index, `Displacement broke swing low ${lastLow.price}`, true, false, true), d));
     }
   }
 
@@ -129,20 +157,18 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
   if (direction === "BULLISH" && lastLow) {
     const d = dNear("DOWN");
     if (p != null && p < lastLow.price) {
-      events.push(mkEvent("MSS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price} — structure shift`, lastClosed, !lastClosed && price != null, lastClosed && !!d));
+      const matchedD = d && levelMatch(d.level, lastLow.price) ? d : null;
+      events.push(attachDisplacement(mkEvent("MSS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price} — structure shift`, lastClosed, !lastClosed && price != null, !!matchedD), matchedD));
     } else if (lastClosed && d && levelMatch(d.level, lastLow.price)) {
-      const ev = mkEvent("MSS", "DOWN", lastLow.price, d.close, lastLow.index, `Displacement broke swing low ${lastLow.price} — structure shift`, true, false, true);
-      ev.atIndex = d.index;
-      events.push(ev);
+      events.push(attachDisplacement(mkEvent("MSS", "DOWN", lastLow.price, d.close, lastLow.index, `Displacement broke swing low ${lastLow.price} — structure shift`, true, false, true), d));
     }
   } else if (direction === "BEARISH" && lastHigh) {
     const d = dNear("UP");
     if (p != null && p > lastHigh.price) {
-      events.push(mkEvent("MSS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price} — structure shift`, lastClosed, !lastClosed && price != null, lastClosed && !!d));
+      const matchedD = d && levelMatch(d.level, lastHigh.price) ? d : null;
+      events.push(attachDisplacement(mkEvent("MSS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price} — structure shift`, lastClosed, !lastClosed && price != null, !!matchedD), matchedD));
     } else if (lastClosed && d && levelMatch(d.level, lastHigh.price)) {
-      const ev = mkEvent("MSS", "UP", lastHigh.price, d.close, lastHigh.index, `Displacement broke swing high ${lastHigh.price} — structure shift`, true, false, true);
-      ev.atIndex = d.index;
-      events.push(ev);
+      events.push(attachDisplacement(mkEvent("MSS", "UP", lastHigh.price, d.close, lastHigh.index, `Displacement broke swing high ${lastHigh.price} — structure shift`, true, false, true), d));
     }
   }
 
