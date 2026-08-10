@@ -383,16 +383,41 @@ function sweepTypeLabel(type) {
   );
 }
 
-/** Order Block 细类 → 中文（ICT 2022 L4：BREAKER 破位反包 / REJECTION 拒绝 / STANDARD 标准）
- *  仅在有关注价值时显示：BREAKER/REJECTION 总是显示；STANDARD 需未回踩（FRESH）才显示 */
-const OB_KIND_CN = { BREAKER: "破位反包", REJECTION: "拒绝", STANDARD: "标准" };
-function obText(o) {
+/** Order Block → 直白交易文案。
+ *  根据当前价格说明区域在上方/下方/当前，同时说明历史作用、消耗状态和与 Bias 的关系。
+ *  仅在有关注价值时显示：BREAKER/REJECTION 总是显示；STANDARD 需未回踩（FRESH）才显示。 */
+function obText(o, bias, price) {
   if (!o) return null;
   if (o.kind === "STANDARD" && o.state === "USED") return null;
-  const kind = OB_KIND_CN[o.kind] || o.kind;
-  const state = o.state === "USED" ? "已回踩" : o.state === "FRESH" ? "未回踩" : o.state;
-  const loc = o.location === "DISCOUNT" ? "折扣区" : o.location === "PREMIUM" ? "溢价区" : null;
-  return `最近OB: ${o.type === "BULLISH_OB" ? "多头OB" : "空头OB"}（${kind}·${state}${loc ? `·${loc}` : ""}）`;
+
+  const bullish = o.type === "BULLISH_OB";
+  let position = null;
+  if (price != null && o.low != null && o.high != null) {
+    if (price < o.low) position = "ABOVE";
+    else if (price > o.high) position = "BELOW";
+    else position = "INSIDE";
+  }
+
+  let title;
+  if (position === "INSIDE") title = bullish ? "当前支撑" : "当前阻力";
+  else if (position === "ABOVE") title = bullish ? "上方多头区域" : "上方阻力";
+  else if (position === "BELOW") title = bullish ? "下方支撑" : "下方空头区域";
+  else title = bullish ? "多头支撑" : "空头阻力";
+
+  let behavior;
+  if (o.kind === "REJECTION") behavior = bullish ? "多头区域曾推动价格反弹" : "空头区域曾压低价格";
+  else if (o.kind === "BREAKER") behavior = bullish ? "多头区域破位后重新收回" : "空头区域破位后重新跌回";
+  else behavior = bullish ? "多头支撑区域" : "空头阻力区域";
+
+  const state = o.state === "USED" ? "已回踩，效力减弱" : o.state === "FRESH" ? "尚未回踩，参考价值较高" : null;
+  const relation =
+    bias === "BULLISH" && !bullish
+      ? "与当前多头方向相反"
+      : bias === "BEARISH" && bullish
+        ? "与当前空头方向相反"
+        : null;
+  const details = [state, relation].filter(Boolean).join("；");
+  return `${title}: ${behavior}${details ? `（${details}）` : ""}`;
 }
 
 /** 首轮全览（紧凑，避免刷屏） */
@@ -554,7 +579,7 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
   }
   if (cur.session) lines.push(`Session: ${sessionText(cur.session)}`);
   // 辅助状态：OB 细类（ICT 2022 L4），仅在有关注价值时显示，避免噪音
-  const ob = obText(cur.ob);
+  const ob = obText(cur.ob, cur.bias, price);
   if (ob) lines.push(ob);
   if (changes.includes("confidence")) lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);

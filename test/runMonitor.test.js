@@ -179,7 +179,7 @@ test("buildOverview: 首轮全览字段布局（Scenario · 信心度 · 机会�
   assert.match(msg, /Scenario: 多头延续 · 信心度: MEDIUM 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
 });
 
-test("buildChanged: OB BREAKER → 显示辅助行（仅有关注价值时）", () => {
+test("buildChanged: 下方多头 BREAKER → 直白显示位置、作用和消耗状态", () => {
   const msg = buildChanged({
     symbol: "ETHUSDT", price: 1910.86, reason: [],
     changes: ["confidence"],
@@ -190,7 +190,35 @@ test("buildChanged: OB BREAKER → 显示辅助行（仅有关注价值时）", 
     },
     confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
   });
-  assert.match(msg, /最近OB: 多头OB（破位反包·已回踩·折扣区）/);
+  assert.match(msg, /下方支撑: 多头区域破位后重新收回（已回踩，效力减弱）/);
+});
+
+test("buildChanged: 多头 Bias 的上方空头 REJECTION → 标注阻力、效力和反向关系", () => {
+  const msg = buildChanged({
+    symbol: "BTCUSDT", price: 100, reason: "Direction probability too low",
+    changes: ["confidence"],
+    prev: { ...basePrev, bias: "BULLISH", confidence: "MEDIUM" },
+    cur: {
+      bias: "BULLISH", confidence: "LOW", decision: "NO_TRADE", quality: "LOW", planR: 0.36, scenario: "BULLISH_REVERSAL_ATTEMPT",
+      ob: { type: "BEARISH_OB", kind: "REJECTION", state: "USED", high: 105, low: 102, status: "OPEN", location: "PREMIUM" },
+    },
+    confidenceScore: 25, structureStatus: "VALID", invalidation: null, mss: null,
+  });
+  assert.match(msg, /上方阻力: 空头区域曾压低价格（已回踩，效力减弱；与当前多头方向相反）/);
+});
+
+test("buildChanged: 价格正处于未回踩空头 OB 内 → 显示当前阻力", () => {
+  const msg = buildChanged({
+    symbol: "BTCUSDT", price: 103, reason: "Direction probability too low",
+    changes: ["confidence"],
+    prev: { ...basePrev, bias: "BULLISH", confidence: "MEDIUM" },
+    cur: {
+      bias: "BULLISH", confidence: "LOW", decision: "NO_TRADE", quality: "LOW", planR: 0.36, scenario: "BULLISH_REVERSAL_ATTEMPT",
+      ob: { type: "BEARISH_OB", kind: "REJECTION", state: "FRESH", high: 105, low: 102, status: "OPEN", location: "PREMIUM" },
+    },
+    confidenceScore: 25, structureStatus: "VALID", invalidation: null, mss: null,
+  });
+  assert.match(msg, /当前阻力: 空头区域曾压低价格（尚未回踩，参考价值较高；与当前多头方向相反）/);
 });
 
 test("buildChanged: OB STANDARD·USED → 不显示辅助行（避免噪音）", () => {
@@ -204,7 +232,8 @@ test("buildChanged: OB STANDARD·USED → 不显示辅助行（避免噪音）",
     },
     confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
   });
-  assert.ok(!msg.includes("最近OB"));
+  assert.ok(!msg.includes("支撑:"));
+  assert.ok(!msg.includes("阻力:"));
 });
 
 test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发链）", () => {
