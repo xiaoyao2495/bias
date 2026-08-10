@@ -93,7 +93,17 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // 时间范围，否则 21:30 会拿 16:00–20:00 那根已收盘 K 判断活跃窗口（滞后最多 4 小时）；
   // 进行中 K 只提供时间范围，不参与任何结构/FVG/OB 判定（那些仍只用 closed4h）。
   const sessionCandle = h4[h4.length - 1];
-  const { structure, liquidity, location, pdArray, session, bias } = analyzeBias({ candles: closed4h, daily, weekly, price, time, analysisTime, h1, sessionCandle });
+  const { structure, liquidity, location, pdArray, session, htfContext, bias } = analyzeBias({
+    candles: closed4h,
+    daily,
+    weekly,
+    price,
+    structurePrice: price4h,
+    time,
+    analysisTime,
+    h1,
+    sessionCandle,
+  });
   // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导；
   // 同时供扫损 Judas Swing 判定（方向与 bias 相反的 NY Open 扫损 = 开盘假动作）
   const effectiveBias = bias.effectiveBias || bias.bias;
@@ -101,12 +111,18 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // P1-A：流动性扫损（5m K 线：进行中 5m 实时检测 + 最近 48 根已收盘 5m 确认，≈4 小时窗口）
   // 用 5m 粒度：扫损是分钟级价格行为（刺破流动性后收回），4H 单根 K 会把整个过程包住，粒度过粗
   // 外部结构位补形成时间（externalSwingHighTime/LowTime，4H swing 开盘时间），供扫损消息展示"被扫的流动性是什么时候形成的"
-  const extHigh = structure.externalSwingHigh != null ? [{ type: "EXTERNAL_HIGH", price: structure.externalSwingHigh }] : [];
+  const extHighState = structure.externalSwingHighState?.state;
+  const extLowState = structure.externalSwingLowState?.state;
+  const extHigh = structure.externalSwingHigh != null && extHighState !== "BROKEN"
+    ? [{ type: "EXTERNAL_HIGH", price: structure.externalSwingHigh, state: extHighState }]
+    : [];
   if (extHigh.length && structure.externalSwingHighTime != null) extHigh[0].time = structure.externalSwingHighTime;
-  const extLow = structure.externalSwingLow != null ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow }] : [];
+  const extLow = structure.externalSwingLow != null && extLowState !== "BROKEN"
+    ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow, state: extLowState }]
+    : [];
   if (extLow.length && structure.externalSwingLowTime != null) extLow[0].time = structure.externalSwingLowTime;
-  const buyLevels = (liquidity.buySide || []).concat(extHigh);
-  const sellLevels = (liquidity.sellSide || []).concat(extLow);
+  const buyLevels = (liquidity.buySide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extHigh.filter((x) => !x.state || x.state === "ACTIVE"));
+  const sellLevels = (liquidity.sellSide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extLow.filter((x) => !x.state || x.state === "ACTIVE"));
   const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48, effectiveBias);
 
   // P1-B：5m 层 MSS/BOS（周期无关检测；5m 用 ICT 最小 swing 窗口每侧 1 根，收盘确认）
@@ -152,6 +168,11 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     last4h: { open: lastClosed.open, close: lastClosed.close, time: lastClosed.closeTime },
     // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导
     bias: effectiveBias,
+    structureBias: bias.structureBias || bias.bias,
+    narrativeBias: bias.narrativeBias || bias.bias,
+    htfContext,
+    provisionalStructureBreak: bias.provisionalStructureBreak || null,
+    reversalEvidence: bias.reversalEvidence || null,
     structureStatus: bias.structureStatus,
     invalidation: bias.invalidation || null, // { type, price }：结构失效时用于解释"突破哪个保护位"
     mss: bias.mss

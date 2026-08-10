@@ -12,11 +12,12 @@
  */
 import { findSwings, analyzeSwings } from "../indicators/swing.js";
 import { buildStructure } from "../indicators/structure.js";
-import { computeLiquidity } from "../indicators/liquidity.js";
+import { computeLiquidity, liquidityStateForLevel } from "../indicators/liquidity.js";
 import { computeDealingRange } from "../indicators/dealingRange.js";
 import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
-import { computeHtfDirection } from "../indicators/scenario.js";
+import { computeHtfContext } from "../indicators/scenario.js";
 import { lastTradingWeek, computeActiveWindows, killzoneOfK } from "../indicators/killzone.js";
+import { scanStructureEvents } from "../indicators/mss.js";
 import { computeDailyBias } from "./dailyBiasEngine.js";
 
 /**
@@ -24,7 +25,8 @@ import { computeDailyBias } from "./dailyBiasEngine.js";
  * @param {Array}  p.candles  4H K 线（已按分析时刻截断，末根为当前判定基准）
  * @param {Array}  p.daily    日线 K 线（可传完整历史，内部按 time 截断）
  * @param {Array}  p.weekly   周线 K 线（可传完整历史，内部按 time 截断）
- * @param {number} p.price    当前价（4H 收盘 / 实时价）
+ * @param {number} p.price    执行参考价（实盘=最近已收盘 5m；回放=4H 收盘）
+ * @param {number} [p.structurePrice] 4H 结构确认价（必须是已收盘 4H close）；不传则回退 price
  * @param {number} p.time     分析时刻（ms，取 closeTime <= time 的已收盘日/周 K；回放 = 4H 收盘点）
  * @param {number} [p.analysisTime] 实时模式的流动性截断时刻（ms）＝当前最近已收盘 5m 的 closeTime。
  *                            日/周/盘前流动性用它截断；不传（回放/审计）→ 回退 time（4H 收盘点）。
@@ -38,9 +40,9 @@ import { computeDailyBias } from "./dailyBiasEngine.js";
  *   （取其时间范围 [openTime, closeTime)），避免用"上一根已收盘 4H"判断导致最多 4 小时的
  *   窗口滞后。它只提供时间范围，绝不参与 Structure/FVG/OB（那些仍只用 candles）。
  *   不传（回放/审计）→ 回退 candles 末根，行为不变。
- * @returns {{ structure, liquidity, location, pdArray, htfDirection, session, bias }}
+ * @returns {{ structure, liquidity, location, pdArray, htfDirection, htfContext, session, bias }}
  */
-export function analyzeBias({ candles, daily, weekly, price, time, analysisTime, h1, pdArrayLimit = 6, sessionCandle }) {
+export function analyzeBias({ candles, daily, weekly, price, structurePrice, time, analysisTime, h1, pdArrayLimit = 6, sessionCandle }) {
   // P1：日/周/盘前流动性截断时刻与结构参考时刻拆分——结构只用已收盘 4H（candles），
   // 流动性截断用 analysisTime（实时 = 最近已收盘 5m 的 closeTime），回放回退 time（4H 收盘点）。
   const cutoff = analysisTime ?? time;
@@ -50,25 +52,102 @@ export function analyzeBias({ candles, daily, weekly, price, time, analysisTime,
   const swings = findSwings(candles);
   const labeled = analyzeSwings(swings);
   const structure = buildStructure(labeled);
-  const liquidity = computeLiquidity(day, week, swings, 0.002, cutoff, 150, h1);
+  const liquidity = computeLiquidity(day, week, swings, 0.002, cutoff, 150, h1, candles);
+  annotateStructureLiquidityStates(structure, candles);
   const location = computeDealingRange(swings, structure, price);
   const fvgs = findFvgs(candles);
   const obs = findOrderBlocks(candles);
   const pdArray = annotatePDArray({ fvg: fvgs.slice(-pdArrayLimit), ob: obs.slice(-pdArrayLimit) }, location, candles);
-  const htfDirection = computeHtfDirection(day, week, price);
+  const htfContext = computeHtfContext(day, week, price);
+  const htfDirection = htfContext.confirmedDirection;
+  const reversalEvidence = findReversalEvidence(candles, structure, liquidity);
   // Session（数据驱动 Killzone）：上周交易周（周一~五）1h 成交量 → 活跃窗口 →
   // 当前 4H 覆盖的最长重叠窗口。参考 K 用 sessionCandle（当前进行中 4H 的时间范围）——
   // 若用已收盘 4H 末根，21:30 会拿 16:00–20:00 那根判断窗口，Session +10 / 活跃窗口展示
   // 全部滞后最多 4 小时；进行中 K 只取其时间范围，不参与结构。h1 不传/数据不足 → null。
   let session = null;
   if (h1 && h1.length) {
-    const wk = lastTradingWeek(h1);
+    // 实盘 sessionCandle 是当前进行中 4H，优先用它定位“上周”；回放则严格使用历史 cutoff。
+    const sessionNow = sessionCandle?.closeTime ?? cutoff;
+    const wk = lastTradingWeek(h1, sessionNow);
     if (wk.length >= 24) {
       const sessionRef = sessionCandle || candles[candles.length - 1];
       session = killzoneOfK(sessionRef, computeActiveWindows(wk));
     }
   }
-  const bias = computeDailyBias({ structure, liquidity, location, price, pdArray, htfDirection, session });
+  const bias = computeDailyBias({
+    structure,
+    liquidity,
+    location,
+    price,
+    structurePrice: structurePrice ?? price,
+    pdArray,
+    htfDirection,
+    htfContext,
+    reversalEvidence,
+    session,
+  });
 
-  return { structure, liquidity, location, pdArray, htfDirection, session, bias };
+  return { structure, liquidity, location, pdArray, htfDirection, htfContext, session, bias };
+}
+
+function annotateStructureLiquidityStates(structure, candles) {
+  const closeAt = (index, time) => {
+    const k = index != null ? candles[index] : null;
+    return k ? k.closeTime ?? k.time : time;
+  };
+  if (structure.externalSwingHigh != null) {
+    structure.externalSwingHighState = liquidityStateForLevel(
+      { price: structure.externalSwingHigh },
+      true,
+      candles,
+      closeAt(structure.externalSwingHighIndex, structure.externalSwingHighTime)
+    );
+  }
+  if (structure.externalSwingLow != null) {
+    structure.externalSwingLowState = liquidityStateForLevel(
+      { price: structure.externalSwingLow },
+      false,
+      candles,
+      closeAt(structure.externalSwingLowIndex, structure.externalSwingLowTime)
+    );
+  }
+  if (structure.lastHigh) {
+    structure.lastHighState = liquidityStateForLevel(
+      { price: structure.lastHigh.price },
+      true,
+      candles,
+      closeAt(structure.lastHigh.index, structure.lastHigh.time)
+    );
+  }
+  if (structure.lastLow) {
+    structure.lastLowState = liquidityStateForLevel(
+      { price: structure.lastLow.price },
+      false,
+      candles,
+      closeAt(structure.lastLow.index, structure.lastLow.time)
+    );
+  }
+}
+
+/** HTF 冲突时，只有“反向流动性已扫 + 4H 位移 MSS”才确认反转 Narrative。 */
+function findReversalEvidence(candles, structure, liquidity) {
+  const direction = structure.direction;
+  if (direction !== "BULLISH" && direction !== "BEARISH") return { confirmed: false, sweep: null, mss: null };
+  const levels = direction === "BULLISH" ? [...(liquidity.sellSide || [])] : [...(liquidity.buySide || [])];
+  const extState = direction === "BULLISH" ? structure.externalSwingLowState : structure.externalSwingHighState;
+  if (extState && extState.state === "SWEPT") {
+    levels.push({ type: direction === "BULLISH" ? "EXTERNAL_LOW" : "EXTERNAL_HIGH", ...extState });
+  }
+  const swept = levels
+    .filter((x) => x.state === "SWEPT")
+    .sort((a, b) => (b.sweptAt || 0) - (a.sweptAt || 0))[0] || null;
+  if (!swept) return { confirmed: false, sweep: null, mss: null };
+
+  const expected = direction === "BULLISH" ? "UP" : "DOWN";
+  const events = scanStructureEvents(candles, { lookback: 50, left: 2, right: 2 });
+  const mss = [...events]
+    .reverse()
+    .find((e) => e.type === "MSS" && e.direction === expected && e.confirmedByDisplacement && e.time >= swept.sweptAt) || null;
+  return { confirmed: !!mss, sweep, mss };
 }

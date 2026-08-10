@@ -62,11 +62,13 @@ const TYPE_REASON = {
 export function rankLiquidityTargets(structure, liquidity, direction, price) {
   const isBuy = direction === "BULLISH";
   const inSide = (p) => price == null || (isBuy ? p > price : p < price);
+  const active = (x) => !x || !x.state || x.state === "ACTIVE";
   const candidates = [];
 
   // 1. External 结构位（最高优先）
   const ext = isBuy ? structure && structure.externalSwingHigh : structure && structure.externalSwingLow;
-  if (ext != null && inSide(ext)) {
+  const extState = isBuy ? structure && structure.externalSwingHighState : structure && structure.externalSwingLowState;
+  if (ext != null && inSide(ext) && active(extState)) {
     candidates.push({
       type: isBuy ? "EXTERNAL_HIGH" : "EXTERNAL_LOW",
       price: ext,
@@ -76,7 +78,7 @@ export function rankLiquidityTargets(structure, liquidity, direction, price) {
   }
 
   // 2-4. PWH/PDH/EQH 或 PWL/PDL/EQL
-  const pool = (isBuy ? liquidity.buySide : liquidity.sellSide).filter((x) => inSide(x.price));
+  const pool = (isBuy ? liquidity.buySide : liquidity.sellSide).filter((x) => inSide(x.price) && active(x));
   const priorityList = isBuy ? BUY_PRIORITY : SELL_PRIORITY;
   for (const t of priorityList) {
     const found = pool.find((x) => x.type === t);
@@ -87,7 +89,8 @@ export function rankLiquidityTargets(structure, liquidity, direction, price) {
 
   // 5. Internal swing（最近摆动高低点，去重：与外部位/已选目标价格接近的跳过）
   const lastSwing = isBuy ? structure && structure.lastHigh : structure && structure.lastLow;
-  if (lastSwing && inSide(lastSwing.price)) {
+  const internalState = isBuy ? structure && structure.lastHighState : structure && structure.lastLowState;
+  if (lastSwing && inSide(lastSwing.price) && active(internalState)) {
     const nearDup = candidates.some((c) => Math.abs(c.price - lastSwing.price) / lastSwing.price < 0.0005);
     if (!nearDup) {
       candidates.push({
@@ -129,7 +132,7 @@ function lastCompleted(candles, now = Date.now()) {
  *   - 回放：传历史 now，只认 closeTime <= now 的 1H K，幂等
  * @param {Array} [h1] 1H K 线（{time,open,high,low,close,closeTime}，time/closeTime 为 ms）
  * @param {number} [now] 参考时间（ms），默认当前时间
- * @returns {{ high:number, low:number, date:string, bars:number, highTime:number, lowTime:number }|null}
+ * @returns {{ high:number, low:number, date:string, bars:number, highTime:number, lowTime:number, activeFrom:number }|null}
  *   highTime/lowTime：盘前区间内形成最高/最低的那根 1H K 的开盘时间（整点），
  *   供扫损消息精确展示"这个盘前位是几点形成的"（仅日期用户在图上找不到）
  */
@@ -161,7 +164,15 @@ export function findPremarketRange(h1, now = Date.now()) {
   // 取形成极值的那根 1H K（并列时取最近一根）：扫损消息要精确到"几点形成"
   const highK = [...ks].reverse().find((k) => k.high === high);
   const lowK = [...ks].reverse().find((k) => k.low === low);
-  return { high, low, date, bars: ks.length, highTime: highK ? highK.time : null, lowTime: lowK ? lowK.time : null };
+  return {
+    high,
+    low,
+    date,
+    bars: ks.length,
+    highTime: highK ? highK.time : null,
+    lowTime: lowK ? lowK.time : null,
+    activeFrom: Math.max(...ks.map((k) => k.closeTime || k.time)),
+  };
 }
 
 /**
@@ -172,28 +183,29 @@ export function findPremarketRange(h1, now = Date.now()) {
  * @param {number} now          参考时间（ms）。回放时传历史时间，只认该时间前已收盘的日/周 K
  * @param {number} eqLookbackBars EQH/EQL 回看窗口（根 4H K 线，默认 150）
  * @param {Array} [h1Klines]    1H K 线（可选）：美股盘前区间（PRE_MARKET_HIGH/LOW）需要
+ * @param {Array} [referenceCandles] 已收盘 4H K，用于标记流动性 ACTIVE/SWEPT/BROKEN
  */
-export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = EQ_TOLERANCE, now = Date.now(), eqLookbackBars = EQ_LOOKBACK_BARS, h1Klines = null) {
+export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = EQ_TOLERANCE, now = Date.now(), eqLookbackBars = EQ_LOOKBACK_BARS, h1Klines = null, referenceCandles = null) {
   const buySide = [];
   const sellSide = [];
 
   const prevDay = lastCompleted(dailyKlines, now);
   if (prevDay) {
-    buySide.push({ type: "PDH", price: prevDay.high, time: prevDay.time });
-    sellSide.push({ type: "PDL", price: prevDay.low, time: prevDay.time });
+    buySide.push({ type: "PDH", price: prevDay.high, time: prevDay.time, ...(referenceCandles ? { activeFrom: prevDay.closeTime } : {}) });
+    sellSide.push({ type: "PDL", price: prevDay.low, time: prevDay.time, ...(referenceCandles ? { activeFrom: prevDay.closeTime } : {}) });
   }
 
   const prevWeek = lastCompleted(weeklyKlines, now);
   if (prevWeek) {
-    buySide.push({ type: "PWH", price: prevWeek.high, time: prevWeek.time });
-    sellSide.push({ type: "PWL", price: prevWeek.low, time: prevWeek.time });
+    buySide.push({ type: "PWH", price: prevWeek.high, time: prevWeek.time, ...(referenceCandles ? { activeFrom: prevWeek.closeTime } : {}) });
+    sellSide.push({ type: "PWL", price: prevWeek.low, time: prevWeek.time, ...(referenceCandles ? { activeFrom: prevWeek.closeTime } : {}) });
   }
 
   // V2.0 盘前区间（需要 1h K 线；不传/非美股时段 → 忽略）
   const premkt = findPremarketRange(h1Klines, now);
   if (premkt) {
-    buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high, date: premkt.date, time: premkt.highTime });
-    sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low, date: premkt.date, time: premkt.lowTime });
+    buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high, date: premkt.date, time: premkt.highTime, ...(referenceCandles ? { activeFrom: premkt.activeFrom } : {}) });
+    sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low, date: premkt.date, time: premkt.lowTime, ...(referenceCandles ? { activeFrom: premkt.activeFrom } : {}) });
   }
 
   // EQH/EQL 只取近端 swing（按 4H K 线 index 回看）
@@ -201,10 +213,15 @@ export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = 
   const recentSwings = swings.filter((s) => s.index >= maxIdx - eqLookbackBars + 1);
 
   const eqh = findEqualHighs(recentSwings, tolerance);
-  if (eqh) buySide.push({ type: "EQH", ...eqh });
+  if (eqh) buySide.push({ type: "EQH", ...eqh, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eqh.formedIndex) ?? eqh.formedTime } : {}) });
 
   const eql = findEqualLows(recentSwings, tolerance);
-  if (eql) sellSide.push({ type: "EQL", ...eql });
+  if (eql) sellSide.push({ type: "EQL", ...eql, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eql.formedIndex) ?? eql.formedTime } : {}) });
+
+  if (referenceCandles) {
+    annotateLiquidityStates(buySide, true, referenceCandles);
+    annotateLiquidityStates(sellSide, false, referenceCandles);
+  }
 
   buySide.sort((a, b) => b.price - a.price); // 上方目标：最高的排最前
   sellSide.sort((a, b) => a.price - b.price); // 下方目标：最低的排最前
@@ -220,10 +237,38 @@ export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = 
 /** 按 ICT 优先级挑选主 Draw */
 function pickPrimary(list, priority) {
   for (const t of priority) {
-    const found = list.find((x) => x.type === t);
+    const found = list.find((x) => x.type === t && (!x.state || x.state === "ACTIVE"));
     if (found) return found;
   }
-  return list[0] || null;
+  return list.find((x) => !x.state || x.state === "ACTIVE") || null;
+}
+
+/** 根据价位生效后的已收盘 K 标记流动性是否已消耗。 */
+export function liquidityStateForLevel(level, isBuy, candles, activeFrom = level && (level.activeFrom ?? level.time)) {
+  let sweptAt = null;
+  let brokenAt = null;
+  for (const k of candles || []) {
+    if (activeFrom != null && (k.closeTime ?? k.time) <= activeFrom) continue;
+    if (isBuy) {
+      if (k.close > level.price) brokenAt = k.closeTime ?? k.time;
+      else if (k.high > level.price && sweptAt == null) sweptAt = k.closeTime ?? k.time;
+    } else {
+      if (k.close < level.price) brokenAt = k.closeTime ?? k.time;
+      else if (k.low < level.price && sweptAt == null) sweptAt = k.closeTime ?? k.time;
+    }
+  }
+  if (brokenAt != null) return { state: "BROKEN", brokenAt, ...(sweptAt != null ? { sweptAt } : {}) };
+  if (sweptAt != null) return { state: "SWEPT", sweptAt };
+  return { state: "ACTIVE" };
+}
+
+function annotateLiquidityStates(levels, isBuy, candles) {
+  for (const level of levels) Object.assign(level, liquidityStateForLevel(level, isBuy, candles));
+}
+
+function candleCloseAt(candles, index) {
+  const k = index != null && candles ? candles[index] : null;
+  return k ? k.closeTime ?? k.time : null;
 }
 
 /**
@@ -260,10 +305,20 @@ function clusterByPrice(items, tolerance, pick) {
   if (!best) return null;
   const price = pick === "max" ? Math.max(...best.map((x) => x.price)) : Math.min(...best.map((x) => x.price));
   const indexes = best.map((x) => x.index).sort((a, b) => a - b);
-  const first = best.find((x) => x.index === indexes[0]);
+  const ordered = [...best].sort((a, b) => a.index - b.index);
+  const first = ordered[0];
+  const formed = ordered[1]; // 第二个触点出现后才真正形成 EQH/EQL
   const last = best.find((x) => x.index === indexes[indexes.length - 1]);
-  const result = { price, touches: best.length, firstIndex: indexes[0], lastIndex: indexes[indexes.length - 1] };
+  const result = {
+    price,
+    touches: best.length,
+    firstIndex: indexes[0],
+    lastIndex: indexes[indexes.length - 1],
+  };
+  // 内部用于确定流动性位的生效时刻；保持旧公共返回 schema 不变。
+  Object.defineProperty(result, "formedIndex", { value: formed.index, enumerable: false });
   if (first && first.time != null) result.firstTime = first.time;
+  if (formed && formed.time != null) Object.defineProperty(result, "formedTime", { value: formed.time, enumerable: false });
   if (last && last.time != null) result.lastTime = last.time;
   return result;
 }

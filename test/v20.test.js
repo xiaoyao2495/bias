@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeScenario, computeHtfDirection } from "../indicators/scenario.js";
+import { computeScenario, computeHtfDirection, computeHtfContext } from "../indicators/scenario.js";
 import { computeConfidence } from "../engine/confidence.js";
 import { computeDailyBias } from "../engine/dailyBiasEngine.js";
 
@@ -159,15 +159,31 @@ const DAY_CANDLES_BREAK_HL = [
 ];
 
 test("HTF 严格 swing 判定 BEARISH（LL+LH），无 price 时不修正", () => {
-  assert.equal(computeHtfDirection(DAY_CANDLES_BREAK_LH, [], null), "BEARISH");
+  assert.equal(computeHtfDirection(DAY_CANDLES_BREAK_LH.slice(0, -1), [], null), "BEARISH");
 });
 
 test("HTF: 价格突破最后 LH → BOS 修正为 BULLISH（ETH 08-13 场景）", () => {
   assert.equal(computeHtfDirection(DAY_CANDLES_BREAK_LH, [], 119), "BULLISH");
 });
 
+test("HTF 分层：日线收盘确认仍空，盘中突破只作为 1D 临时转多预警", () => {
+  // 突破腿尚未作为已收盘日 K 输入；119 仅代表当前盘中价格。
+  const ctx = computeHtfContext(DAY_CANDLES_BREAK_LH.slice(0, -1), [], 119);
+  assert.equal(ctx.confirmedDirection, "BEARISH");
+  assert.equal(ctx.confirmedTimeframe, "1D");
+  assert.equal(ctx.provisionalDirection, "BULLISH");
+  assert.deepEqual(ctx.provisionalBreak, { direction: "BULLISH", timeframe: "1D", level: 106 });
+});
+
+test("HTF 分层：日线收盘站上关键位后，临时突破升级为已确认方向", () => {
+  const ctx = computeHtfContext(DAY_CANDLES_BREAK_LH, [], 119);
+  assert.equal(ctx.confirmedDirection, "BULLISH");
+  assert.equal(ctx.confirmedTimeframe, "1D");
+  assert.equal(ctx.provisionalBreak, null);
+});
+
 test("HTF 严格 swing 判定 BULLISH（HH+HL），无 price 时不修正", () => {
-  assert.equal(computeHtfDirection(DAY_CANDLES_BREAK_HL, [], null), "BULLISH");
+  assert.equal(computeHtfDirection(DAY_CANDLES_BREAK_HL.slice(0, -1), [], null), "BULLISH");
 });
 
 test("HTF: 价格跌破最后 HL → BOS 修正为 BEARISH", () => {
@@ -176,7 +192,7 @@ test("HTF: 价格跌破最后 HL → BOS 修正为 BEARISH", () => {
 
 test("HTF: price 介于最后高/低点之间 → 不修正（维持原判定）", () => {
   // LL+LH 判定 BEARISH，price 105 在 90~106 之间 → 仍 BEARISH
-  assert.equal(computeHtfDirection(DAY_CANDLES_BREAK_LH, [], 105), "BEARISH");
+  assert.equal(computeHtfDirection(DAY_CANDLES_BREAK_LH.slice(0, -1), [], 105), "BEARISH");
 });
 
 // ---- Engine 集成 ----

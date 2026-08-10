@@ -153,6 +153,63 @@ test("无 price → 不校验，structureStatus VALID", () => {
   assert.equal(r.effectiveBias, "BULLISH");
 });
 
+test("实时价跌破 4H swing 只预警；已收盘 4H 未破则结构仍有效", () => {
+  const structure = { ...bullishStruct, lastLow: { price: 105 } };
+  const r = computeDailyBias({
+    structure,
+    liquidity: liqBull,
+    location: { location: "DISCOUNT" },
+    price: 103,
+    structurePrice: 108,
+  });
+  assert.equal(r.structureStatus, "VALID");
+  assert.equal(r.effectiveBias, "BULLISH");
+  assert.deepEqual(r.provisionalStructureBreak, {
+    type: "PROVISIONAL_4H_BREAK",
+    direction: "DOWN",
+    level: 105,
+    price: 103,
+    confirmed: false,
+    awaiting: "4H_CLOSE",
+  });
+  assert.equal(r.mss, null);
+});
+
+test("4H 收盘跌破最近 swing 才确认 MSS 并使结构失效", () => {
+  const structure = { ...bullishStruct, lastLow: { price: 105 } };
+  const r = computeDailyBias({
+    structure,
+    liquidity: liqBull,
+    location: { location: "DISCOUNT" },
+    price: 103,
+    structurePrice: 103,
+  });
+  assert.equal(r.structureStatus, "INVALIDATED");
+  assert.equal(r.effectiveBias, "NEUTRAL");
+  assert.equal(r.provisionalStructureBreak, null);
+  assert.equal(r.mss.confirmed, true);
+  assert.equal(r.mss.level, 105);
+});
+
+test("4H 与已确认 HTF 冲突：证据未闭环保持中性，扫损+位移 MSS 后才接受反转", () => {
+  const base = {
+    structure: bullishStruct,
+    liquidity: liqBull,
+    location: { location: "DISCOUNT" },
+    price: 110,
+    structurePrice: 110,
+    htfContext: { confirmedDirection: "BEARISH", confirmedTimeframe: "1D" },
+  };
+  const waiting = computeDailyBias({ ...base, reversalEvidence: { confirmed: false } });
+  assert.equal(waiting.structureBias, "BULLISH");
+  assert.equal(waiting.narrativeBias, "BEARISH");
+  assert.equal(waiting.effectiveBias, "NEUTRAL");
+  assert.equal(waiting.confidence.score, 0);
+
+  const confirmed = computeDailyBias({ ...base, reversalEvidence: { confirmed: true, sweep: {}, mss: {} } });
+  assert.equal(confirmed.effectiveBias, "BULLISH");
+});
+
 // ---- V1.9 Location Context ----
 
 test("Bullish + DISCOUNT + LATE_IMPULSE（接近目标/推动末端）→ Execution WAIT", () => {

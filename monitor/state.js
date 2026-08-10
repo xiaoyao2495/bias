@@ -51,8 +51,10 @@ export function cleanupState(state, list) {
 export function compareState(prev, cur) {
   if (!prev) return { changed: true, isNew: true, changes: ["*"] };
   const changes = [];
-  for (const key of ["bias", "confidence", "decision"]) {
-    if (prev[key] !== cur[key]) changes.push(key);
+  for (const key of ["bias", "confidence", "decision", "structureAlert", "htfAlert"]) {
+    const before = key.endsWith("Alert") ? prev[key] ?? null : prev[key];
+    const after = key.endsWith("Alert") ? cur[key] ?? null : cur[key];
+    if (before !== after) changes.push(key);
   }
   return { changed: changes.length > 0, isNew: false, changes };
 }

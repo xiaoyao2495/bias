@@ -78,7 +78,11 @@ const SCENARIO_CN = {
   RANGE: "方向不明确，价格处于震荡",
   TRANSITION: "新方向尚未确认",
 };
-const scenarioCN = (s) => SCENARIO_CN[s] || s || "-";
+function htfTimeframeCN(context) {
+  const tf = context?.confirmedTimeframe;
+  return tf === "1D" ? "日线" : tf === "1W" ? "周线" : tf === "1M" ? "月线" : "大周期";
+}
+const scenarioCN = (s, context) => (SCENARIO_CN[s] || s || "-").replaceAll("大周期", htfTimeframeCN(context));
 /** 决策原因 → 中文（decision.reason 枚举映射，未命中保持原样） */
 const REASON_CN = {
   "No directional bias": "无方向偏倚",
@@ -126,6 +130,9 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     const prev = prevState[r.symbol] || null;
     const cur = {
       bias: r.bias,
+      structureBias: r.structureBias,
+      narrativeBias: r.narrativeBias,
+      htfContext: r.htfContext,
       confidence: r.confidence,
       decision: r.decisionLabel,
       scenario: r.scenario,
@@ -134,11 +141,34 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       planR: r.planR,
       sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = 5m K 开盘时间_方向，同一根 5m 内同一侧只推一次）
       ob: r.ob, // { type, kind, state, ... } | null（最近 Order Block 细类）
+      structureAlert: r.provisionalStructureBreak
+        ? `${r.provisionalStructureBreak.direction}_${r.provisionalStructureBreak.level}`
+        : null,
+      htfAlert: r.htfContext?.provisionalBreak
+        ? `${r.htfContext.provisionalBreak.timeframe}_${r.htfContext.provisionalBreak.direction}_${r.htfContext.provisionalBreak.level}`
+        : null,
       oppPushed: (prev && prev.oppPushed) || {}, // 5m 机会推送去重（key → 推送时间戳），冷却期内不重复推
     };
     nextState[r.symbol] = cur;
     const cmp = compareState(prev, cur);
-    const item = { symbol: r.symbol, price: r.price, confidenceScore: r.confidenceScore, reason: r.reason, structureStatus: r.structureStatus, invalidation: r.invalidation, mss: r.mss, mss5m: r.mss5m, last4h: r.last4h, sweep: r.sweep, displacement: r.displacement, ...cmp, prev, cur };
+    const item = {
+      symbol: r.symbol,
+      price: r.price,
+      confidenceScore: r.confidenceScore,
+      reason: r.reason,
+      structureStatus: r.structureStatus,
+      invalidation: r.invalidation,
+      mss: r.mss,
+      provisionalStructureBreak: r.provisionalStructureBreak,
+      htfContext: r.htfContext,
+      mss5m: r.mss5m,
+      last4h: r.last4h,
+      sweep: r.sweep,
+      displacement: r.displacement,
+      ...cmp,
+      prev,
+      cur,
+    };
     overview.push(item);
     if (cmp.changed) changed.push(item);
   }
@@ -334,7 +364,7 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
     "环境:",
     `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,
     `Session: ${sessionText(cur.session) || "非 Killzone"}`,
-    `市场背景: ${scenarioCN(cur.scenario)}`,
+    `市场背景: ${scenarioCN(cur.scenario, cur.htfContext)}`,
   );
   // P1-B：5m 结构事件（扫损→收回→MSS 是 ICT 经典链条，标注当前 5m 结构状态）
   if (mss5m && mss5m.lastEvent) {
@@ -425,7 +455,7 @@ export function buildOverview(list) {
   const lines = [`**4H Bias Monitor**  ${nowHHMM()}`, ""];
   for (const r of list) {
     lines.push(`**${r.symbol}** ${ICON[r.cur.bias] || ""} ${r.cur.bias}`);
-    lines.push(`市场背景: ${scenarioCN(r.cur.scenario)} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
+    lines.push(`市场背景: ${scenarioCN(r.cur.scenario, r.cur.htfContext)} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
     lines.push("");
   }
   return lines.join("<br/>");
@@ -550,7 +580,7 @@ export function buildOpportunityDigest(list) {
  * 变化原因分层：Bias 变化 → 市场状态（结构失效/新结构），与 Confidence 原因分离，
  * 避免"结构失效"被误读为"方向概率低"。
  */
-export function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mss }) {
+export function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mss, provisionalStructureBreak, htfContext }) {
   const biasFlipped = changes.includes("bias");
   const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**  🕐 ${nowHHMM()}` : `**ℹ️ ${symbol} 4H Bias 更新**  🕐 ${nowHHMM()}`;
   const lines = [head, ""];
@@ -568,14 +598,32 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
       const level = invalidation && invalidation.price != null ? invalidation.price : "-";
       lines.push(`结构: INVALIDATED（价格突破${broken ? "保护高位" : "保护低位"} ${level}，原 ${prev.bias} 结构失效）`);
     } else {
-      lines.push(`结构: ${structureStatus || "-"}（${structureDesc(cur.bias)}）`);
+      lines.push(`结构: ${structureStatus || "-"}（${structureDesc(cur.structureBias || cur.bias)}）`);
     }
     lines.push("");
   } else {
     // ℹ️ 更新：补当前 Bias 与结构状态背景（bias 未变，无 旧→新 对比，但用户需一眼看到当前环境）
     lines.push(`${ICON[cur.bias] || ""} ${cur.bias}`);
-    lines.push(`结构: ${structureStatus || "-"}（${structureDesc(cur.bias)}）`);
+    lines.push(`结构: ${structureStatus || "-"}（${structureDesc(cur.structureBias || cur.bias)}）`);
     lines.push("");
+  }
+  if (changes.includes("structureAlert")) {
+    if (provisionalStructureBreak) {
+      const dir = provisionalStructureBreak.direction === "DOWN" ? "向下跌破" : "向上突破";
+      lines.push(`实时预警: 5m 已${dir} 4H 关键结构位 ${provisionalStructureBreak.level}，等待 4H 收盘确认`);
+    } else {
+      lines.push("实时预警解除: 价格已回到 4H 关键结构位内，4H 结构未失效");
+    }
+  }
+  if (changes.includes("htfAlert")) {
+    const p = htfContext?.provisionalBreak;
+    if (p) {
+      const tf = p.timeframe === "1D" ? "日线" : p.timeframe === "1W" ? "周线" : "月线";
+      const dir = p.direction === "BULLISH" ? "向上突破" : "向下跌破";
+      lines.push(`大周期预警: 价格正在${dir}${tf}关键位 ${p.level}，等待${tf}收盘确认`);
+    } else {
+      lines.push("大周期临时突破已解除，继续采用上次收盘确认方向");
+    }
   }
   if (cur.session) lines.push(`Session: ${sessionText(cur.session)}`);
   // 辅助状态：OB 细类（ICT 2022 L4），仅在有关注价值时显示，避免噪音
@@ -585,7 +633,7 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
   else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);
   else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
-  if (!biasFlipped && cur.scenario) lines.push(`市场背景: ${scenarioCN(cur.scenario)}`);
+  if (!biasFlipped && cur.scenario) lines.push(`市场背景: ${scenarioCN(cur.scenario, cur.htfContext)}`);
   lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
   // 非 bias 变化时 reason 是可信度/空间原因；bias 变化时原因已在结构行解释
   if (!biasFlipped) lines.push(`原因: ${reasonCN(reason)}`);

@@ -3,7 +3,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeLiquidity, findEqualHighs, findEqualLows, rankLiquidityTargets, findPremarketRange } from "../indicators/liquidity.js";
+import { computeLiquidity, findEqualHighs, findEqualLows, rankLiquidityTargets, findPremarketRange, liquidityStateForLevel } from "../indicators/liquidity.js";
 
 const now = Date.now();
 
@@ -283,4 +283,29 @@ test("V2.0 rankLiquidityTargets: 优先级 PWH > PDH > PRE_MARKET_HIGH > EQH", (
   assert.equal(r2.primary.type, "PRE_MARKET_HIGH");
   assert.equal(r2.primary.priority, 4);
   assert.ok(r2.primary.reason.includes("Pre-market"));
+});
+
+test("流动性状态：wick 收回=SWEPT，收盘穿越=BROKEN，未触及=ACTIVE", () => {
+  const level = { price: 100 };
+  assert.deepEqual(liquidityStateForLevel(level, true, [{ high: 99, close: 98, closeTime: 2 }], 1), { state: "ACTIVE" });
+  assert.deepEqual(liquidityStateForLevel(level, true, [{ high: 101, close: 99, closeTime: 2 }], 1), { state: "SWEPT", sweptAt: 2 });
+  assert.deepEqual(liquidityStateForLevel(level, true, [{ high: 102, close: 101, closeTime: 2 }], 1), { state: "BROKEN", brokenAt: 2 });
+});
+
+test("Draw 排名排除 SWEPT/BROKEN，只选择 ACTIVE 流动性", () => {
+  const ranked = rankLiquidityTargets(
+    {},
+    {
+      buySide: [
+        { type: "PWH", price: 130, state: "BROKEN" },
+        { type: "PDH", price: 120, state: "SWEPT" },
+        { type: "EQH", price: 115, state: "ACTIVE" },
+      ],
+      sellSide: [],
+    },
+    "BULLISH",
+    100
+  );
+  assert.equal(ranked.primary.type, "EQH");
+  assert.deepEqual(ranked.alternatives, []);
 });

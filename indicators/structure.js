@@ -78,6 +78,8 @@ export function buildStructure(labeled, sequenceLength = 5) {
     protectedHighInfo: ph ? { invalidationType: "STRUCTURE_PROTECTED_HIGH", source: ph.source } : null,
     externalSwingHigh: ext.high,
     externalSwingLow: ext.low,
+    ...(ext.highIndex != null ? { externalSwingHighIndex: ext.highIndex } : {}),
+    ...(ext.lowIndex != null ? { externalSwingLowIndex: ext.lowIndex } : {}),
     // 外部结构位形成时间（swing 所在 4H K 的开盘时间；labeled 无 time 时省略）：扫损消息"被扫的流动性是什么时候的"
     ...(ext.highTime != null ? { externalSwingHighTime: ext.highTime } : {}),
     ...(ext.lowTime != null ? { externalSwingLowTime: ext.lowTime } : {}),
@@ -178,8 +180,10 @@ function findExternalLevels(labeled, direction) {
     return {
       high: highSwing ? highSwing.price : null,
       highTime: highSwing ? highSwing.time : null,
+      highIndex: highSwing ? highSwing.index : null,
       low: labeled[lowIdx].price,
       lowTime: labeled[lowIdx].time,
+      lowIndex: labeled[lowIdx].index,
     };
   }
 
@@ -203,8 +207,10 @@ function findExternalLevels(labeled, direction) {
     return {
       high: labeled[highIdx].price,
       highTime: labeled[highIdx].time,
+      highIndex: labeled[highIdx].index,
       low: lowSwing ? lowSwing.price : null,
       lowTime: lowSwing ? lowSwing.time : null,
+      lowIndex: lowSwing ? lowSwing.index : null,
     };
   }
 

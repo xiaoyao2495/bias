@@ -30,24 +30,72 @@ import { buildStructure } from "./structure.js";
  * @param {number} [price]    当前价格（4H 收盘），用于 BOS 实时修正
  */
 export function computeHtfDirection(dayCandles, weekCandles, price) {
-  const dirOf = (candles) => {
-    if (!candles || !candles.length) return "NEUTRAL";
-    const s = buildStructure(analyzeSwings(findSwings(candles)));
-    let dir = s.direction;
-    if (price != null) {
-      const lastHigh = s.lastHigh ? s.lastHigh.price : null;
-      const lastLow = s.lastLow ? s.lastLow.price : null;
-      if (lastHigh != null && price > lastHigh && (dir === "BEARISH" || dir === "NEUTRAL")) dir = "BULLISH";
-      if (lastLow != null && price < lastLow && (dir === "BULLISH" || dir === "NEUTRAL")) dir = "BEARISH";
-    }
-    return dir;
-  };
+  const ctx = computeHtfContext(dayCandles, weekCandles, price);
+  // 旧 API 兼容：依然返回实时突破修正后的方向。新的 Bias 主链使用
+  // ctx.confirmedDirection，不再把未收盘的 HTF 突破当成已确认方向。
+  return ctx.provisionalDirection || ctx.confirmedDirection;
+}
 
-  let d = dirOf(dayCandles);
-  if (d !== "NEUTRAL") return d;
-  d = dirOf(weekCandles);
-  if (d !== "NEUTRAL") return d;
-  return dirOf(aggregateMonthly(weekCandles || []));
+/**
+ * HTF 上下文：把“已收盘结构”和“当前价格正在突破”拆开。
+ * confirmedDirection 按 1D → 1W → 1M 逐级兜底；provisionalDirection 只是预警，
+ * 不覆盖已确认的高周期方向。
+ */
+export function computeHtfContext(dayCandles, weekCandles, price) {
+  const frames = [
+    analyzeFrame(dayCandles, "1D"),
+    analyzeFrame(weekCandles, "1W"),
+    analyzeFrame(aggregateMonthly(weekCandles || []), "1M"),
+  ];
+  const confirmed = frames.find((f) => f.direction !== "NEUTRAL") || frames[0];
+  let provisional = provisionalBreak(confirmed, price);
+
+  // 若已确认方向来自周/月线，但日线尚中性且正在突破，优先显示更新的日线预警。
+  if (confirmed.timeframe !== "1D") {
+    const dailyProvisional = provisionalBreak(frames[0], price);
+    if (dailyProvisional) provisional = dailyProvisional;
+  }
+
+  return {
+    confirmedDirection: confirmed.direction,
+    confirmedTimeframe: confirmed.direction === "NEUTRAL" ? null : confirmed.timeframe,
+    provisionalDirection: provisional ? provisional.direction : null,
+    provisionalTimeframe: provisional ? provisional.timeframe : null,
+    provisionalBreak: provisional
+      ? { direction: provisional.direction, timeframe: provisional.timeframe, level: provisional.level }
+      : null,
+  };
+}
+
+function analyzeFrame(candles, timeframe) {
+  if (!candles || !candles.length) {
+    return { timeframe, direction: "NEUTRAL", lastHigh: null, lastLow: null };
+  }
+  const s = buildStructure(analyzeSwings(findSwings(candles)));
+  const lastClose = candles[candles.length - 1]?.close;
+  const lastHigh = s.lastHigh ? s.lastHigh.price : null;
+  const lastLow = s.lastLow ? s.lastLow.price : null;
+  let direction = s.direction;
+  // 输入数组只含已收盘 HTF K，因此这里的 close 突破属于已确认 BOS。
+  if (lastClose != null && lastHigh != null && lastClose > lastHigh && (direction === "BEARISH" || direction === "NEUTRAL")) direction = "BULLISH";
+  if (lastClose != null && lastLow != null && lastClose < lastLow && (direction === "BULLISH" || direction === "NEUTRAL")) direction = "BEARISH";
+  return {
+    timeframe,
+    direction,
+    lastHigh,
+    lastLow,
+  };
+}
+
+function provisionalBreak(frame, price) {
+  if (!frame || price == null) return null;
+  if (frame.lastHigh != null && price > frame.lastHigh && (frame.direction === "BEARISH" || frame.direction === "NEUTRAL")) {
+    return { timeframe: frame.timeframe, direction: "BULLISH", level: frame.lastHigh };
+  }
+  if (frame.lastLow != null && price < frame.lastLow && (frame.direction === "BULLISH" || frame.direction === "NEUTRAL")) {
+    return { timeframe: frame.timeframe, direction: "BEARISH", level: frame.lastLow };
+  }
+  return null;
 }
 
 /** 把周线聚合为月线（open=首根 open，high=max，low=min，close=末根 close） */

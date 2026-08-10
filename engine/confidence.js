@@ -28,7 +28,7 @@
  * 输出 score(0-100) + level(HIGH/MEDIUM/LOW) + factors(因子明细)。
  * HIGH ≥ 75，MEDIUM ≥ 40，LOW < 40（经 BTC/ETH 双标的扫描验证：HIGH 75-79% > MEDIUM > LOW）。
  */
-export function computeConfidence({ bias, structure, structureStatus, location, draw, pdArray, price, scenario, session }) {
+export function computeConfidence({ bias, effectiveBias, structure, structureStatus, location, draw, pdArray, price, scenario, session }) {
   const checks = {
     structureConfirmed: structure.direction !== "NEUTRAL",
     protectedValid: structureStatus === "VALID",
@@ -45,6 +45,16 @@ export function computeConfidence({ bias, structure, structureStatus, location, 
     if (!checks.structureConfirmed) factors.push({ name: "Structure not confirmed", value: "0" });
     if (!checks.protectedValid) factors.push({ name: "Protected level invalid", value: "0" });
     return { level: "LOW", score: 0, factors, checks };
+  }
+
+  // 结构方向与已确认 HTF 叙事冲突，且反转证据链尚未闭合时，不输出可交易概率。
+  if (effectiveBias === "NEUTRAL" && bias !== "NEUTRAL") {
+    return {
+      level: "LOW",
+      score: 0,
+      factors: [{ name: "HTF conflict: reversal not confirmed", value: "0" }],
+      checks,
+    };
   }
 
   const factors = [];
