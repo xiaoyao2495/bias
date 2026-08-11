@@ -139,11 +139,9 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // P1-C：位移 K（5m 粒度：最近 48 根 5m ≈ 4 小时内出现位移 K，用于收盘报告标注）
   // 保留三条件证据（structureBreak/fvg），供消息层展示"为什么算 ICT 位移"而非仅凭大实体
   const dispList = findDisplacements(m5);
-  const lastDisp = dispList.length ? dispList[dispList.length - 1] : null;
-  const displacement =
-    lastDisp && m5[m5.length - 1].closeTime - lastDisp.time <= 48 * 5 * 60_000
-      ? { time: lastDisp.time, direction: lastDisp.direction, ratio: lastDisp.ratio, structureBreak: lastDisp.structureBreak, fvg: lastDisp.fvg }
-      : null;
+  // 收盘报告只能展示“刚收完的这根 4H”内部发生的 5m 位移，不能用滚动四小时窗口，
+  // 否则边界附近会把上一根或新一根 4H 的位移拼到本根报告里。
+  const displacement = displacementFor4h(dispList, lastClosed);
 
   const decision = bias.decision || {};
   const planR = decision.planR ?? null;
@@ -165,7 +163,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     price,
     session,
     // 最后已收盘 4H（收盘报告用：收于开盘上方/下方）
-    last4h: { open: lastClosed.open, close: lastClosed.close, time: lastClosed.closeTime },
+    last4h: { open: lastClosed.open, close: lastClosed.close, openTime: lastClosed.time, time: lastClosed.closeTime },
     // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导
     bias: effectiveBias,
     structureBias: bias.structureBias || bias.bias,
@@ -194,6 +192,23 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     location: location.location,
     context: location.context || "-",
   };
+}
+
+/** 取指定已收盘 4H 内最后一次 5m 位移，并记录本根 4H 的位移总数。 */
+export function displacementFor4h(displacements, candle) {
+  if (!candle || candle.time == null || candle.closeTime == null) return null;
+  const inCandle = (displacements || []).filter((d) => d.time >= candle.time && d.time <= candle.closeTime);
+  const last = inCandle[inCandle.length - 1];
+  return last
+    ? {
+        time: last.time,
+        direction: last.direction,
+        ratio: last.ratio,
+        structureBreak: last.structureBreak,
+        fvg: last.fvg,
+        count: inCandle.length,
+      }
+    : null;
 }
 
 /** 对多个 symbol 串行分析（避免 Binance 限频），返回摘要数组 */

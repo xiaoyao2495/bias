@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest } from "../scripts/runMonitor.js";
+import { displacementFor4h } from "../monitor/biasMonitor.js";
 
 const baseCur = { bias: "NEUTRAL", confidence: "LOW", decision: "WAIT", quality: "LOW", planR: null, scenario: "RANGE" };
 const basePrev = { bias: "BULLISH", confidence: "LOW", decision: "WAIT", quality: "LOW", planR: null, scenario: "RANGE" };
@@ -127,16 +128,21 @@ test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据�
     { symbol: "ETHUSDT", last4h: { open: 100, close: 99.5 }, displacement: null, cur: { bias: "BEARISH", confidence: "LOW" }, confidenceScore: 10 },
   ]);
   assert.match(msg, /\*\*4H 收盘报告\*\*/);
-  assert.match(msg, /本根 4H 收盘/); // 标题含 收线 视角
-  assert.match(msg, /\*\*BTCUSDT\*\* 收上 \+1.20% · 🟢 BULLISH · MEDIUM 52 · 位移↑2.0x（BOS 101.5，FVG 99.9-101.5）/);
-  assert.match(msg, /\*\*ETHUSDT\*\* 收下 -0.50% · 🔴 BEARISH · LOW 10/);
+  assert.match(msg, /\*\*BTCUSDT\*\* 收上 \+1.20%/);
+  assert.match(msg, /有效方向: 🟢 多头 · 信心度 MEDIUM 52/);
+  assert.match(msg, /环境: 4H多头结构有效 · 大周期方向未确认/);
+  assert.match(msg, /短线行为: 5m向上位移 2.0x（顺有效方向位移；5m BOS 101.5，5m FVG 99.9-101.5）/);
+  assert.match(msg, /\*\*ETHUSDT\*\* 收下 -0.50%/);
+  assert.match(msg, /有效方向: 🔴 空头 · 信心度 LOW 10/);
 });
 
-test("buildCloseReport: 位移方向与收线方向相反 → ⚠️背离标注（先冲高后回落）", () => {
+test("buildCloseReport: 位移方向与收线方向相反 → 直白显示推动失败，不再误称背离", () => {
   const msg = buildCloseReport([
     { symbol: "SPCXUSDT", last4h: { open: 137, close: 136.5 }, displacement: { direction: "UP", ratio: 2.4, structureBreak: { type: "BOS", direction: "UP", level: 138 }, fvg: { top: 136.8, bottom: 136.5 } }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 65 },
   ]);
-  assert.match(msg, /收下 -0.36% · 🟢 BULLISH · MEDIUM 65 · 位移↑2.4x ⚠️背离（先冲高后回落）/);
+  assert.match(msg, /收下 -0.36%/);
+  assert.match(msg, /短线行为: 5m向上位移 2.4x（向上推动失败，冲高回落；5m BOS 138，5m FVG 136.5-136.8）/);
+  assert.ok(!msg.includes("背离"));
 });
 
 test("buildCloseReport: 异动合约（|幅度|≥5%）置顶加 ⚡，按幅度降序", () => {
@@ -165,9 +171,50 @@ test("buildCloseReport: 无合约处于活跃窗口 → 头部省略统计；有
   assert.match(none, /\*\*4H 收盘报告\*\*（北京/);
   assert.ok(!none.includes("本时段"), "0 个活跃窗口时省略统计");
   const some = buildCloseReport([
-    { symbol: "BTCUSDT", last4h: { open: 100, close: 101 }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 50, session: { start: 20, end: 24, ratio: 23.4 } },
+    { symbol: "BTCUSDT", last4h: { open: 100, close: 101 }, cur: { bias: "BULLISH", confidence: "MEDIUM", session: { start: 20, end: 24, ratio: 23.4 } }, confidenceScore: 50 },
   ]);
   assert.match(some, /本时段 1\/1 合约处于活跃窗口/);
+});
+
+test("buildCloseReport: 有效方向中性时展示4H结构与日线冲突原因", () => {
+  const msg = buildCloseReport([
+    {
+      symbol: "BTCUSDT",
+      last4h: { open: 64000, close: 63920 },
+      cur: {
+        bias: "NEUTRAL", structureBias: "BULLISH", narrativeBias: "BEARISH",
+        confidence: "LOW", decision: "WAIT", htfContext: { confirmedDirection: "BEARISH", confirmedTimeframe: "1D" },
+      },
+      htfContext: { confirmedDirection: "BEARISH", confirmedTimeframe: "1D" },
+      structureStatus: "VALID",
+      confidenceScore: 0,
+    },
+  ]);
+  assert.match(msg, /有效方向: ⚪ 中性 · 信心度 LOW 0 · 操作 WAIT/);
+  assert.match(msg, /环境: 4H多头结构有效 · 日线偏空/);
+  assert.match(msg, /4H 与大周期方向冲突，反转证据不足，暂时保持中性/);
+});
+
+test("buildCloseReport: 静默中性合约合并显示", () => {
+  const msg = buildCloseReport([
+    { symbol: "CLUUSDT", last4h: { open: 80, close: 80.2 }, cur: { bias: "NEUTRAL", structureBias: "NEUTRAL", confidence: "LOW" }, confidenceScore: 0 },
+    { symbol: "SPCXUSDT", last4h: { open: 137, close: 137.1 }, cur: { bias: "NEUTRAL", structureBias: "NEUTRAL", confidence: "LOW" }, confidenceScore: 0 },
+  ]);
+  assert.match(msg, /中性无事件 2/);
+  assert.match(msg, /中性无事件: CLUUSDT、SPCXUSDT/);
+});
+
+test("displacementFor4h: 只取本根4H内的5m位移，排除边界外事件", () => {
+  const ds = [
+    { time: 999, direction: "DOWN", ratio: 3 },
+    { time: 1100, direction: "UP", ratio: 1.5, structureBreak: { level: 101 }, fvg: { top: 102, bottom: 101 } },
+    { time: 1900, direction: "DOWN", ratio: 2.1, structureBreak: { level: 99 }, fvg: { top: 99, bottom: 98 } },
+    { time: 2001, direction: "UP", ratio: 4 },
+  ];
+  const d = displacementFor4h(ds, { time: 1000, closeTime: 2000 });
+  assert.equal(d.time, 1900);
+  assert.equal(d.direction, "DOWN");
+  assert.equal(d.count, 2);
 });
 
 test("buildOverview: 首轮全览字段布局（Scenario · 信心度 · 机会质量 · 操作）", () => {

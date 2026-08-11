@@ -300,41 +300,110 @@ function saveCloseReport(boundaryMs) {
   writeFileSync(CLOSE_REPORT_FILE, JSON.stringify({ lastBoundary: boundaryMs }));
 }
 
-/**
- * 4H 收盘报告：每根 4H 收线后的固定状态播报（即使无变化也推）。
- * 每合约一行：收于开盘上方/下方 + 幅度 + 当前 Bias + 信心度（ICT Daily Bias 的 open/close 视角）。
- * 优化：异动（|幅度| ≥ 5%）置顶加 ⚡ 并按幅度降序；位移方向与收线方向相反时标注背离；
- *      无合约处于活跃窗口时省略头部统计。
- */
+/** 4H 收盘报告：分开表达有效方向、4H 结构、HTF 背景与当前 4H 内的 5m 行为。 */
 export function buildCloseReport(overview) {
   const boundary = new Date(latestBjBoundaryMs());
   const bjBoundary = new Date(boundary.getTime() + BJ_OFFSET_MS);
   const label = `${String(bjBoundary.getUTCHours()).padStart(2, "0")}:00`;
   // 数据驱动后无全局 Killzone 窗口：统计本时段处于自身活跃窗口的合约数，反映整体活跃度（0 时省略）
-  const activeCount = overview.filter((r) => r.session).length;
+  const activeCount = overview.filter((r) => r.cur?.session || r.session).length;
   const kzText = activeCount > 0 ? ` · 本时段 ${activeCount}/${overview.length} 合约处于活跃窗口` : "";
-  const lines = [`**4H 收盘报告**${kzText}（北京 ${label} 收线）`, `本根 4H 收盘：`, ""];
+  const lines = [`**4H 收盘报告**${kzText}（北京 ${label} 收线）`, ""];
   const rows = [];
+  const quietNeutral = [];
   for (const r of overview) {
     const k = r.last4h;
     if (!k || k.open == null) continue;
     const pct = ((k.close - k.open) / k.open) * 100;
     const up = k.close >= k.open;
-    const spike = Math.abs(pct) >= 5; // 异动（±5%）：置顶 + ⚡
-    let disp = "";
-    if (r.displacement) {
-      const upDisp = r.displacement.direction === "UP";
-      disp = ` · 位移${upDisp ? "↑" : "↓"}${r.displacement.ratio.toFixed(1)}x`;
-      // 背离：位移方向与收线方向相反（先冲高后回落 / 先下探后收回）——ICT 里是流动性扫动信号
-      if (up !== upDisp) disp += ` ⚠️背离（${up ? "先下探后收回" : "先冲高后回落"}）`;
-      disp += `（${dispEvidence(r.displacement)}）`;
+    const cur = r.cur || {};
+    const structureBias = cur.structureBias || cur.bias || "NEUTRAL";
+    const narrativeBias = cur.narrativeBias || r.htfContext?.confirmedDirection || "NEUTRAL";
+    const conflict = r.structureStatus !== "INVALIDATED" && cur.bias === "NEUTRAL" && structureBias !== "NEUTRAL" && narrativeBias !== "NEUTRAL" && structureBias !== narrativeBias;
+    const spike = Math.abs(pct) >= 5;
+    const invalidationRisk = r.structureStatus === "INVALIDATED" ? null : invalidationDistance(r, k.close);
+    const nearInvalidation = invalidationRisk != null && invalidationRisk <= 3;
+    const oppositeDisp = r.displacement && cur.bias !== "NEUTRAL" && directionFromDisp(r.displacement) !== cur.bias;
+    const important = spike || nearInvalidation || conflict || r.structureStatus === "INVALIDATED" || !!r.mss || !!r.provisionalStructureBreak;
+
+    if (cur.bias === "NEUTRAL" && structureBias === "NEUTRAL" && !r.displacement && !important) {
+      quietNeutral.push(r.symbol);
+      continue;
     }
-    const line = `**${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · ${ICON[r.cur.bias] || ""} ${r.cur.bias} · ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}${disp}`;
-    rows.push({ abs: Math.abs(pct), spike, line });
+
+    const marker = spike ? "⚡" : important ? "⚠️" : oppositeDisp ? "△" : "•";
+    const detail = [];
+    detail.push(`${marker} **${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`);
+    detail.push(`有效方向: ${biasDisplay(cur.bias)} · 信心度 ${cur.confidence || "-"}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 操作 ${cur.decision || "-"}`);
+    detail.push(`环境: ${structureSummary(structureBias, r.structureStatus)} · ${htfSummary(r.htfContext || cur.htfContext)}`);
+
+    if (conflict) detail.push(`状态: 4H 与大周期方向冲突，反转证据不足，暂时保持中性`);
+    if (r.structureStatus === "INVALIDATED" && r.mss) {
+      detail.push(`4H结构事件: MSS ${r.mss.direction === "UP" ? "向上" : "向下"}突破 ${fmtPrice(r.mss.level)}，原结构失效`);
+    } else if (r.provisionalStructureBreak) {
+      detail.push(`实时预警: 已越过4H关键位 ${fmtPrice(r.provisionalStructureBreak.level)}，等待4H收盘确认`);
+    }
+    if (r.displacement) detail.push(displacementSummary(r.displacement, up, cur.bias));
+    if (invalidationRisk != null) {
+      const prefix = nearInvalidation ? "风险" : "结构保护";
+      detail.push(`${prefix}: 距4H保护位 ${invalidationRisk.toFixed(2)}%${nearInvalidation ? "，接近失效位" : ""}`);
+    }
+
+    rows.push({ abs: Math.abs(pct), important, oppositeDisp, detail });
   }
-  rows.sort((a, b) => (b.spike - a.spike) || (b.abs - a.abs)); // 异动优先，同组按幅度降序
-  for (const row of rows) lines.push(`${row.spike ? "⚡ " : ""}${row.line}`);
+  rows.sort((a, b) => (b.important - a.important) || (b.oppositeDisp - a.oppositeDisp) || (b.abs - a.abs));
+  const importantCount = rows.filter((r) => r.important).length;
+  const riskCount = rows.filter((r) => !r.important && r.oppositeDisp).length;
+  lines.push(`重点 ${importantCount} · 逆势风险 ${riskCount} · 普通 ${rows.length - importantCount - riskCount} · 中性无事件 ${quietNeutral.length}`, "");
+  for (const row of rows) lines.push(...row.detail, "");
+  if (quietNeutral.length) lines.push(`中性无事件: ${quietNeutral.join("、")}`);
   return lines.join("<br/>");
+}
+
+function biasDisplay(bias) {
+  return `${ICON[bias] || ""} ${{ BULLISH: "多头", BEARISH: "空头", NEUTRAL: "中性" }[bias] || bias || "-"}`;
+}
+
+function structureSummary(bias, status) {
+  if (status === "INVALIDATED") return "4H结构已失效";
+  return bias === "BULLISH" ? "4H多头结构有效" : bias === "BEARISH" ? "4H空头结构有效" : "4H结构方向未确认";
+}
+
+function htfSummary(context) {
+  const direction = context?.confirmedDirection || "NEUTRAL";
+  const tf = context?.confirmedTimeframe === "1D" ? "日线" : context?.confirmedTimeframe === "1W" ? "周线" : context?.confirmedTimeframe === "1M" ? "月线" : "大周期";
+  const dir = direction === "BULLISH" ? "偏多" : direction === "BEARISH" ? "偏空" : "方向未确认";
+  return `${tf}${dir}`;
+}
+
+function directionFromDisp(d) {
+  return d.direction === "UP" ? "BULLISH" : "BEARISH";
+}
+
+function displacementSummary(d, candleUp, effectiveBias) {
+  const up = d.direction === "UP";
+  let behavior;
+  if (up && !candleUp) behavior = "向上推动失败，冲高回落";
+  else if (!up && candleUp) behavior = "向下推动失败，下探收回";
+  else if (effectiveBias === "NEUTRAL") behavior = "短线位移，仅观察";
+  else if (directionFromDisp(d) === effectiveBias) behavior = "顺有效方向位移";
+  else behavior = "与有效方向相反，短线压力增加";
+  const time = d.time != null ? `${bjHHMM(d.time)} ` : "";
+  const count = d.count > 1 ? `；本4H共${d.count}次位移` : "";
+  return `短线行为: ${time}5m${up ? "向上" : "向下"}位移 ${d.ratio.toFixed(1)}x（${behavior}${count}；${dispEvidence(d)}）`;
+}
+
+function invalidationDistance(r, close) {
+  const level = r.invalidation?.price;
+  const structureBias = r.cur?.structureBias || r.cur?.bias;
+  if (level == null || close == null || close === 0 || (structureBias !== "BULLISH" && structureBias !== "BEARISH")) return null;
+  const validSide = structureBias === "BULLISH" ? close > level : close < level;
+  if (!validSide) return 0;
+  return Math.abs(close - level) / Math.abs(close) * 100;
+}
+
+function bjHHMM(ms) {
+  return new Date(ms).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
 /** 扫损事件消息（⚡）：市场刚扫掉某流动性位后收回——带当前市场背景，帮助理解"在什么结构下发生" */
@@ -381,10 +450,10 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
  *  FVG 极窄（宽度 ≤ 价格 0.02%，1 tick 级）时只显示单值，避免 0.05-0.05 噪音 */
 function dispEvidence(d) {
   const parts = [];
-  if (d.structureBreak && d.structureBreak.level != null) parts.push(`BOS ${fmtPrice(d.structureBreak.level)}`);
+  if (d.structureBreak && d.structureBreak.level != null) parts.push(`5m BOS ${fmtPrice(d.structureBreak.level)}`);
   if (d.fvg && d.fvg.top != null && d.fvg.bottom != null) {
     const narrow = d.fvg.top - d.fvg.bottom <= d.fvg.top * 0.0002;
-    parts.push(narrow ? `FVG ${fmtPrice(d.fvg.bottom)}` : `FVG ${fmtPrice(d.fvg.bottom)}-${fmtPrice(d.fvg.top)}`);
+    parts.push(narrow ? `5m FVG ${fmtPrice(d.fvg.bottom)}` : `5m FVG ${fmtPrice(d.fvg.bottom)}-${fmtPrice(d.fvg.top)}`);
   }
   return parts.join("，");
 }
