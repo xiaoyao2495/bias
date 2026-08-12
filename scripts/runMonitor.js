@@ -187,6 +187,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       last4h: r.last4h,
       sweep: r.sweep,
       displacement: r.displacement,
+      executionZones: r.executionZones,
       ...cmp,
       prev,
       cur,
@@ -633,7 +634,7 @@ function structureDesc(bias) {
 }
 
 /** 5m 机会类型 → 中文标签 */
-const OPP_TYPE_CN = { CHAIN: "扫损→MSS→回踩", RETRACE: "执行区回踩" };
+const OPP_TYPE_CN = { CHAIN: "扫损→MSS→回踩", RETRACE: "执行区回踩", KEY_MSS: "关键位置MSS" };
 
 /** 机会榜上次推送时间记录（monitor/opportunityDigest.json） */
 function loadDigestTs() {
@@ -726,11 +727,16 @@ function itemOf(op, overview) {
 export function buildOpportunity(op, env) {
   const dirCN = op.direction === "BULLISH" ? "多头" : "空头";
   const cur = env.cur || {};
+  const keyMss = op.type === "KEY_MSS";
   const lines = [
-    `**🎯 ${op.symbol} 5m 机会**  🕐 ${nowHHMM()}`,
+    `**${keyMss ? "🔔" : "🎯"} ${op.symbol} ${keyMss ? "关键位置5m结构确认" : "5m 机会"}**  🕐 ${nowHHMM()}`,
     "",
     `${ICON[op.direction] || ""} ${dirCN}（${OPP_TYPE_CN[op.type] || op.type}）· 评分 ${op.score}`,
   ];
+  if (keyMss && op.localSweep) {
+    const side = op.localSweep.side === "BSL" ? "上方短线流动性" : "下方短线流动性";
+    lines.push(`流动性行为: 扫${side} ${fmtPrice(op.localSweep.level)}（极值 ${fmtPrice(op.localSweep.sweptPrice)}）`);
+  }
   if (op.zone) lines.push(`执行区: ${op.zone.type} ${fmtPrice(op.zone.bottom)}-${fmtPrice(op.zone.top)}`);
   // P1-3 后进入这里的信号已经通过已收盘 5m 确认；观察位仍只是执行区参考，
   // 交易计划的确认价与失效位单独展示，避免把区域边界误读成市价入场点。
@@ -739,16 +745,17 @@ export function buildOpportunity(op, env) {
     lines.push(`入场确认: ${op.confirmation.text} · 确认价 ${fmtPrice(op.confirmation.price)} · ${bjHHMM(op.confirmation.time)}`);
   }
   if (op.trade) {
-    const stopSource = op.trade.stopSource === "SWEEP_EXTREME" ? "扫损极值" : "5m执行区远端";
-    lines.push(`5m交易计划: 确认价 ${fmtPrice(op.trade.entry)} · 失效位 ${fmtPrice(op.trade.stop)}（${stopSource}）`);
+    const stopSource = ["SWEEP_EXTREME", "LOCAL_SWEEP_EXTREME"].includes(op.trade.stopSource) ? "扫损极值" : "5m执行区远端";
+    lines.push(`${keyMss ? "5m参考计划" : "5m交易计划"}: 确认价 ${fmtPrice(op.trade.entry)} · 失效位 ${fmtPrice(op.trade.stop)}（${stopSource}）`);
     if (op.trade.target != null) {
-      lines.push(`第一目标: ${fmtPrice(op.trade.target)} · 交易 planR ${formatPlanR(op.trade.planR)}`);
+      lines.push(`第一目标: ${fmtPrice(op.trade.target)} · ${keyMss ? "参考" : "交易"} planR ${formatPlanR(op.trade.planR)}`);
     } else {
-      lines.push("交易 planR: 暂无有效第一目标，暂不估算");
+      lines.push(`${keyMss ? "参考" : "交易"} planR: 暂无有效第一目标，暂不估算`);
     }
   }
   lines.push(`环境: ${ICON[cur.bias] || ""} ${cur.bias || "-"} · 信心度 ${cur.confidence || "-"}${env.confidenceScore != null ? ` ${env.confidenceScore}` : ""} · 操作 ${cur.decision || "-"} · ${sessionText(cur.session) || "非活跃窗口"}`);
   lines.push(`触发: ${op.trigger}`);
+  if (keyMss) lines.push(`结论: 有效的5m转向证据；${op.displacementConfirmed ? "带位移确认" : "未形成位移/FVG，不是最高质量信号"}，操作 WATCH`);
   lines.push(`价格: ${env.price}`);
   return lines.join("<br/>");
 }

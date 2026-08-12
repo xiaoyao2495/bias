@@ -397,6 +397,24 @@ test("buildOpportunity: 带执行区（CHAIN 链）— 显示执行区行与 4H 
   assert.match(msg, /环境: 🔴 BEARISH · 信心度 LOW 0 · 操作 NO TRADE · 非活跃窗口/);
 });
 
+test("buildOpportunity: 关键位置普通MSS明确标注WATCH且非最高质量", () => {
+  const op = {
+    symbol: "BTCUSDT", type: "KEY_MSS", direction: "BEARISH", entry: 64039.4, score: 70,
+    zone: { type: "4H OB", top: 64380, bottom: 64010.4 },
+    localSweep: { side: "BSL", level: 64400, sweptPrice: 64450 },
+    confirmation: { text: "5m MSS DOWN 收盘确认", price: 64039.4, time: Date.parse("2026-08-12T12:39:59.999Z") },
+    trade: { entry: 64039.4, stop: 64450, stopSource: "LOCAL_SWEEP_EXTREME", target: 63211.6, planR: 2.016 },
+    displacementConfirmed: false,
+    trigger: "4H关键执行区 → 扫BSL → 5m MSS DOWN（普通确认）",
+  };
+  const env = { price: 64039.4, confidenceScore: 75, cur: { bias: "BEARISH", confidence: "HIGH", decision: "WAIT", session: null } };
+  const msg = buildOpportunity(op, env);
+  assert.match(msg, /关键位置5m结构确认/);
+  assert.match(msg, /扫上方短线流动性 64400（极值 64450）/);
+  assert.match(msg, /参考 planR 2\.02/);
+  assert.match(msg, /未形成位移\/FVG，不是最高质量信号.*操作 WATCH/);
+});
+
 test("buildOpportunityDigest: 📊 机会榜汇总 Top 列表", () => {
   const list = [
     { symbol: "MUUSDT", type: "RETRACE", direction: "BULLISH", entry: 880.5, score: 70 },

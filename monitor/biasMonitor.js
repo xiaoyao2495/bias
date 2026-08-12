@@ -157,6 +157,12 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const obSummary = ob
     ? { type: ob.type, kind: ob.kind, state: ob.state, high: ob.high, low: ob.low, status: ob.status, location: ob.location }
     : null;
+  // 4H 执行区供 5m“关键位置 MSS”判断：只传方向一致、仍有效的排名结果。
+  // 5m 机会层只读取区间，不重新解释 4H PD Array。
+  const rankedPdArray = bias.pdArray || { primary: null, alternatives: [] };
+  const executionZones = [rankedPdArray.primary, ...(rankedPdArray.alternatives || [])]
+    .filter((z) => z && z.top != null && z.bottom != null && z.status === "VALID")
+    .map((z) => ({ type: z.type, top: z.top, bottom: z.bottom, location: z.location }));
 
   // 数据驱动 Killzone（真实活跃窗口）：由 analyzeBias 计算（见上）。
   // 返回 { start, end, ratio } | null（ratio = 窗口成交量占比%）；无数据 → null → "非 Killzone"
@@ -190,6 +196,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     mss5m, // { direction, lastEvent } | null（5m 层最近 MSS/BOS 事件，扫损消息标注）
     displacement, // { time, direction, ratio, structureBreak, fvg } | null（位移 K，最近 4 小时内，三条件证据齐备）
     ob: obSummary, // { type, kind, state, high, low, status, location } | null（最近 Order Block 细类）
+    executionZones,
     quality,
     planR,
     remotePlanR,

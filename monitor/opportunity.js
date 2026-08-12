@@ -6,8 +6,10 @@
  *
  *   RETRACE — 回踩同向 5m FVG/OB 后，5m 收盘收回关键位置或出现同向结构确认
  *   CHAIN   — 扫损 → 5m MSS（位移确认）→ 回踩对应执行区 → 5m 入场确认
+ *   KEY_MSS — 4H 执行区内扫短线流动性 → 5m MSS；仅作 WATCH，位移是加分项
  *
- * 结构证据（不直接产生入场）：MSS/BOS 仅建立"结构已转移/延续"的证据。
+ * 一般结构证据（不直接产生入场）：MSS/BOS 仅建立"结构已转移/延续"的证据。
+ * 关键位置的扫损后 MSS 可单独提示，但不会升级成可直接执行的入场信号。
  * BOS 后价格仍处突破侧就报"突破入场"容易追在位移末端——等价格回踩到该位移产生的
  * FVG/OB（RETRACE）才构成可执行机会。
  *
@@ -68,7 +70,7 @@ export function computeM5Context(m5, price) {
  * @param {string} p.symbol
  * @param {Object} p.env analyzeSymbol 摘要（见文件头）
  * @param {Array} p.m5 较长 5m 历史
- * @returns {Array<{symbol,type,direction,entry,zone,trigger,score,key,time}>} 机会列表（按评分降序）
+ * @returns {Array<{symbol,type,direction,entry,zone,trigger,score,key,time}>} 机会/观察信号列表（按评分降序）
  */
 export function scanOpportunities({ symbol, env, m5 }) {
   // 兼容 monitor overview 的 { cur: { bias/... }, price/... } 结构；正式编排会先展开，
@@ -76,9 +78,6 @@ export function scanOpportunities({ symbol, env, m5 }) {
   env = env?.cur ? { ...env, ...env.cur } : env;
   const bias = env?.bias;
   if (bias !== "BULLISH" && bias !== "BEARISH") return [];
-  // P0.5：机会层必须服从最终操作，而不是只屏蔽 NO_TRADE。
-  // WAIT 表示方向虽可用，但 4H 执行区/位置/空间尚未就绪；此时即使 5m 信号分数够高也不推送。
-  if (env.decision !== "WATCH") return [];
   if (!m5 || m5.length < 20) return [];
 
   const price = env.price;
@@ -86,11 +85,21 @@ export function scanOpportunities({ symbol, env, m5 }) {
   const zones = collectZones(ctx, bias);
 
   const opps = [];
+  // 关键位置 MSS 是“结构转向 WATCH”，不是直接入场：方向评级允许、但最终操作因等待
+  // 4H 执行区而为 WAIT 时仍可提示。完整 RETRACE/CHAIN 继续严格服从最终 WATCH。
+  const directionWatch = env.directionDecision === "WATCH" || env.decision === "WATCH";
+  const keyMss = directionWatch ? detectKeyPositionMss({ env, ctx, bias }) : null;
+  if (keyMss) opps.push(keyMss);
+  if (env.decision !== "WATCH") return finalizeOpportunities(opps, symbol, env);
   const chain = detectChain({ env, ctx, bias, price, zones });
   if (chain) opps.push(chain);
   const retrace = detectRetrace({ ctx, bias, price, zones });
   if (retrace) opps.push(retrace);
 
+  return finalizeOpportunities(opps, symbol, env);
+}
+
+function finalizeOpportunities(opps, symbol, env) {
   for (const o of opps) {
     o.symbol = symbol;
     o.trade = buildTradePlan(o, env);
@@ -100,6 +109,69 @@ export function scanOpportunities({ symbol, env, m5 }) {
     .filter((o) => o.trade)
     .filter((o) => o.score >= OPP_MIN_SCORE)
     .sort((a, b) => b.score - a.score);
+}
+
+/**
+ * 关键位置 MSS：4H 同向执行区内先扫短线逆向流动性，随后出现与 4H Bias 一致的
+ * 已收盘 5m MSS。位移/FVG 是质量加分，不再是这一档 WATCH 提示的硬门槛。
+ */
+export function detectKeyPositionMss({ env, ctx, bias }) {
+  const expected = bias === "BULLISH" ? "UP" : "DOWN";
+  const event = [...(ctx.events || [])].reverse().find(
+    (e) => e.type === "MSS" && e.direction === expected && e.confirmed && Date.now() - e.time <= SWEEP_WINDOW_MS
+  );
+  if (!event) return null;
+  const sweep = findLocalSweepBeforeMss(ctx.candles || [], event, bias);
+  if (!sweep) return null;
+
+  const zone = (env.executionZones || []).find((z) => {
+    const direction = String(z.type || "").startsWith("BULLISH") ? "BULLISH" : String(z.type || "").startsWith("BEARISH") ? "BEARISH" : null;
+    return direction === bias && sweep.candleLow <= z.top && sweep.candleHigh >= z.bottom;
+  });
+  if (!zone) return null;
+
+  return {
+    type: "KEY_MSS",
+    direction: bias,
+    entry: event.price,
+    zone: { type: zone.type.includes("FVG") ? "4H FVG" : "4H OB", top: zone.top, bottom: zone.bottom },
+    localSweep: sweep,
+    confirmation: {
+      type: "STRUCTURE_CONFIRMATION",
+      eventType: "MSS",
+      time: event.time,
+      price: event.price,
+      text: `5m MSS ${expected} 收盘确认`,
+    },
+    displacementConfirmed: event.confirmedByDisplacement === true,
+    trigger: `4H关键执行区 → 扫${sweep.side} → 5m MSS ${expected}${event.confirmedByDisplacement ? "（位移确认）" : "（普通确认）"}`,
+    key: `KEY_MSS_${bias}_${event.level}_${event.time}`,
+    time: event.time,
+  };
+}
+
+/** 找 MSS 前最近一次“刺破前方短线高/低后收回”的 5m K。 */
+function findLocalSweepBeforeMss(candles, event, bias) {
+  const eventIndex = candles.findIndex((k) => (k.closeTime ?? k.time) === event.time);
+  if (eventIndex < 1) return null;
+  const first = Math.max(1, eventIndex - 9); // MSS 前最多 45 分钟
+  for (let i = eventIndex - 1; i >= first; i--) {
+    const k = candles[i];
+    const prior = candles.slice(Math.max(0, i - 6), i);
+    if (!prior.length) continue;
+    if (bias === "BEARISH") {
+      const level = Math.max(...prior.map((x) => x.high));
+      if (k.high > level && k.close < level) {
+        return { side: "BSL", level, sweptPrice: k.high, time: k.time, candleHigh: k.high, candleLow: k.low };
+      }
+    } else {
+      const level = Math.min(...prior.map((x) => x.low));
+      if (k.low < level && k.close > level) {
+        return { side: "SSL", level, sweptPrice: k.low, time: k.time, candleHigh: k.high, candleLow: k.low };
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -306,9 +378,14 @@ function buildTradePlan(op, env) {
   const entry = Number(op.confirmation?.price ?? env.price);
   const sweptRaw = env.sweep?.sweptPrice;
   const swept = sweptRaw == null ? NaN : Number(sweptRaw);
+  const localSweptRaw = op.localSweep?.sweptPrice;
+  const localSwept = localSweptRaw == null ? NaN : Number(localSweptRaw);
+  const useLocalSweep = op.type === "KEY_MSS" && Number.isFinite(localSwept);
   const useSweep = op.type === "CHAIN" && Number.isFinite(swept);
   const stop = useSweep
     ? swept
+    : useLocalSweep
+      ? localSwept
     : op.direction === "BULLISH"
       ? Number(op.zone?.bottom)
       : Number(op.zone?.top);
@@ -323,7 +400,7 @@ function buildTradePlan(op, env) {
   return {
     entry,
     stop,
-    stopSource: useSweep ? "SWEEP_EXTREME" : "EXECUTION_ZONE",
+    stopSource: useSweep ? "SWEEP_EXTREME" : useLocalSweep ? "LOCAL_SWEEP_EXTREME" : "EXECUTION_ZONE",
     target: targetValid ? target : null,
     planR: targetValid ? Math.abs(target - entry) / risk : null,
   };
@@ -341,6 +418,7 @@ function scoreOpportunity(o, env) {
   if (env.structureStatus === "VALID") s += 5; // 4H 结构有效
   // 信号类型权重：完整链条 > 执行区回踩
   if (o.type === "CHAIN") s += 25;
+  else if (o.type === "KEY_MSS") s += o.displacementConfirmed ? 25 : 20;
   else s += 10; // RETRACE
   if (o.zone) s += 5; // 有明确执行区（可挂单）
   return Math.min(100, s);

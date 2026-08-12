@@ -9,7 +9,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanOpportunities, computeM5Context } from "../monitor/opportunity.js";
+import { scanOpportunities, computeM5Context, detectKeyPositionMss } from "../monitor/opportunity.js";
 
 const NOW = Date.now();
 // 前置 15 根 flat K 使数据量 ≥ 20（scanOpportunities 的最低防御），同时
@@ -114,6 +114,38 @@ test("P1: CHAIN 要求 MSS 位移确认 —— 贴线（非位移）MSS 不触�
   const env = baseEnv({ price: 101.8, sweep });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   assert.ok(!opps.find((o) => o.type === "CHAIN"), "贴线（非位移）MSS 不应触发 CHAIN");
+});
+
+test("关键位置 MSS：4H执行区内扫高后普通5m MSS向下 → 保留为WATCH，不要求FVG", () => {
+  const base = Date.now() - 60 * 60_000;
+  const candles = [
+    [100, 101, 99, 100], [100, 102, 99.5, 101], [101, 101.5, 99.8, 100.5],
+    [100.5, 103, 100, 102], [102, 104, 101, 103],
+    [103, 105, 102, 103.5], // 扫过前6根最高 104，收回其下
+    [103.5, 104, 99, 99.5], // 普通 MSS DOWN 确认
+  ].map(([open, high, low, close], i) => ({ time: base + i * 300_000, closeTime: base + (i + 1) * 300_000, open, high, low, close }));
+  const event = { type: "MSS", direction: "DOWN", level: 100, price: 99.5, confirmed: true, confirmedByDisplacement: false, time: candles[6].closeTime };
+  const env = baseEnv({
+    bias: "BEARISH", decision: "WAIT", directionDecision: "WATCH", price: 99.5,
+    executionZones: [{ type: "BEARISH_OB", top: 106, bottom: 102 }],
+    targets: { first: { type: "PDL", price: 95 } },
+  });
+  const op = detectKeyPositionMss({ env, ctx: { candles, events: [event] }, bias: "BEARISH" });
+  assert.ok(op, "关键4H执行区内的扫高+普通MSS应保留");
+  assert.equal(op.type, "KEY_MSS");
+  assert.equal(op.displacementConfirmed, false);
+  assert.equal(op.localSweep.sweptPrice, 105);
+});
+
+test("关键位置 MSS：没有触及4H同向执行区 → 不提示", () => {
+  const base = Date.now() - 60 * 60_000;
+  const candles = [
+    [100, 101, 99, 100], [100, 102, 99, 101], [101, 103, 100, 102],
+    [102, 104, 101, 103], [103, 105, 102, 103.5], [103.5, 104, 99, 99.5],
+  ].map(([open, high, low, close], i) => ({ time: base + i * 300_000, closeTime: base + (i + 1) * 300_000, open, high, low, close }));
+  const event = { type: "MSS", direction: "DOWN", level: 100, price: 99.5, confirmed: true, confirmedByDisplacement: false, time: candles.at(-1).closeTime };
+  const env = baseEnv({ bias: "BEARISH", executionZones: [{ type: "BEARISH_OB", top: 120, bottom: 115 }] });
+  assert.equal(detectKeyPositionMss({ env, ctx: { candles, events: [event] }, bias: "BEARISH" }), null);
 });
 
 test("P1: CHAIN 的 MSS 位移在事件根即可确认（第三根位移 FVG）→ 触发 CHAIN", () => {
