@@ -753,6 +753,11 @@ export function buildOpportunity(op, env) {
       lines.push(`${keyMss ? "参考" : "交易"} planR: 暂无有效第一目标，暂不估算`);
     }
   }
+  if (keyMss && op.marketState) {
+    const progress = Number.isFinite(op.marketState.progressR) ? formatPlanR(op.marketState.progressR) : "-";
+    const remaining = Number.isFinite(op.marketState.remainingR) ? formatPlanR(op.marketState.remainingR) : "-";
+    lines.push(`当前状态: 已运行 ${progress}R · 剩余空间比 ${remaining}`);
+  }
   lines.push(`环境: ${ICON[cur.bias] || ""} ${cur.bias || "-"} · 信心度 ${cur.confidence || "-"}${env.confidenceScore != null ? ` ${env.confidenceScore}` : ""} · 操作 ${cur.decision || "-"} · ${sessionText(cur.session) || "非活跃窗口"}`);
   lines.push(`触发: ${op.trigger}`);
   if (keyMss) lines.push(`结论: 有效的5m转向证据；${op.displacementConfirmed ? "带位移确认" : "未形成位移/FVG，不是最高质量信号"}，操作 WATCH`);

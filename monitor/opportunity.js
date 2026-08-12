@@ -29,6 +29,10 @@ import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArra
 const ZONE_AGE_MAX = 60; // 执行区最大年龄（根 5m = 5 小时，太旧价值低）
 const SWEEP_WINDOW_MS = 4 * 3600_000; // 扫损有效窗口（4 小时，与 sweep.js window=48 一致）
 const CONFIRM_LOOKBACK = 3; // 确认必须发生在最近 3 根已收盘 5m 内，避免复用陈旧触发
+const M5_MS = 5 * 60_000;
+export const KEY_MSS_MAX_AGE_MS = CONFIRM_LOOKBACK * M5_MS;
+export const KEY_MSS_MAX_PROGRESS_R = 0.5;
+export const KEY_MSS_MIN_REMAINING_R = 1;
 /** 推送门槛：低于此分不推送（环境差/信号弱 = 噪声） */
 export const OPP_MIN_SCORE = 60;
 
@@ -103,10 +107,14 @@ function finalizeOpportunities(opps, symbol, env) {
   for (const o of opps) {
     o.symbol = symbol;
     o.trade = buildTradePlan(o, env);
+    if (o.type === "KEY_MSS" && o.trade) {
+      o.marketState = assessKeyMssChase({ trade: o.trade, currentPrice: env.price, direction: o.direction });
+    }
     o.score = scoreOpportunity(o, env);
   }
   return opps
     .filter((o) => o.trade)
+    .filter((o) => o.type !== "KEY_MSS" || o.marketState?.eligible)
     .filter((o) => o.score >= OPP_MIN_SCORE)
     .sort((a, b) => b.score - a.score);
 }
@@ -118,7 +126,7 @@ function finalizeOpportunities(opps, symbol, env) {
 export function detectKeyPositionMss({ env, ctx, bias }) {
   const expected = bias === "BULLISH" ? "UP" : "DOWN";
   const event = [...(ctx.events || [])].reverse().find(
-    (e) => e.type === "MSS" && e.direction === expected && e.confirmed && Date.now() - e.time <= SWEEP_WINDOW_MS
+    (e) => e.type === "MSS" && e.direction === expected && e.confirmed && isRecentKeyMss(e, ctx.candles || [])
   );
   if (!event) return null;
   const sweep = findLocalSweepBeforeMss(ctx.candles || [], event, bias);
@@ -148,6 +156,49 @@ export function detectKeyPositionMss({ env, ctx, bias }) {
     key: `KEY_MSS_${bias}_${event.level}_${event.time}`,
     time: event.time,
   };
+}
+
+/** KEY_MSS 只在确认后的最近 3 根已收盘 5m 内有效；同时校验真实时间，防止陈旧行情补发。 */
+export function isRecentKeyMss(event, candles, now = Date.now()) {
+  const age = now - Number(event?.time);
+  if (!Number.isFinite(age) || age < 0 || age > KEY_MSS_MAX_AGE_MS) return false;
+  const eventIndex = candles.findIndex((k) => (k.closeTime ?? k.time) === event.time);
+  return eventIndex >= 0 && eventIndex >= candles.length - CONFIRM_LOOKBACK;
+}
+
+/**
+ * KEY_MSS 追价过滤：超过确认价 0.5R 不补发；有第一目标时，当前剩余盈亏比至少保留 1R。
+ * remainingR 使用“当前价→目标 / 当前价→原失效位”，反映现在追进去的真实空间。
+ */
+export function assessKeyMssChase({ trade, currentPrice, direction }) {
+  const entry = Number(trade?.entry);
+  const stop = Number(trade?.stop);
+  const price = Number(currentPrice);
+  const target = trade?.target == null ? null : Number(trade.target);
+  const risk = Math.abs(entry - stop);
+  if (![entry, stop, price].every(Number.isFinite) || !(risk > 0)) {
+    return { eligible: false, progressR: null, remainingR: null, reason: "INVALID_PLAN" };
+  }
+
+  const favorableMove = direction === "BULLISH" ? price - entry : entry - price;
+  const progressR = favorableMove / risk;
+  const currentRisk = direction === "BULLISH" ? price - stop : stop - price;
+  if (!(currentRisk > 0)) {
+    return { eligible: false, progressR, remainingR: null, reason: "INVALIDATED" };
+  }
+
+  let remainingR = null;
+  if (Number.isFinite(target)) {
+    const remainingReward = direction === "BULLISH" ? target - price : price - target;
+    remainingR = remainingReward / currentRisk;
+  }
+  if (progressR > KEY_MSS_MAX_PROGRESS_R) {
+    return { eligible: false, progressR, remainingR, reason: "MOVED_TOO_FAR" };
+  }
+  if (remainingR != null && remainingR < KEY_MSS_MIN_REMAINING_R) {
+    return { eligible: false, progressR, remainingR, reason: "INSUFFICIENT_REMAINING_R" };
+  }
+  return { eligible: true, progressR, remainingR, reason: null };
 }
 
 /** 找 MSS 前最近一次“刺破前方短线高/低后收回”的 5m K。 */

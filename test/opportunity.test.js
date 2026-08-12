@@ -9,7 +9,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanOpportunities, computeM5Context, detectKeyPositionMss } from "../monitor/opportunity.js";
+import {
+  scanOpportunities,
+  computeM5Context,
+  detectKeyPositionMss,
+  isRecentKeyMss,
+  assessKeyMssChase,
+} from "../monitor/opportunity.js";
 
 const NOW = Date.now();
 // 前置 15 根 flat K 使数据量 ≥ 20（scanOpportunities 的最低防御），同时
@@ -117,7 +123,7 @@ test("P1: CHAIN 要求 MSS 位移确认 —— 贴线（非位移）MSS 不触�
 });
 
 test("关键位置 MSS：4H执行区内扫高后普通5m MSS向下 → 保留为WATCH，不要求FVG", () => {
-  const base = Date.now() - 60 * 60_000;
+  const base = Date.now() - 45 * 60_000;
   const candles = [
     [100, 101, 99, 100], [100, 102, 99.5, 101], [101, 101.5, 99.8, 100.5],
     [100.5, 103, 100, 102], [102, 104, 101, 103],
@@ -138,7 +144,7 @@ test("关键位置 MSS：4H执行区内扫高后普通5m MSS向下 → 保留为
 });
 
 test("关键位置 MSS：没有触及4H同向执行区 → 不提示", () => {
-  const base = Date.now() - 60 * 60_000;
+  const base = Date.now() - 40 * 60_000;
   const candles = [
     [100, 101, 99, 100], [100, 102, 99, 101], [101, 103, 100, 102],
     [102, 104, 101, 103], [103, 105, 102, 103.5], [103.5, 104, 99, 99.5],
@@ -146,6 +152,32 @@ test("关键位置 MSS：没有触及4H同向执行区 → 不提示", () => {
   const event = { type: "MSS", direction: "DOWN", level: 100, price: 99.5, confirmed: true, confirmedByDisplacement: false, time: candles.at(-1).closeTime };
   const env = baseEnv({ bias: "BEARISH", executionZones: [{ type: "BEARISH_OB", top: 120, bottom: 115 }] });
   assert.equal(detectKeyPositionMss({ env, ctx: { candles, events: [event] }, bias: "BEARISH" }), null);
+});
+
+test("关键位置 MSS 时效：只接受最近3根已收盘5m，旧事件不因程序重启补发", () => {
+  const now = Date.now();
+  const candles = Array.from({ length: 6 }, (_, i) => ({ time: now - (6 - i) * 300_000, closeTime: now - (5 - i) * 300_000 }));
+  assert.equal(isRecentKeyMss({ time: candles[3].closeTime }, candles, now), true, "后面只有2根已收盘K，应仍有效");
+  assert.equal(isRecentKeyMss({ time: candles[2].closeTime }, candles, now), false, "后面已有3根已收盘K，应过期");
+  assert.equal(isRecentKeyMss({ time: now - 20 * 60_000 }, [{ closeTime: now - 20 * 60_000 }], now), false, "行情数据陈旧时也不得补发");
+});
+
+test("关键位置 MSS 追价：已运行超过0.5R或当前剩余空间不足1R均过滤", () => {
+  const trade = { entry: 64039.4, stop: 64450, target: 63211.6 };
+  const stale = assessKeyMssChase({ trade, currentPrice: 63475.5, direction: "BEARISH" });
+  assert.equal(stale.eligible, false);
+  assert.equal(stale.reason, "MOVED_TOO_FAR");
+  assert.ok(stale.progressR > 1.3);
+  assert.ok(stale.remainingR < 0.3);
+
+  const fresh = assessKeyMssChase({ trade, currentPrice: 63980, direction: "BEARISH" });
+  assert.equal(fresh.eligible, true);
+  assert.ok(fresh.progressR < 0.5);
+  assert.ok(fresh.remainingR > 1);
+
+  const littleSpace = assessKeyMssChase({ trade: { entry: 100, stop: 102, target: 99 }, currentPrice: 100, direction: "BEARISH" });
+  assert.equal(littleSpace.eligible, false);
+  assert.equal(littleSpace.reason, "INSUFFICIENT_REMAINING_R");
 });
 
 test("P1: CHAIN 的 MSS 位移在事件根即可确认（第三根位移 FVG）→ 触发 CHAIN", () => {
