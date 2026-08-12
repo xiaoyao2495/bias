@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction } from "../scripts/runMonitor.js";
+import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf } from "../scripts/runMonitor.js";
 import { displacementFor4h, buildTargetSummary } from "../monitor/biasMonitor.js";
 
 test("最终操作服从执行区，并在 1R 临界区保留旧状态", () => {
@@ -15,6 +15,21 @@ test("最终操作服从执行区，并在 1R 临界区保留旧状态", () => {
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 0.996 }, { decision: "WAIT" }), "WAIT");
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 1.01 }, { decision: "WATCH" }), "WATCH");
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 1.06 }, { decision: "WAIT" }), "WATCH");
+});
+
+test("P0: overview 嵌套状态展开为 5m 机会扫描所需环境", () => {
+  const sweep = { side: "SSL", time: 1 };
+  const env = opportunityEnvOf({
+    symbol: "BTCUSDT", price: 100, structureStatus: "VALID", sweep,
+    cur: { bias: "BULLISH", confidence: "HIGH", quality: "HIGH", decision: "WATCH" },
+  });
+  assert.equal(env.bias, "BULLISH");
+  assert.equal(env.confidence, "HIGH");
+  assert.equal(env.quality, "HIGH");
+  assert.equal(env.decision, "WATCH");
+  assert.equal(env.price, 100);
+  assert.equal(env.structureStatus, "VALID");
+  assert.equal(env.sweep, sweep);
 });
 
 test("目标摘要优先显示价格先遇到的流动性，再显示远端 HTF Draw", () => {

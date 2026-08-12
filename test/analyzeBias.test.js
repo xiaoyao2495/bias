@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { analyzeBias } from "../engine/analyzeBias.js";
+import { analyzeBias, findReversalEvidence } from "../engine/analyzeBias.js";
 import { computeConfidence } from "../engine/confidence.js";
 
 const H4 = 4 * 3600_000;
@@ -62,6 +62,14 @@ function weeklyBull() {
 
 /** 覆盖全部日/周线的分析时刻（13 周，12 根周线全部已收盘） */
 const TIME = T0 + 13 * W1;
+
+test("P0: 反转证据存在扫损时返回该事件，不引用未定义变量", () => {
+  const swept = { type: "PDL", price: 90, state: "SWEPT", sweptAt: T0 };
+  const evidence = findReversalEvidence([], { direction: "BULLISH" }, { sellSide: [swept], buySide: [] });
+  assert.equal(evidence.sweep, swept);
+  assert.equal(evidence.confirmed, false);
+  assert.equal(evidence.mss, null);
+});
 
 test("P0-4: sessionCandle 决定 Session —— 进行中 4H 时间范围命中活跃窗口，已收盘末根不命中", () => {
   const now = Date.now();

@@ -644,7 +644,7 @@ async function scanAndPushOpportunities({ overview, prevState, nextState, dryRun
   for (const item of overview) {
     try {
       const m5 = await getHistory(item.symbol, "5m", OPP_M5_LIMIT);
-      const opps = scanOpportunities({ symbol: item.symbol, env: item, m5 });
+      const opps = scanOpportunities({ symbol: item.symbol, env: opportunityEnvOf(item), m5 });
       if (opps.length) log(`[runMonitor] ${item.symbol} 5m 机会 ${opps.length} 个（${opps.map((o) => o.type).join(",")}）`);
       all.push(...opps);
     } catch (e) {
@@ -690,6 +690,17 @@ async function scanAndPushOpportunities({ overview, prevState, nextState, dryRun
       log(`[runMonitor] 机会榜推送失败: ${e.message}`);
     }
   }
+}
+
+/** 将 runMonitor 的 overview 条目展开为机会扫描器约定的平铺环境。 */
+export function opportunityEnvOf(item) {
+  return {
+    ...item,
+    ...(item?.cur || {}),
+    price: item?.price,
+    structureStatus: item?.structureStatus,
+    sweep: item?.sweep || null,
+  };
 }
 
 /** 从 overview 中找回某机会对应的环境 item（含 cur/price/confidenceScore） */

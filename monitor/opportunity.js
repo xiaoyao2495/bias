@@ -70,7 +70,10 @@ export function computeM5Context(m5, price) {
  * @returns {Array<{symbol,type,direction,entry,zone,trigger,score,key,time}>} 机会列表（按评分降序）
  */
 export function scanOpportunities({ symbol, env, m5 }) {
-  const bias = env.bias;
+  // 兼容 monitor overview 的 { cur: { bias/... }, price/... } 结构；正式编排会先展开，
+  // 此处再做防御，避免其他调用方误传嵌套环境时静默返回空机会。
+  env = env?.cur ? { ...env, ...env.cur } : env;
+  const bias = env?.bias;
   if (bias !== "BULLISH" && bias !== "BEARISH") return [];
   // 4H 决策层 NO_TRADE（方向概率过低/无空间）→ 环境层不找入场，避免"环境说别交易、
   // 机会层却推顺 bias 做单"的自相矛盾。审计修复：此前仅靠评分门槛，CHAIN 在

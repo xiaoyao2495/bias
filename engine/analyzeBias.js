@@ -131,7 +131,7 @@ function annotateStructureLiquidityStates(structure, candles) {
 }
 
 /** HTF 冲突时，只有“反向流动性已扫 + 4H 位移 MSS”才确认反转 Narrative。 */
-function findReversalEvidence(candles, structure, liquidity) {
+export function findReversalEvidence(candles, structure, liquidity) {
   const direction = structure.direction;
   if (direction !== "BULLISH" && direction !== "BEARISH") return { confirmed: false, sweep: null, mss: null };
   const levels = direction === "BULLISH" ? [...(liquidity.sellSide || [])] : [...(liquidity.buySide || [])];
@@ -149,5 +149,5 @@ function findReversalEvidence(candles, structure, liquidity) {
   const mss = [...events]
     .reverse()
     .find((e) => e.type === "MSS" && e.direction === expected && e.confirmedByDisplacement && e.time >= swept.sweptAt) || null;
-  return { confirmed: !!mss, sweep, mss };
+  return { confirmed: !!mss, sweep: swept, mss };
 }
