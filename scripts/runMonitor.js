@@ -87,14 +87,14 @@ const scenarioCN = (s, context) => (SCENARIO_CN[s] || s || "-").replaceAll("大�
 const REASON_CN = {
   "No directional bias": "无方向偏倚",
   "Direction probability too low": "方向概率过低",
-  "No reward estimate (missing draw or invalidation)": "缺少目标或失效位，无法评估盈亏比",
-  "Direction correct but reward insufficient (planR < 0.5)": "方向正确但空间不足（planR < 0.5）",
-  "Acceptable direction, but room limited — wait for retracement to improve R": "方向可接受但空间有限，等待回撤改善盈亏比",
+  "No reward estimate (missing draw or invalidation)": "缺少目标或4H深层保护位，无法评估结构空间",
+  "Direction correct but reward insufficient (planR < 0.5)": "方向正确但第一目标结构空间不足",
+  "Acceptable direction, but room limited — wait for retracement to improve R": "方向可接受但第一目标结构空间有限，等待更好位置",
   "Enough upside room with acceptable direction probability": "方向概率可接受且上方空间充足",
 };
 const reasonCN = (r) => (r ? REASON_CN[r] || r : "-");
 
-/** 最终操作：方向评分只能说明“值得关注”，执行区未就绪或第一目标空间不足时仍必须等待。 */
+/** 最终操作：方向评分只能说明“值得关注”，执行区未就绪或第一目标结构空间不足时仍必须等待。 */
 export function resolveFinalAction(r, prev = null) {
   const directionDecision = r.decisionLabel;
   if (directionDecision !== "WATCH") return directionDecision;
@@ -156,6 +156,8 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       quality: r.quality,
       planR: r.planR,
       remotePlanR: r.remotePlanR,
+      structureSpaceRatio: r.structureSpaceRatio,
+      remoteStructureSpaceRatio: r.remoteStructureSpaceRatio,
       targets: r.targets,
       sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = 5m K 开盘时间_方向，同一根 5m 内同一侧只推一次）
       ob: r.ob, // { type, kind, state, ... } | null（最近 Order Block 细类）
@@ -176,6 +178,8 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       reason: r.reason,
       structureStatus: r.structureStatus,
       invalidation: r.invalidation,
+      mssInvalidation: r.mssInvalidation,
+      structureProtection: r.structureProtection,
       mss: r.mss,
       provisionalStructureBreak: r.provisionalStructureBreak,
       htfContext: r.htfContext,
@@ -330,7 +334,7 @@ export function buildCloseReport(overview) {
   const expanded = [];
   const compact = [];
   const quietNeutral = [];
-  const counts = { structure: 0, invalidation: 0, spike: 0, pressure: 0, ordinary: 0 };
+  const counts = { structure: 0, mss: 0, spike: 0, pressure: 0, ordinary: 0 };
   for (const r of overview) {
     const k = r.last4h;
     if (!k || k.open == null) continue;
@@ -350,7 +354,7 @@ export function buildCloseReport(overview) {
     const important = spike || nearInvalidation || structureEvent || strongOppositeDisp || failedDisp;
 
     if (structureEvent) counts.structure++;
-    if (nearInvalidation) counts.invalidation++;
+    if (nearInvalidation) counts.mss++;
     if (spike) counts.spike++;
     if (strongOppositeDisp || failedDisp) counts.pressure++;
 
@@ -377,8 +381,11 @@ export function buildCloseReport(overview) {
     }
     if (r.displacement) detail.push(displacementSummary(r.displacement, up, cur.bias, k.close));
     if (invalidationRisk != null) {
-      const prefix = nearInvalidation ? "风险" : "结构保护";
-      detail.push(`${prefix}: 距4H保护位 ${invalidationRisk.toFixed(2)}%${nearInvalidation ? "，接近失效位" : ""}`);
+      detail.push(`4H MSS确认位: 距离 ${invalidationRisk.toFixed(2)}%${nearInvalidation ? "，接近结构转移确认位" : ""}`);
+    }
+    const deepRisk = levelDistance(r.structureProtection || r.invalidation, k.close);
+    if (deepRisk != null && (r.structureProtection?.price !== r.mssInvalidation?.price)) {
+      detail.push(`4H深层保护位: 距离 ${deepRisk.toFixed(2)}%（趋势最后防线，不是5m止损）`);
     }
     detail.push(`结论: ${conclusion}`);
 
@@ -391,7 +398,7 @@ export function buildCloseReport(overview) {
   }
   expanded.sort((a, b) => (b.abs - a.abs));
   compact.sort((a, b) => (b.oppositeDisp - a.oppositeDisp) || (b.abs - a.abs));
-  lines.push(`结构变化 ${counts.structure} · 临近失效 ${counts.invalidation} · 大幅异动 ${counts.spike} · 短线压力 ${counts.pressure} · 普通 ${counts.ordinary} · 中性无事件 ${quietNeutral.length}`, "");
+  lines.push(`结构变化 ${counts.structure} · 临近MSS确认 ${counts.mss} · 大幅异动 ${counts.spike} · 短线压力 ${counts.pressure} · 普通 ${counts.ordinary} · 中性无事件 ${quietNeutral.length}`, "");
   for (const row of expanded) lines.push(...row.detail, "");
   if (compact.length) {
     lines.push("**普通状态**");
@@ -474,12 +481,19 @@ function compactCloseRow(symbol, pct, cur, risk, action) {
 }
 
 function invalidationDistance(r, close) {
-  const level = r.invalidation?.price;
+  // 新结果使用最近 swing 的 MSS 确认位；兼容测试/旧状态时才回退深层保护位。
+  const level = (r.mssInvalidation || r.invalidation)?.price;
   const structureBias = r.cur?.structureBias || r.cur?.bias;
   if (level == null || close == null || close === 0 || (structureBias !== "BULLISH" && structureBias !== "BEARISH")) return null;
   const validSide = structureBias === "BULLISH" ? close > level : close < level;
   if (!validSide) return 0;
   return Math.abs(close - level) / Math.abs(close) * 100;
+}
+
+function levelDistance(level, close) {
+  const price = level?.price;
+  if (price == null || close == null || close === 0) return null;
+  return Math.abs(close - price) / Math.abs(close) * 100;
 }
 
 function bjHHMM(ms) {
@@ -721,6 +735,15 @@ export function buildOpportunity(op, env) {
   // 审计修复：回踩/突破信号只是"价格到达观察位"，入场需执行区确认（反K/收回/结构确认），
   // 文案用"观察位"避免被理解为可直接市价入场的价位
   lines.push(`观察位: ${fmtPrice(op.entry)} · 现价 ${fmtPrice(env.price)}（需回踩/突破后确认再入场）`);
+  if (op.trade) {
+    const stopSource = op.trade.stopSource === "SWEEP_EXTREME" ? "扫损极值" : "5m执行区远端";
+    lines.push(`5m交易计划: 确认价 ${fmtPrice(op.trade.entry)} · 失效位 ${fmtPrice(op.trade.stop)}（${stopSource}）`);
+    if (op.trade.target != null) {
+      lines.push(`第一目标: ${fmtPrice(op.trade.target)} · 交易 planR ${formatPlanR(op.trade.planR)}`);
+    } else {
+      lines.push("交易 planR: 暂无有效第一目标，暂不估算");
+    }
+  }
   lines.push(`环境: ${ICON[cur.bias] || ""} ${cur.bias || "-"} · 信心度 ${cur.confidence || "-"}${env.confidenceScore != null ? ` ${env.confidenceScore}` : ""} · 操作 ${cur.decision || "-"} · ${sessionText(cur.session) || "非活跃窗口"}`);
   lines.push(`触发: ${op.trigger}`);
   lines.push(`价格: ${env.price}`);
@@ -743,7 +766,7 @@ export function buildOpportunityDigest(list) {
  * 变化原因分层：Bias 变化 → 市场状态（结构失效/新结构），与 Confidence 原因分离，
  * 避免"结构失效"被误读为"方向概率低"。
  */
-export function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mss, provisionalStructureBreak, htfContext }) {
+export function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mssInvalidation, structureProtection, mss, provisionalStructureBreak, htfContext }) {
   const biasFlipped = changes.includes("bias");
   const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**  🕐 ${nowHHMM()}` : `**ℹ️ ${symbol} 4H Bias 更新**  🕐 ${nowHHMM()}`;
   const lines = [head, ""];
@@ -798,11 +821,13 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
   else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
   if (cur.directionDecision && cur.directionDecision !== cur.decision) lines.push(`方向评级: ${cur.directionDecision}（执行区尚未就绪）`);
   if (!biasFlipped && cur.scenario) lines.push(`市场背景: ${scenarioCN(cur.scenario, cur.htfContext)}`);
-  lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (第一目标 planR ${formatPlanR(cur.planR)})` : ""}`);
+  if (mssInvalidation?.price != null) lines.push(`4H MSS确认位: ${fmtPrice(mssInvalidation.price)}（收盘突破才确认结构转移）`);
+  if (structureProtection?.price != null) lines.push(`4H深层保护位: ${fmtPrice(structureProtection.price)}（趋势最后防线，不是5m止损）`);
+  lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (第一目标结构空间比 ${formatPlanR(cur.planR)})` : ""}`);
   const first = cur.targets?.first;
   const remote = cur.targets?.remote;
-  if (first) lines.push(`第一目标: ${targetTypeCN(first.type)} ${fmtPrice(first.price)}（planR ${formatPlanR(first.planR)}）`);
-  if (remote) lines.push(`远端目标: ${targetTypeCN(remote.type)} ${fmtPrice(remote.price)}（planR ${formatPlanR(remote.planR)}）`);
+  if (first) lines.push(`第一目标: ${targetTypeCN(first.type)} ${fmtPrice(first.price)}（结构空间比 ${formatPlanR(first.planR)}）`);
+  if (remote) lines.push(`远端目标: ${targetTypeCN(remote.type)} ${fmtPrice(remote.price)}（结构空间比 ${formatPlanR(remote.planR)}）`);
   // 非 bias 变化时 reason 是可信度/空间原因；bias 变化时原因已在结构行解释
   if (!biasFlipped) lines.push(`原因: ${finalReason(cur, reason)}`);
   lines.push(`价格: ${price}`);
@@ -824,7 +849,7 @@ function finalReason(cur, fallback) {
       const side = cur.bias === "BULLISH" ? "多" : cur.bias === "BEARISH" ? "空" : "单";
       return `方向成立，但价格处于推动末端，当前位置不追${side}`;
     }
-    if (cur.planR != null && cur.planR < 1) return "方向成立，但第一目标空间不足，等待回撤改善盈亏比";
+    if (cur.planR != null && cur.planR < 1) return "方向成立，但第一目标结构空间不足，等待更好位置";
     return "方向成立，但执行区尚未就绪，继续等待";
   }
   return reasonCN(fallback);

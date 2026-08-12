@@ -5,7 +5,7 @@
  *   拉 4H/1D/1W 历史（已收盘 K）→ 结构/流动性/区间/PD Array/HTF 方向
  *   → computeDailyBias → 输出简洁摘要（Structure/Bias/Scenario/Confidence/Quality/Decision）
  *
- * 实时版没有未来窗口，Quality 用 planR（理论盈亏比 = |Draw−Entry|/Risk）分级代理：
+ * 实时版没有未来窗口，Quality 用 4H 结构空间比（历史字段名 planR）分级代理：
  *   planR >= 1  → HIGH（空间充足）
  *   0.5 ~ 1     → MEDIUM（空间一般）
  *   < 0.5       → LOW（空间不足，接近目标）
@@ -145,7 +145,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
 
   const decision = bias.decision || {};
   const remotePlanR = decision.planR ?? null;
-  const targets = buildTargetSummary(bias.draw, effectiveBias, price, bias.invalidation);
+  const targets = buildTargetSummary(bias.draw, effectiveBias, price, bias.structureProtection || bias.invalidation);
   // 对外的机会质量优先看价格会先遇到的流动性，而不是只看远端 HTF Draw。
   // 否则 SNDK 一类标的会因远端 PWH 显示 4R，但眼前 PDH 可能不足 0.2R。
   const planR = targets.first?.planR ?? remotePlanR;
@@ -176,7 +176,10 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     provisionalStructureBreak: bias.provisionalStructureBreak || null,
     reversalEvidence: bias.reversalEvidence || null,
     structureStatus: bias.structureStatus,
-    invalidation: bias.invalidation || null, // { type, price }：结构失效时用于解释"突破哪个保护位"
+    // 三层价格分工：MSS 确认位、4H 深层结构保护位、5m 机会止损（后者由 opportunity.js 生成）。
+    mssInvalidation: bias.mssInvalidation || null,
+    structureProtection: bias.structureProtection || bias.invalidation || null,
+    invalidation: bias.structureProtection || bias.invalidation || null, // 兼容旧状态/报告：即深层结构保护位
     mss: bias.mss
       ? { ...bias.mss, time: new Date(time).toISOString().slice(0, 16).replace("T", " ") } // MSS 事件：方向/保护位/触发时间
       : null,
@@ -190,6 +193,8 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     quality,
     planR,
     remotePlanR,
+    structureSpaceRatio: planR,
+    remoteStructureSpaceRatio: remotePlanR,
     targets,
     decision: decision.decision || "-",
     decisionLabel: decisionLabel(decision.decision),

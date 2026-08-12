@@ -76,7 +76,7 @@ test("buildChanged: 非 bias 变化 — ℹ️ 头、信心度/操作 旧→新�
   assert.match(msg, /结构: VALID（新多头结构形成（HH\+HL））/);
   assert.match(msg, /信心度: LOW → MEDIUM 52/);
   assert.match(msg, /操作: WAIT → WATCH_FOR_ENTRY/);
-  assert.match(msg, /机会质量: MEDIUM \(第一目标 planR 1.20\)/);
+  assert.match(msg, /机会质量: MEDIUM \(第一目标结构空间比 1.20\)/);
   assert.match(msg, /原因: 信心度提升/);
   assert.match(msg, /价格: 3500/);
 });
@@ -368,6 +368,7 @@ test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发
   const op = {
     symbol: "MUUSDT", type: "RETRACE", direction: "BULLISH", entry: 880.5,
     zone: { type: "FVG", top: 882.5, bottom: 880.5 },
+    trade: { entry: 884.1, stop: 880.5, stopSource: "EXECUTION_ZONE", target: 891.3, planR: 2 },
     trigger: "价格回踩 FVG 880.5-882.5（5 根 5m 前形成，未消耗）", score: 70, key: "k", time: Date.now(),
   };
   const env = { price: 884.1, confidenceScore: 45, cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", session: { start: 20, end: 24, ratio: 23.4 } } };
@@ -375,6 +376,8 @@ test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发
   assert.match(msg, /\*\*🎯 MUUSDT 5m 机会\*\*/);
   assert.match(msg, /🟢 多头（执行区回踩）· 评分 70/);
   assert.match(msg, /观察位: 880\.5 · 现价 884\.1（需回踩\/突破后确认再入场）/);
+  assert.match(msg, /5m交易计划: 确认价 884\.1 · 失效位 880\.5（5m执行区远端）/);
+  assert.match(msg, /第一目标: 891\.3 · 交易 planR 2\.00/);
   assert.match(msg, /环境: 🟢 BULLISH · 信心度 MEDIUM 45 · 操作 WATCH · 活跃窗口 20:00-24:00（占比 23.4%）/);
   assert.match(msg, /触发: 价格回踩 FVG 880.5-882.5/);
   assert.match(msg, /价格: 884.1/);

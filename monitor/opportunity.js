@@ -75,10 +75,9 @@ export function scanOpportunities({ symbol, env, m5 }) {
   env = env?.cur ? { ...env, ...env.cur } : env;
   const bias = env?.bias;
   if (bias !== "BULLISH" && bias !== "BEARISH") return [];
-  // 4H 决策层 NO_TRADE（方向概率过低/无空间）→ 环境层不找入场，避免"环境说别交易、
-  // 机会层却推顺 bias 做单"的自相矛盾。审计修复：此前仅靠评分门槛，CHAIN 在
-  // confidence LOW + quality HIGH + 活跃窗口时可凑够 60 分越过门槛推送。
-  if (env.decision === "NO_TRADE" || env.decisionLabel === "NO TRADE") return [];
+  // P0.5：机会层必须服从最终操作，而不是只屏蔽 NO_TRADE。
+  // WAIT 表示方向虽可用，但 4H 执行区/位置/空间尚未就绪；此时即使 5m 信号分数够高也不推送。
+  if (env.decision !== "WATCH") return [];
   if (!m5 || m5.length < 20) return [];
 
   const price = env.price;
@@ -93,9 +92,11 @@ export function scanOpportunities({ symbol, env, m5 }) {
 
   for (const o of opps) {
     o.symbol = symbol;
+    o.trade = buildTradePlan(o, env);
     o.score = scoreOpportunity(o, env);
   }
   return opps
+    .filter((o) => o.trade)
     .filter((o) => o.score >= OPP_MIN_SCORE)
     .sort((a, b) => b.score - a.score);
 }
@@ -148,7 +149,7 @@ function detectRetrace({ bias, price, zones }) {
   for (const z of zones) {
     if (price < z.bottom - margin || price > z.top + margin) continue; // 不在区内/贴边
     // 多头从上方回踩（price 不得深破 bottom）；空头从下方回踩（不得深破 top）
-    const sideOk = bias === "BULLISH" ? price >= z.bottom - margin : price <= z.top + margin;
+    const sideOk = bias === "BULLISH" ? price > z.bottom : price < z.top;
     if (!sideOk) continue;
     const dist = bias === "BULLISH" ? price - z.bottom : z.top - price; // 距顺位端距离
     if (!best || dist < best.dist) best = { z, dist };
@@ -221,7 +222,11 @@ function detectChain({ env, ctx, bias, price, zones }) {
   // 且价格已回踩/接近该 MSS 位移腿产生的执行区
   if (!zones.length) return null;
   const margin = price * ZONE_MARGIN;
-  const z = zones.find((zone) => linkedToMss(zone, mss) && price >= zone.bottom - margin && price <= zone.top + margin);
+  const z = zones.find((zone) => {
+    const inArea = price >= zone.bottom - margin && price <= zone.top + margin;
+    const notInvalidated = bias === "BULLISH" ? price > zone.bottom : price < zone.top;
+    return linkedToMss(zone, mss) && inArea && notInvalidated;
+  });
   if (!z) return null;
   return {
     type: "CHAIN",
@@ -233,6 +238,38 @@ function detectChain({ env, ctx, bias, price, zones }) {
     trigger: `扫损${sweep.side === "BSL" ? "BSL" : "SSL"} → 5m MSS（位移确认）${expectedMssDir === "UP" ? "向上" : "向下"} → 回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}`,
     key: `CHAIN_${bias}_${z.bottom.toFixed(2)}_${sweep.key || sweepTime}`,
     time: mss.time,
+  };
+}
+
+/**
+ * P1-2：真正可交易的 R 只在 5m 触发后计算。
+ * 入场假设采用信号确认时现价；失效位采用本次 5m 执行区远端，完整 CHAIN 优先采用扫损极值。
+ * 4H 深层保护位不再冒充订单止损。没有第一目标时仍返回止损计划，但交易 planR 为 null。
+ */
+function buildTradePlan(op, env) {
+  const entry = Number(env.price);
+  const sweptRaw = env.sweep?.sweptPrice;
+  const swept = sweptRaw == null ? NaN : Number(sweptRaw);
+  const useSweep = op.type === "CHAIN" && Number.isFinite(swept);
+  const stop = useSweep
+    ? swept
+    : op.direction === "BULLISH"
+      ? Number(op.zone?.bottom)
+      : Number(op.zone?.top);
+  if (!Number.isFinite(entry) || !Number.isFinite(stop)) return null;
+  const risk = op.direction === "BULLISH" ? entry - stop : stop - entry;
+  if (!(risk > 0)) return null;
+
+  const targetRaw = env.targets?.first?.price;
+  const target = targetRaw == null ? NaN : Number(targetRaw);
+  const targetValid = Number.isFinite(target)
+    && (op.direction === "BULLISH" ? target > entry : target < entry);
+  return {
+    entry,
+    stop,
+    stopSource: useSweep ? "SWEEP_EXTREME" : "EXECUTION_ZONE",
+    target: targetValid ? target : null,
+    planR: targetValid ? Math.abs(target - entry) / risk : null,
   };
 }
 
@@ -272,7 +309,7 @@ if (__isCli) {
   }
   const m5 = await getHistory(symbol, "5m", 1000);
   const price = m5[m5.length - 1].close;
-  const env = { bias: process.argv[3] || "BULLISH", price, confidence: "MEDIUM", quality: "HIGH", session: { start: 20, end: 24, ratio: 23.4 }, structureStatus: "VALID", sweep: null };
+  const env = { bias: process.argv[3] || "BULLISH", decision: "WATCH", price, confidence: "MEDIUM", quality: "HIGH", session: { start: 20, end: 24, ratio: 23.4 }, structureStatus: "VALID", sweep: null };
   const opps = scanOpportunities({ symbol, env, m5 });
   const ctx = computeM5Context(m5, price);
   console.log(`${symbol} 现价 ${price} | 5m 结构 ${ctx.direction} | MSS/BOS 事件 ${ctx.events.length} | FVG ${ctx.pd.fvg.length} OB ${ctx.pd.ob.length}`);

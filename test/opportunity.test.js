@@ -35,6 +35,7 @@ const baseEnv = (over) => ({
   price: 0,
   confidence: "HIGH",
   quality: "HIGH",
+  decision: "WATCH",
   session: { start: 20, end: 24, ratio: 20 },
   structureStatus: "VALID",
   sweep: null,
@@ -56,6 +57,9 @@ test("RETRACE：价格回踩同向 5m FVG → 出现回踩机会（顺位端为�
   assert.ok(retrace, "应出现 RETRACE 机会");
   assert.equal(retrace.direction, "BULLISH");
   assert.equal(retrace.entry, 100); // 多头顺位端 = FVG bottom
+  assert.deepEqual(retrace.trade, {
+    entry: 101, stop: 100, stopSource: "EXECUTION_ZONE", target: null, planR: null,
+  });
   assert.ok(retrace.score >= 60, `score ${retrace.score} 应达推送门槛`);
 });
 
@@ -82,6 +86,8 @@ test("CHAIN：SSL 扫损 → 5m MSS 向上 → 回踩位移腿 FVG（完整 ICT 
   assert.ok(chain.zone && chain.zone.type === "FVG", "CHAIN 应带执行区");
   assert.equal(chain.zone.index, 21, "CHAIN 执行区应精确对应位移腿 FVG（index=21）");
   assert.ok(chain.trigger.includes("MSS"), `trigger 应含 MSS：${chain.trigger}`);
+  assert.equal(chain.trade.stop, 97, "完整 CHAIN 应用扫损极值作为 5m 失效位");
+  assert.equal(chain.trade.stopSource, "SWEEP_EXTREME");
   assert.ok(chain.score >= 60, `score ${chain.score} 应达推送门槛`);
 });
 
@@ -172,6 +178,22 @@ test("环境过滤：4H decision NO_TRADE → 无机会（决策层拦截，避�
   const env = baseEnv({ price: 101.8, sweep, confidence: "LOW", decision: "NO_TRADE", decisionLabel: "NO TRADE" });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   assert.deepEqual(opps, [], "decision NO_TRADE 时机会层必须返回空");
+});
+
+test("P0.5：最终操作 WAIT 即使出现有效回踩也不生成 5m 机会", () => {
+  const m5 = mkCandles([
+    [100, 100, 100, 100],
+    [101, 101, 101, 101],
+    [102, 102, 102, 102],
+    [101.5, 103, 101, 102],
+    [101, 101.5, 100.8, 101],
+  ]);
+  const opps = scanOpportunities({
+    symbol: "BTCUSDT",
+    env: baseEnv({ price: 101, decision: "WAIT" }),
+    m5,
+  });
+  assert.deepEqual(opps, []);
 });
 
 test("环境过滤：4H bias NEUTRAL → 无机会", () => {

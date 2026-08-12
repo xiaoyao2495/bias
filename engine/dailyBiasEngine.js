@@ -137,7 +137,13 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
     reason.push(`4H structure conflicts with confirmed HTF (${confirmedHtf}); awaiting liquidity sweep + displaced 4H MSS/FVG`);
   }
 
-  const invalidation = buildInvalidation(structureBias, structure);
+  // 把两个不同层级的价格明确拆开：
+  // - mssInvalidation：最近 4H swing，收盘跌破/突破它才确认 MSS；
+  // - structureProtection：位移前的深层保护位，只描述原趋势最后防线。
+  // 旧字段 invalidation 暂留为 structureProtection 的兼容别名，避免历史状态/扫描器升级断裂。
+  const mssInvalidation = buildMssInvalidation(structureBias, lastHigh, lastLow);
+  const structureProtection = buildStructureProtection(structureBias, structure);
+  const invalidation = structureProtection;
 
   // V1.4.1 MSS 事件化（P0）：结构失效 = 一次市场结构转移（MSS）。
   // 事件 schema 与 indicators/mss.js 统一：{ type, direction, level, price, confirmed }
@@ -184,6 +190,8 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
     executionState,
     reason,
     invalidation,
+    mssInvalidation,
+    structureProtection,
     mss,
     provisionalStructureBreak,
     reversalEvidence: reversalEvidence || null,
@@ -196,7 +204,17 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
   };
 }
 
-function buildInvalidation(bias, structure) {
+function buildMssInvalidation(bias, lastHigh, lastLow) {
+  if (bias === "BULLISH" && lastLow?.price != null) {
+    return { type: "BREAK_LAST_LOW", price: lastLow.price, source: "RECENT_SWING_LOW" };
+  }
+  if (bias === "BEARISH" && lastHigh?.price != null) {
+    return { type: "BREAK_LAST_HIGH", price: lastHigh.price, source: "RECENT_SWING_HIGH" };
+  }
+  return null;
+}
+
+function buildStructureProtection(bias, structure) {
   if (bias === "BULLISH" && structure.protectedLow != null) {
     const info = structure.protectedLowInfo || {};
     return {

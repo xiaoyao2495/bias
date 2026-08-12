@@ -9,11 +9,13 @@ import { computeDailyBias } from "../engine/dailyBiasEngine.js";
 
 const bullishStruct = {
   direction: "BULLISH",
+  lastLow: { price: 105 },
   protectedLow: 100,
   protectedLowInfo: { invalidationType: "STRUCTURE_PROTECTED_LOW", source: "HL_BEFORE_DISPLACEMENT" },
 };
 const bearishStruct = {
   direction: "BEARISH",
+  lastHigh: { price: 88 },
   protectedHigh: 90,
   protectedHighInfo: { invalidationType: "STRUCTURE_PROTECTED_HIGH", source: "LH_BEFORE_DISPLACEMENT" },
 };
@@ -49,6 +51,8 @@ test("Bullish + Discount → Bias BULLISH，Execution READY", () => {
     invalidationType: "STRUCTURE_PROTECTED_LOW",
     source: "HL_BEFORE_DISPLACEMENT",
   });
+  assert.deepEqual(r.mssInvalidation, { type: "BREAK_LAST_LOW", price: 105, source: "RECENT_SWING_LOW" });
+  assert.deepEqual(r.structureProtection, r.invalidation);
 });
 
 test("Bullish + Premium → Bias BULLISH，Execution WAIT", () => {
@@ -72,6 +76,8 @@ test("Bearish + Premium → Bias BEARISH，Execution READY", () => {
     invalidationType: "STRUCTURE_PROTECTED_HIGH",
     source: "LH_BEFORE_DISPLACEMENT",
   });
+  assert.deepEqual(r.mssInvalidation, { type: "BREAK_LAST_HIGH", price: 88, source: "RECENT_SWING_HIGH" });
+  assert.deepEqual(r.structureProtection, r.invalidation);
 });
 
 test("Bearish + Discount → Bias BEARISH，Execution WAIT", () => {
