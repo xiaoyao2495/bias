@@ -4,8 +4,8 @@
  * 目标：把 4H 环境监控升级为 5m 机会发现。
  * 在 4H Bias 方向明确（BULLISH/BEARISH）的前提下，扫描 5m 层的 ICT 入场触发器：
  *
- *   RETRACE — 价格正在回踩同向 5m FVG/OB（执行区未过度消耗）→ 回踩入场
- *   CHAIN   — 扫损(SSL/BSL) → 5m MSS（位移确认）→ 回踩同向执行区（完整 ICT 链条）→ 最高质量
+ *   RETRACE — 回踩同向 5m FVG/OB 后，5m 收盘收回关键位置或出现同向结构确认
+ *   CHAIN   — 扫损 → 5m MSS（位移确认）→ 回踩对应执行区 → 5m 入场确认
  *
  * 结构证据（不直接产生入场）：MSS/BOS 仅建立"结构已转移/延续"的证据。
  * BOS 后价格仍处突破侧就报"突破入场"容易追在位移末端——等价格回踩到该位移产生的
@@ -25,8 +25,8 @@ import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArra
 
 // ---- 常量 ----
 const ZONE_AGE_MAX = 60; // 执行区最大年龄（根 5m = 5 小时，太旧价值低）
-const ZONE_MARGIN = 0.003; // 执行区贴边容差（±0.3% 视为"正在回踩"）
 const SWEEP_WINDOW_MS = 4 * 3600_000; // 扫损有效窗口（4 小时，与 sweep.js window=48 一致）
+const CONFIRM_LOOKBACK = 3; // 确认必须发生在最近 3 根已收盘 5m 内，避免复用陈旧触发
 /** 推送门槛：低于此分不推送（环境差/信号弱 = 噪声） */
 export const OPP_MIN_SCORE = 60;
 
@@ -43,7 +43,7 @@ export function computeM5Context(m5, price) {
   // CHAIN 的 linkedToMss 按 index 精确匹配会永远失败。
   const closed = m5.filter((k) => !k.closeTime || k.closeTime <= Date.now());
   if (closed.length < 3) {
-    return { direction: "NEUTRAL", lastHigh: null, lastLow: null, pd: { fvg: [], ob: [] }, events: [] };
+    return { direction: "NEUTRAL", lastHigh: null, lastLow: null, pd: { fvg: [], ob: [] }, events: [], candles: closed };
   }
   const structure = detectStructureEvents(closed, { price, left: 1, right: 1 });
   const fvgs = findFvgs(closed);
@@ -58,6 +58,7 @@ export function computeM5Context(m5, price) {
     lastLow: structure.structureLayer ? structure.structureLayer.internal.lastLow : null,
     pd, // { fvg: [...], ob: [...] }，annotated：age/status
     events, // 最近 MSS/BOS（时间升序，收盘确认）
+    candles: closed, // P1-3：执行区触碰与确认 K 必须使用同一组已收盘 5m
   };
 }
 
@@ -87,7 +88,7 @@ export function scanOpportunities({ symbol, env, m5 }) {
   const opps = [];
   const chain = detectChain({ env, ctx, bias, price, zones });
   if (chain) opps.push(chain);
-  const retrace = detectRetrace({ bias, price, zones });
+  const retrace = detectRetrace({ ctx, bias, price, zones });
   if (retrace) opps.push(retrace);
 
   for (const o of opps) {
@@ -142,20 +143,20 @@ function collectZones(ctx, bias) {
 }
 
 /** 信号 1 — 执行区回踩：价格正贴在/位于同向 FVG/OB 区间内（顺位端 = 入场参考） */
-function detectRetrace({ bias, price, zones }) {
+function detectRetrace({ ctx, bias, price, zones }) {
   if (!zones.length) return null;
-  const margin = price * ZONE_MARGIN;
   let best = null;
   for (const z of zones) {
-    if (price < z.bottom - margin || price > z.top + margin) continue; // 不在区内/贴边
-    // 多头从上方回踩（price 不得深破 bottom）；空头从下方回踩（不得深破 top）
+    // 当前价仍须位于执行区有效侧；确认后可以已经离开区间，不能再要求“此刻仍在区内”。
     const sideOk = bias === "BULLISH" ? price > z.bottom : price < z.top;
     if (!sideOk) continue;
-    const dist = bias === "BULLISH" ? price - z.bottom : z.top - price; // 距顺位端距离
-    if (!best || dist < best.dist) best = { z, dist };
+    const confirmation = confirmExecutionZone({ ctx, zone: z, bias });
+    if (!confirmation) continue;
+    if (!best || confirmation.time > best.confirmation.time) best = { z, confirmation };
   }
   if (!best) return null;
   const z = best.z;
+  const confirmation = best.confirmation;
   // P1：状态文案分层（OPEN 未消耗 / TOUCHED 刚被触碰 / CE_REACHED 已回补 / FILLED 已填平）
   const zoneState = z.status === "FILLED" ? "已填平" : z.status === "CE_REACHED" ? "已回补" : z.status === "TOUCHED" ? "刚被触碰" : "未消耗";
   return {
@@ -163,9 +164,10 @@ function detectRetrace({ bias, price, zones }) {
     direction: bias,
     entry: bias === "BULLISH" ? z.bottom : z.top,
     zone: { type: z.type, top: z.top, bottom: z.bottom },
-    trigger: `价格回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}（${z.age} 根 5m 前形成，${zoneState}）`,
-    key: `RETRACE_${bias}_${z.bottom.toFixed(2)}_${z.top.toFixed(2)}`,
-    time: Date.now(),
+    confirmation,
+    trigger: `价格回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}（${zoneState}）→ ${confirmation.text}`,
+    key: `RETRACE_${bias}_${z.bottom.toFixed(2)}_${z.top.toFixed(2)}_${confirmation.time}`,
+    time: confirmation.time,
   };
 }
 
@@ -219,25 +221,79 @@ function detectChain({ env, ctx, bias, price, zones }) {
     (e) => e.type === "MSS" && e.direction === expectedMssDir && e.time >= sweepTime && e.confirmedByDisplacement
   );
   if (!mss) return null;
-  // 且价格已回踩/接近该 MSS 位移腿产生的执行区
+  // 且价格已回踩该 MSS 位移腿产生的执行区，并出现新的 5m 入场确认
   if (!zones.length) return null;
-  const margin = price * ZONE_MARGIN;
-  const z = zones.find((zone) => {
-    const inArea = price >= zone.bottom - margin && price <= zone.top + margin;
+  let matched = null;
+  for (const zone of zones) {
     const notInvalidated = bias === "BULLISH" ? price > zone.bottom : price < zone.top;
-    return linkedToMss(zone, mss) && inArea && notInvalidated;
-  });
-  if (!z) return null;
+    if (!linkedToMss(zone, mss) || !notInvalidated) continue;
+    const confirmation = confirmExecutionZone({ ctx, zone, bias, afterTime: mss.time });
+    if (confirmation) {
+      matched = { zone, confirmation };
+      break;
+    }
+  }
+  if (!matched) return null;
+  const { zone: z, confirmation } = matched;
   return {
     type: "CHAIN",
     direction: bias,
     entry: bias === "BULLISH" ? z.bottom : z.top,
     // 保留来源便于审计：哪个执行区、由哪条位移腿产生
     zone: { type: z.type, top: z.top, bottom: z.bottom, index: z.index, displacement: z.displacement },
+    confirmation,
     mssIndex: mss.atIndex,
-    trigger: `扫损${sweep.side === "BSL" ? "BSL" : "SSL"} → 5m MSS（位移确认）${expectedMssDir === "UP" ? "向上" : "向下"} → 回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}`,
-    key: `CHAIN_${bias}_${z.bottom.toFixed(2)}_${sweep.key || sweepTime}`,
-    time: mss.time,
+    trigger: `扫损${sweep.side === "BSL" ? "BSL" : "SSL"} → 5m MSS（位移确认）${expectedMssDir === "UP" ? "向上" : "向下"} → 回踩 ${z.type} → ${confirmation.text}`,
+    key: `CHAIN_${bias}_${z.bottom.toFixed(2)}_${sweep.key || sweepTime}_${confirmation.time}`,
+    time: confirmation.time,
+  };
+}
+
+/**
+ * P1-3：执行区只负责“观察”，入场机会必须由已收盘 5m 确认。
+ * 确认方式：
+ *   1) 触碰执行区后，同向实体收盘重新站回/跌回区间中点（CE）；或
+ *   2) 触碰之后出现已确认的同向 MSS/BOS。
+ */
+function confirmExecutionZone({ ctx, zone, bias, afterTime = 0 }) {
+  const candles = ctx.candles || [];
+  if (!candles.length) return null;
+  const first = Math.max((zone.index ?? -1) + 1, candles.length - CONFIRM_LOOKBACK);
+  let touch = null;
+  for (let i = first; i < candles.length; i++) {
+    const k = candles[i];
+    if ((k.closeTime ?? k.time) < afterTime) continue;
+    if (k.low <= zone.top && k.high >= zone.bottom) touch = { candle: k, index: i };
+  }
+  if (!touch) return null;
+
+  for (let i = touch.index; i < candles.length; i++) {
+    const k = candles[i];
+    const reclaimed = bias === "BULLISH"
+      ? k.close >= zone.mid && k.close > k.open && k.close > zone.bottom
+      : k.close <= zone.mid && k.close < k.open && k.close < zone.top;
+    if (reclaimed) {
+      return {
+        type: "RECLAIM_CLOSE",
+        time: k.closeTime ?? k.time,
+        price: k.close,
+        text: `5m ${bias === "BULLISH" ? "收阳站回" : "收阴跌回"}执行区中点确认`,
+      };
+    }
+  }
+
+  const expected = bias === "BULLISH" ? "UP" : "DOWN";
+  const touchTime = touch.candle.closeTime ?? touch.candle.time;
+  const event = (ctx.events || []).find(
+    (e) => e.confirmed && e.direction === expected && (e.type === "MSS" || e.type === "BOS") && e.time >= touchTime
+  );
+  if (!event) return null;
+  return {
+    type: "STRUCTURE_CONFIRMATION",
+    eventType: event.type,
+    time: event.time,
+    price: event.price,
+    text: `5m ${event.type} ${expected} 结构确认`,
   };
 }
 
@@ -247,7 +303,7 @@ function detectChain({ env, ctx, bias, price, zones }) {
  * 4H 深层保护位不再冒充订单止损。没有第一目标时仍返回止损计划，但交易 planR 为 null。
  */
 function buildTradePlan(op, env) {
-  const entry = Number(env.price);
+  const entry = Number(op.confirmation?.price ?? env.price);
   const sweptRaw = env.sweep?.sweptPrice;
   const swept = sweptRaw == null ? NaN : Number(sweptRaw);
   const useSweep = op.type === "CHAIN" && Number.isFinite(swept);

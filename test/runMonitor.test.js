@@ -368,6 +368,7 @@ test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发
   const op = {
     symbol: "MUUSDT", type: "RETRACE", direction: "BULLISH", entry: 880.5,
     zone: { type: "FVG", top: 882.5, bottom: 880.5 },
+    confirmation: { type: "RECLAIM_CLOSE", time: Date.parse("2026-08-12T13:35:00Z"), price: 884.1, text: "5m 收阳站回执行区中点确认" },
     trade: { entry: 884.1, stop: 880.5, stopSource: "EXECUTION_ZONE", target: 891.3, planR: 2 },
     trigger: "价格回踩 FVG 880.5-882.5（5 根 5m 前形成，未消耗）", score: 70, key: "k", time: Date.now(),
   };
@@ -375,7 +376,8 @@ test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发
   const msg = buildOpportunity(op, env);
   assert.match(msg, /\*\*🎯 MUUSDT 5m 机会\*\*/);
   assert.match(msg, /🟢 多头（执行区回踩）· 评分 70/);
-  assert.match(msg, /观察位: 880\.5 · 现价 884\.1（需回踩\/突破后确认再入场）/);
+  assert.match(msg, /观察位: 880\.5 · 现价 884\.1/);
+  assert.match(msg, /入场确认: 5m 收阳站回执行区中点确认 · 确认价 884\.1 · 21:35/);
   assert.match(msg, /5m交易计划: 确认价 884\.1 · 失效位 880\.5（5m执行区远端）/);
   assert.match(msg, /第一目标: 891\.3 · 交易 planR 2\.00/);
   assert.match(msg, /环境: 🟢 BULLISH · 信心度 MEDIUM 45 · 操作 WATCH · 活跃窗口 20:00-24:00（占比 23.4%）/);

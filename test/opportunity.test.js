@@ -42,24 +42,26 @@ const baseEnv = (over) => ({
   ...over,
 });
 
-test("RETRACE：价格回踩同向 5m FVG → 出现回踩机会（顺位端为入场参考）", () => {
+test("P1-3 RETRACE：回踩 5m FVG 后收阳站回中点 → 出现确认机会", () => {
   // 三根 K 形成 bullish FVG [100,102]（idx0.high=100 < idx2.low=102），随后价格回踩到区间内
   const m5 = mkCandles([
     [100, 100, 100, 100], // idx0 FVG 起点，high=100
     [101, 101, 101, 101], // idx1 中间 K
     [102, 102, 102, 102], // idx2 low=102 > 100 → bullish FVG [100,102]
     [101.5, 103, 101, 102], // low=101 不形成新 FVG
-    [101, 101.5, 100.8, 101], // 回踩到 FVG 内，price=101
+    [101, 101.5, 100.8, 101], // 仅回踩，尚未确认
+    [101, 102.2, 100.9, 102.1], // 收阳站回中点 101，确认
   ]);
-  const env = baseEnv({ price: 101 });
+  const env = baseEnv({ price: 102.1 });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   const retrace = opps.find((o) => o.type === "RETRACE");
   assert.ok(retrace, "应出现 RETRACE 机会");
   assert.equal(retrace.direction, "BULLISH");
   assert.equal(retrace.entry, 100); // 多头顺位端 = FVG bottom
   assert.deepEqual(retrace.trade, {
-    entry: 101, stop: 100, stopSource: "EXECUTION_ZONE", target: null, planR: null,
+    entry: 102.1, stop: 100, stopSource: "EXECUTION_ZONE", target: null, planR: null,
   });
+  assert.equal(retrace.confirmation.type, "RECLAIM_CLOSE");
   assert.ok(retrace.score >= 60, `score ${retrace.score} 应达推送门槛`);
 });
 
@@ -75,10 +77,11 @@ test("CHAIN：SSL 扫损 → 5m MSS 向上 → 回踩位移腿 FVG（完整 ICT 
     [100, 102, 99, 101], // swing high 102 → LH（MSS 参照）
     [98, 99, 97, 98], // swing low 97 → LL
     [102, 103, 103, 103], // 位移 MSS UP：实体 1、突破 102、FVG [102,103]（位移 K 自身确认）
-    [102.6, 102.8, 102.6, 102.6], // 回踩到位移腿 FVG [102,103] 内，price=102.6
+    [102.6, 102.8, 102.6, 102.6], // 回踩，尚未确认
+    [102.5, 103.2, 102.4, 103.1], // 收阳站回 FVG 中点，确认
   ]);
   const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 102.6, time: T0 };
-  const env = baseEnv({ price: 102.6, sweep });
+  const env = baseEnv({ price: 103.1, sweep });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   const chain = opps.find((o) => o.type === "CHAIN");
   assert.ok(chain, "应出现 CHAIN 机会");
@@ -124,10 +127,11 @@ test("P1: CHAIN 的 MSS 位移在事件根即可确认（第三根位移 FVG）�
     [100, 102, 99, 101], // swing high 102 → LH（MSS 参照）
     [98, 99, 97, 98], // swing low 97 → LL
     [102, 103, 103, 103], // 位移 MSS UP：实体 1、突破 102、FVG [102,103]（分支 1，自身确认）
-    [102.6, 102.8, 102.6, 102.6], // 回踩到位移腿 FVG [102,103] 内，price=102.6
+    [102.6, 102.8, 102.6, 102.6], // 回踩，尚未确认
+    [102.5, 103.2, 102.4, 103.1], // 5m 收阳站回中点确认
   ]);
   const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 102.6, time: T0 };
-  const env = baseEnv({ price: 102.6, sweep });
+  const env = baseEnv({ price: 103.1, sweep });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   const chain = opps.find((o) => o.type === "CHAIN");
   assert.ok(chain, "位移确认的 MSS 应触发 CHAIN");
@@ -149,13 +153,25 @@ test("P1: 位移腿 FVG 已填平 → 旧 FVG 不能拼成 CHAIN（只能回踩�
     [100, 100, 99, 99], // 大跌：low 99 跌穿 FVG bottom 102 → [102,103] 被填平（FILLED）
     [101, 101, 100, 100], // 旧 FVG 起点 high=101
     [102, 102, 102, 102], // low=102 > 101 → 旧 FVG [101,102]
-    [101.5, 102, 101.5, 101.8], // 回踩到旧 FVG [101,102] 内，price=101.8
+    [101.5, 102, 101.5, 101.8], // 回踩到旧 FVG
+    [101.6, 102.3, 101.5, 102.1], // 收阳确认普通 RETRACE
   ]);
   const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 101.8, time: T0 };
-  const env = baseEnv({ price: 101.8, sweep });
+  const env = baseEnv({ price: 102.1, sweep });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   assert.ok(!opps.find((o) => o.type === "CHAIN"), "旧 FVG 不得拼成完整 CHAIN");
   assert.ok(opps.find((o) => o.type === "RETRACE"), "普通回踩机会不受影响");
+});
+
+test("P1-3：只有触碰执行区、没有收盘收回或同向结构确认 → 不生成机会", () => {
+  const m5 = mkCandles([
+    [100, 100, 100, 100],
+    [101, 101, 101, 101],
+    [102, 102, 102, 102], // bullish FVG [100,102]
+    [101.8, 102, 100.8, 101], // 进入区间但收阴，未确认
+  ]);
+  const opps = scanOpportunities({ symbol: "BTCUSDT", env: baseEnv({ price: 101 }), m5 });
+  assert.deepEqual(opps, []);
 });
 
 test("环境过滤：4H decision NO_TRADE → 无机会（决策层拦截，避免两层信号矛盾）", () => {

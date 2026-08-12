@@ -89,12 +89,12 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
     const lastIdx = h5m.length - 1;
     for (const lv of buySide || []) {
       if (cur.high > lv.price && price < lv.price && !alreadyTaken(lv, true, lastIdx)) {
-        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: cur.high, close: price, time: cur.time, key: `${cur.time}_BSL`, realtime: true, judas: judasOf("BSL", bias) && isJudasWindow(), ...levelMeta(lv) };
+        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: cur.high, close: price, time: cur.time, key: `${cur.time}_BSL`, realtime: true, judas: judasOf("BSL", bias) && isJudasWindow(new Date(cur.time)), ...levelMeta(lv) };
       }
     }
     for (const lv of sellSide || []) {
       if (cur.low < lv.price && price > lv.price && !alreadyTaken(lv, false, lastIdx)) {
-        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: cur.low, close: price, time: cur.time, key: `${cur.time}_SSL`, realtime: true, judas: judasOf("SSL", bias) && isJudasWindow(), ...levelMeta(lv) };
+        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: cur.low, close: price, time: cur.time, key: `${cur.time}_SSL`, realtime: true, judas: judasOf("SSL", bias) && isJudasWindow(new Date(cur.time)), ...levelMeta(lv) };
       }
     }
   }
@@ -107,12 +107,12 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
     const idx = h5m.indexOf(k);
     for (const lv of buySide || []) {
       if (k.high > lv.price && k.close < lv.price && !alreadyTaken(lv, true, idx)) {
-        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: k.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(), ...levelMeta(lv) };
+        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: k.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
       }
     }
     for (const lv of sellSide || []) {
       if (k.low < lv.price && k.close > lv.price && !alreadyTaken(lv, false, idx)) {
-        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: k.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(), ...levelMeta(lv) };
+        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: k.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
       }
     }
   }

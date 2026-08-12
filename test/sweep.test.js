@@ -178,3 +178,21 @@ test("detectSweeps: 传入 bias 时返回 judas 字段（默认 false，不改�
   assert.equal(s.side, "SSL");
   assert.equal(typeof s.judas, "boolean");
 });
+
+test("P1-4：历史扫损按事件 K 时间判断 Judas，不受程序运行时间影响", () => {
+  const inside = Date.parse("2026-08-08T13:35:00Z"); // 北京 21:35，夏令时 NY Open
+  const outside = Date.parse("2026-08-08T12:00:00Z"); // 北京 20:00
+  const event = (time) => ({ time, open: 113, high: 114, low: 110, close: 112, closeTime: time + M5 });
+  const level = [{ type: "EQL", price: 111 }];
+
+  assert.equal(detectSweeps([event(inside)], [], level, undefined, 48, "BULLISH").judas, true);
+  assert.equal(detectSweeps([event(outside)], [], level, undefined, 48, "BULLISH").judas, false);
+});
+
+test("P1-4：实时扫损同样按当前 5m K 开盘时间判断 Judas", () => {
+  const inside = Date.parse("2026-08-12T13:35:00Z"); // 北京 21:35
+  const k = { time: inside, open: 113, high: 114, low: 110, close: 112, closeTime: Date.now() + M5 };
+  const s = detectSweeps([k], [], [{ type: "EQL", price: 111 }], 112, 48, "BULLISH");
+  assert.equal(s.realtime, true);
+  assert.equal(s.judas, true);
+});

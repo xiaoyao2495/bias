@@ -732,9 +732,12 @@ export function buildOpportunity(op, env) {
     `${ICON[op.direction] || ""} ${dirCN}（${OPP_TYPE_CN[op.type] || op.type}）· 评分 ${op.score}`,
   ];
   if (op.zone) lines.push(`执行区: ${op.zone.type} ${fmtPrice(op.zone.bottom)}-${fmtPrice(op.zone.top)}`);
-  // 审计修复：回踩/突破信号只是"价格到达观察位"，入场需执行区确认（反K/收回/结构确认），
-  // 文案用"观察位"避免被理解为可直接市价入场的价位
-  lines.push(`观察位: ${fmtPrice(op.entry)} · 现价 ${fmtPrice(env.price)}（需回踩/突破后确认再入场）`);
+  // P1-3 后进入这里的信号已经通过已收盘 5m 确认；观察位仍只是执行区参考，
+  // 交易计划的确认价与失效位单独展示，避免把区域边界误读成市价入场点。
+  lines.push(`观察位: ${fmtPrice(op.entry)} · 现价 ${fmtPrice(env.price)}`);
+  if (op.confirmation) {
+    lines.push(`入场确认: ${op.confirmation.text} · 确认价 ${fmtPrice(op.confirmation.price)} · ${bjHHMM(op.confirmation.time)}`);
+  }
   if (op.trade) {
     const stopSource = op.trade.stopSource === "SWEEP_EXTREME" ? "扫损极值" : "5m执行区远端";
     lines.push(`5m交易计划: 确认价 ${fmtPrice(op.trade.entry)} · 失效位 ${fmtPrice(op.trade.stop)}（${stopSource}）`);
