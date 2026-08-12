@@ -7,8 +7,26 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest } from "../scripts/runMonitor.js";
-import { displacementFor4h } from "../monitor/biasMonitor.js";
+import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction } from "../scripts/runMonitor.js";
+import { displacementFor4h, buildTargetSummary } from "../monitor/biasMonitor.js";
+
+test("最终操作服从执行区，并在 1R 临界区保留旧状态", () => {
+  assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "WAIT", planR: 4.3 }, { decision: "WATCH" }), "WAIT");
+  assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 0.996 }, { decision: "WAIT" }), "WAIT");
+  assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 1.01 }, { decision: "WATCH" }), "WATCH");
+  assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 1.06 }, { decision: "WAIT" }), "WATCH");
+});
+
+test("目标摘要优先显示价格先遇到的流动性，再显示远端 HTF Draw", () => {
+  const targets = buildTargetSummary(
+    { primary: { type: "PWH", price: 1483 }, alternatives: [{ type: "PDH", price: 1287.53 }] },
+    "BULLISH", 1279.39, { price: 1232.13 },
+  );
+  assert.equal(targets.first.type, "PDH");
+  assert.equal(targets.remote.type, "PWH");
+  assert.ok(targets.first.planR < 0.2);
+  assert.ok(targets.remote.planR > 4);
+});
 
 const baseCur = { bias: "NEUTRAL", confidence: "LOW", decision: "WAIT", quality: "LOW", planR: null, scenario: "RANGE" };
 const basePrev = { bias: "BULLISH", confidence: "LOW", decision: "WAIT", quality: "LOW", planR: null, scenario: "RANGE" };
@@ -43,7 +61,7 @@ test("buildChanged: 非 bias 变化 — ℹ️ 头、信心度/操作 旧→新�
   assert.match(msg, /结构: VALID（新多头结构形成（HH\+HL））/);
   assert.match(msg, /信心度: LOW → MEDIUM 52/);
   assert.match(msg, /操作: WAIT → WATCH_FOR_ENTRY/);
-  assert.match(msg, /机会质量: MEDIUM \(planR 1.20\)/);
+  assert.match(msg, /机会质量: MEDIUM \(第一目标 planR 1.20\)/);
   assert.match(msg, /原因: 信心度提升/);
   assert.match(msg, /价格: 3500/);
 });
@@ -256,18 +274,36 @@ test("buildOverview: 首轮全览字段布局（Scenario · 信心度 · 机会�
   assert.match(msg, /市场背景: 4H 与大周期一致向上 · 信心度: MEDIUM 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
 });
 
-test("buildChanged: 下方多头 BREAKER → 直白显示位置、作用和消耗状态", () => {
+test("buildChanged: 有效且距离较近的下方多头 BREAKER → 显示位置、作用和消耗状态", () => {
   const msg = buildChanged({
     symbol: "ETHUSDT", price: 1910.86, reason: [],
     changes: ["confidence"],
     prev: { ...basePrev, bias: "BULLISH" },
     cur: {
       bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", quality: "HIGH", planR: 1.26, scenario: "BULLISH_REVERSAL_ATTEMPT",
-      ob: { type: "BULLISH_OB", kind: "BREAKER", state: "USED", high: 101.5, low: 98, status: "OPEN", location: "DISCOUNT" },
+      ob: { type: "BULLISH_OB", kind: "BREAKER", state: "USED", high: 1850, low: 1830, status: "OPEN", location: "DISCOUNT" },
     },
     confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
   });
   assert.match(msg, /下方支撑: 多头区域破位后重新收回（已回踩，效力减弱）/);
+});
+
+test("buildChanged: 已填补或距现价过远的 Breaker 不再显示成当前支撑阻力", () => {
+  const common = {
+    symbol: "SNDKUSDT", price: 1279.39, reason: "Enough upside room with acceptable direction probability",
+    changes: ["confidence"], prev: { ...basePrev, bias: "BULLISH" }, confidenceScore: 65,
+    structureStatus: "VALID", invalidation: null, mss: null,
+  };
+  const filled = buildChanged({
+    ...common,
+    cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WAIT", quality: "LOW", planR: 0.17, scenario: "BULLISH_CONTINUATION", ob: { type: "BEARISH_OB", kind: "BREAKER", state: "USED", high: 1300, low: 1290, status: "FILLED" } },
+  });
+  const far = buildChanged({
+    ...common,
+    cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WAIT", quality: "LOW", planR: 0.17, scenario: "BULLISH_CONTINUATION", ob: { type: "BEARISH_OB", kind: "BREAKER", state: "USED", high: 1861.47, low: 1852.87, status: "OPEN" } },
+  });
+  assert.ok(!filled.includes("上方阻力:"));
+  assert.ok(!far.includes("上方阻力:"));
 });
 
 test("buildChanged: 多头 Bias 的上方空头 REJECTION → 标注阻力、效力和反向关系", () => {

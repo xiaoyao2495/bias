@@ -94,6 +94,17 @@ const REASON_CN = {
 };
 const reasonCN = (r) => (r ? REASON_CN[r] || r : "-");
 
+/** 最终操作：方向评分只能说明“值得关注”，执行区未就绪或第一目标空间不足时仍必须等待。 */
+export function resolveFinalAction(r, prev = null) {
+  const directionDecision = r.decisionLabel;
+  if (directionDecision !== "WATCH") return directionDecision;
+  if (r.execution !== "READY") return "WAIT";
+  if (r.planR == null || r.planR < 0.95) return "WAIT";
+  // 1R 临界区使用旧状态，避免价格轻微波动造成 WATCH/WAIT 每十分钟翻转。
+  if (r.planR < 1.05) return prev?.decision === "WATCH" ? "WATCH" : "WAIT";
+  return "WATCH";
+}
+
 /**
  * 执行一轮监控：扫描 → 比较 → 推送变化 → 存状态。
  * @param {Object} [p]
@@ -128,17 +139,24 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       continue;
     }
     const prev = prevState[r.symbol] || null;
+    const finalDecision = resolveFinalAction(r, prev);
     const cur = {
       bias: r.bias,
       structureBias: r.structureBias,
       narrativeBias: r.narrativeBias,
       htfContext: r.htfContext,
       confidence: r.confidence,
-      decision: r.decisionLabel,
+      decision: finalDecision,
+      directionDecision: r.decisionLabel,
+      execution: r.execution,
+      location: r.location,
+      context: r.context,
       scenario: r.scenario,
       session: r.session, // ICT Killzone 背景（通知展示）
       quality: r.quality,
       planR: r.planR,
+      remotePlanR: r.remotePlanR,
+      targets: r.targets,
       sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = 5m K 开盘时间_方向，同一根 5m 内同一侧只推一次）
       ob: r.ob, // { type, kind, state, ... } | null（最近 Order Block 细类）
       structureAlert: r.provisionalStructureBreak
@@ -549,7 +567,10 @@ function sweepTypeLabel(type) {
  *  仅在有关注价值时显示：BREAKER/REJECTION 总是显示；STANDARD 需未回踩（FRESH）才显示。 */
 function obText(o, bias, price) {
   if (!o) return null;
+  if (o.status === "FILLED") return null;
   if (o.kind === "STANDARD" && o.state === "USED") return null;
+  const midpoint = o.low != null && o.high != null ? (o.low + o.high) / 2 : null;
+  if (price != null && midpoint != null && Math.abs(midpoint - price) / Math.abs(price) > 0.15) return null;
 
   const bullish = o.type === "BULLISH_OB";
   let position = null;
@@ -586,7 +607,7 @@ export function buildOverview(list) {
   const lines = [`**4H Bias Monitor**  ${nowHHMM()}`, ""];
   for (const r of list) {
     lines.push(`**${r.symbol}** ${ICON[r.cur.bias] || ""} ${r.cur.bias}`);
-    lines.push(`市场背景: ${scenarioCN(r.cur.scenario, r.cur.htfContext)} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${r.cur.planR.toFixed(2)})` : ""} · 操作: ${r.cur.decision}`);
+    lines.push(`市场背景: ${scenarioCN(r.cur.scenario, r.cur.htfContext)} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${formatPlanR(r.cur.planR)})` : ""} · 操作: ${r.cur.decision}`);
     lines.push("");
   }
   return lines.join("<br/>");
@@ -764,12 +785,38 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
   else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
   if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);
   else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
+  if (cur.directionDecision && cur.directionDecision !== cur.decision) lines.push(`方向评级: ${cur.directionDecision}（执行区尚未就绪）`);
   if (!biasFlipped && cur.scenario) lines.push(`市场背景: ${scenarioCN(cur.scenario, cur.htfContext)}`);
-  lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (planR ${cur.planR.toFixed(2)})` : ""}`);
+  lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (第一目标 planR ${formatPlanR(cur.planR)})` : ""}`);
+  const first = cur.targets?.first;
+  const remote = cur.targets?.remote;
+  if (first) lines.push(`第一目标: ${targetTypeCN(first.type)} ${fmtPrice(first.price)}（planR ${formatPlanR(first.planR)}）`);
+  if (remote) lines.push(`远端目标: ${targetTypeCN(remote.type)} ${fmtPrice(remote.price)}（planR ${formatPlanR(remote.planR)}）`);
   // 非 bias 变化时 reason 是可信度/空间原因；bias 变化时原因已在结构行解释
-  if (!biasFlipped) lines.push(`原因: ${reasonCN(reason)}`);
+  if (!biasFlipped) lines.push(`原因: ${finalReason(cur, reason)}`);
   lines.push(`价格: ${price}`);
   return lines.join("<br/>");
+}
+
+function formatPlanR(value) {
+  if (value == null) return "-";
+  return value >= 0.95 && value < 1.05 ? value.toFixed(3) : value.toFixed(2);
+}
+
+function targetTypeCN(type) {
+  return ({ PDH: "昨日高点", PDL: "昨日低点", PWH: "上周高点", PWL: "上周低点", EQH: "等高点", EQL: "等低点", PRE_MARKET_HIGH: "时段高点", PRE_MARKET_LOW: "时段低点" })[type] || type;
+}
+
+function finalReason(cur, fallback) {
+  if (cur.directionDecision === "WATCH" && cur.decision === "WAIT") {
+    if (cur.context === "LATE_IMPULSE") {
+      const side = cur.bias === "BULLISH" ? "多" : cur.bias === "BEARISH" ? "空" : "单";
+      return `方向成立，但价格处于推动末端，当前位置不追${side}`;
+    }
+    if (cur.planR != null && cur.planR < 1) return "方向成立，但第一目标空间不足，等待回撤改善盈亏比";
+    return "方向成立，但执行区尚未就绪，继续等待";
+  }
+  return reasonCN(fallback);
 }
 
 /** 北京时间 "2026-08-04 20:00" */

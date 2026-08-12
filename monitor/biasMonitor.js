@@ -144,7 +144,11 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const displacement = displacementFor4h(dispList, lastClosed);
 
   const decision = bias.decision || {};
-  const planR = decision.planR ?? null;
+  const remotePlanR = decision.planR ?? null;
+  const targets = buildTargetSummary(bias.draw, effectiveBias, price, bias.invalidation);
+  // 对外的机会质量优先看价格会先遇到的流动性，而不是只看远端 HTF Draw。
+  // 否则 SNDK 一类标的会因远端 PWH 显示 4R，但眼前 PDH 可能不足 0.2R。
+  const planR = targets.first?.planR ?? remotePlanR;
   const quality = planR == null ? "-" : planR >= 1 ? "HIGH" : planR >= 0.5 ? "MEDIUM" : "LOW";
 
   // P1-E：最近 Order Block 细类（ICT 2022 L4：BREAKER/REJECTION/STANDARD + FRESH/USED；辅助标注）
@@ -185,6 +189,8 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     ob: obSummary, // { type, kind, state, high, low, status, location } | null（最近 Order Block 细类）
     quality,
     planR,
+    remotePlanR,
+    targets,
     decision: decision.decision || "-",
     decisionLabel: decisionLabel(decision.decision),
     reason: decision.reason || "-",
@@ -192,6 +198,34 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     location: location.location,
     context: location.context || "-",
   };
+}
+
+/** 按价格行进顺序整理第一目标与远端 ICT Draw，并分别计算理论 R。 */
+export function buildTargetSummary(draw, bias, price, invalidation) {
+  const invalidationPrice = invalidation && typeof invalidation === "object" ? invalidation.price : invalidation;
+  if (!draw || !draw.primary || price == null || invalidationPrice == null || (bias !== "BULLISH" && bias !== "BEARISH")) {
+    return { first: null, remote: null };
+  }
+  const risk = bias === "BULLISH" ? price - invalidationPrice : invalidationPrice - price;
+  if (!(risk > 0)) return { first: null, remote: null };
+
+  const seen = new Set();
+  const candidates = [draw.primary, ...(draw.alternatives || [])]
+    .filter((t) => t && t.price != null)
+    .filter((t) => (bias === "BULLISH" ? t.price > price : t.price < price))
+    .filter((t) => {
+      const key = `${t.type}_${t.price}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((t) => ({ type: t.type, price: t.price, planR: Math.abs(t.price - price) / risk }))
+    .sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price));
+
+  const first = candidates[0] || null;
+  const primary = candidates.find((t) => t.type === draw.primary.type && t.price === draw.primary.price) || null;
+  const remote = primary && (!first || primary.type !== first.type || primary.price !== first.price) ? primary : null;
+  return { first, remote };
 }
 
 /** 取指定已收盘 4H 内最后一次 5m 位移，并记录本根 4H 的位移总数。 */
