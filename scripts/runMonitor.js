@@ -309,8 +309,10 @@ export function buildCloseReport(overview) {
   const activeCount = overview.filter((r) => r.cur?.session || r.session).length;
   const kzText = activeCount > 0 ? ` · 本时段 ${activeCount}/${overview.length} 合约处于活跃窗口` : "";
   const lines = [`**4H 收盘报告**${kzText}（北京 ${label} 收线）`, ""];
-  const rows = [];
+  const expanded = [];
+  const compact = [];
   const quietNeutral = [];
+  const counts = { structure: 0, invalidation: 0, spike: 0, pressure: 0, ordinary: 0 };
   for (const r of overview) {
     const k = r.last4h;
     if (!k || k.open == null) continue;
@@ -324,17 +326,29 @@ export function buildCloseReport(overview) {
     const invalidationRisk = r.structureStatus === "INVALIDATED" ? null : invalidationDistance(r, k.close);
     const nearInvalidation = invalidationRisk != null && invalidationRisk <= 3;
     const oppositeDisp = r.displacement && cur.bias !== "NEUTRAL" && directionFromDisp(r.displacement) !== cur.bias;
-    const important = spike || nearInvalidation || conflict || r.structureStatus === "INVALIDATED" || !!r.mss || !!r.provisionalStructureBreak;
+    const failedDisp = displacementFailed(r.displacement, k.close);
+    const strongOppositeDisp = oppositeDisp && r.displacement.ratio >= 2;
+    const structureEvent = r.structureStatus === "INVALIDATED" || !!r.mss || !!r.provisionalStructureBreak || conflict;
+    const important = spike || nearInvalidation || structureEvent || strongOppositeDisp || failedDisp;
+
+    if (structureEvent) counts.structure++;
+    if (nearInvalidation) counts.invalidation++;
+    if (spike) counts.spike++;
+    if (strongOppositeDisp || failedDisp) counts.pressure++;
 
     if (cur.bias === "NEUTRAL" && structureBias === "NEUTRAL" && !r.displacement && !important) {
       quietNeutral.push(r.symbol);
       continue;
     }
 
-    const marker = spike ? "⚡" : important ? "⚠️" : oppositeDisp ? "△" : "•";
+    const risk = closeReportRisk({ structureEvent, nearInvalidation, spike, strongOppositeDisp, oppositeDisp, failedDisp });
+    const reportAction = closeReportAction(cur, risk);
+    const conclusion = closeReportConclusion({ cur, structureBias, risk, reportAction, conflict, nearInvalidation, oppositeDisp, failedDisp });
+    const marker = spike ? "⚡" : structureEvent || nearInvalidation ? "⚠️" : strongOppositeDisp ? "△" : "•";
     const detail = [];
     detail.push(`${marker} **${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`);
-    detail.push(`有效方向: ${biasDisplay(cur.bias)} · 信心度 ${cur.confidence || "-"}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 操作 ${cur.decision || "-"}`);
+    detail.push(`方向: ${biasDisplay(cur.bias)} · 模型信心 ${cur.confidence || "-"}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 当前风险 ${risk}`);
+    detail.push(`建议操作: ${reportAction}${cur.decision && cur.decision !== reportAction ? `（模型 ${cur.decision}）` : ""}`);
     detail.push(`环境: ${structureSummary(structureBias, r.structureStatus)} · ${htfSummary(r.htfContext || cur.htfContext)}`);
 
     if (conflict) detail.push(`状态: 4H 与大周期方向冲突，反转证据不足，暂时保持中性`);
@@ -343,19 +357,29 @@ export function buildCloseReport(overview) {
     } else if (r.provisionalStructureBreak) {
       detail.push(`实时预警: 已越过4H关键位 ${fmtPrice(r.provisionalStructureBreak.level)}，等待4H收盘确认`);
     }
-    if (r.displacement) detail.push(displacementSummary(r.displacement, up, cur.bias));
+    if (r.displacement) detail.push(displacementSummary(r.displacement, up, cur.bias, k.close));
     if (invalidationRisk != null) {
       const prefix = nearInvalidation ? "风险" : "结构保护";
       detail.push(`${prefix}: 距4H保护位 ${invalidationRisk.toFixed(2)}%${nearInvalidation ? "，接近失效位" : ""}`);
     }
+    detail.push(`结论: ${conclusion}`);
 
-    rows.push({ abs: Math.abs(pct), important, oppositeDisp, detail });
+    const row = { abs: Math.abs(pct), important, oppositeDisp, detail, compact: compactCloseRow(r.symbol, pct, cur, risk, reportAction) };
+    if (important) expanded.push(row);
+    else {
+      compact.push(row);
+      counts.ordinary++;
+    }
   }
-  rows.sort((a, b) => (b.important - a.important) || (b.oppositeDisp - a.oppositeDisp) || (b.abs - a.abs));
-  const importantCount = rows.filter((r) => r.important).length;
-  const riskCount = rows.filter((r) => !r.important && r.oppositeDisp).length;
-  lines.push(`重点 ${importantCount} · 逆势风险 ${riskCount} · 普通 ${rows.length - importantCount - riskCount} · 中性无事件 ${quietNeutral.length}`, "");
-  for (const row of rows) lines.push(...row.detail, "");
+  expanded.sort((a, b) => (b.abs - a.abs));
+  compact.sort((a, b) => (b.oppositeDisp - a.oppositeDisp) || (b.abs - a.abs));
+  lines.push(`结构变化 ${counts.structure} · 临近失效 ${counts.invalidation} · 大幅异动 ${counts.spike} · 短线压力 ${counts.pressure} · 普通 ${counts.ordinary} · 中性无事件 ${quietNeutral.length}`, "");
+  for (const row of expanded) lines.push(...row.detail, "");
+  if (compact.length) {
+    lines.push("**普通状态**");
+    for (const row of compact) lines.push(row.compact);
+    lines.push("");
+  }
   if (quietNeutral.length) lines.push(`中性无事件: ${quietNeutral.join("、")}`);
   return lines.join("<br/>");
 }
@@ -380,17 +404,55 @@ function directionFromDisp(d) {
   return d.direction === "UP" ? "BULLISH" : "BEARISH";
 }
 
-function displacementSummary(d, candleUp, effectiveBias) {
+function displacementFailed(d, candleClose) {
+  const level = d?.structureBreak?.level;
+  if (level == null || candleClose == null) return false;
+  return d.direction === "UP" ? candleClose < level : candleClose > level;
+}
+
+function displacementSummary(d, candleUp, effectiveBias, candleClose) {
   const up = d.direction === "UP";
+  const level = d.structureBreak?.level;
+  const close = candleClose;
+  const reclaimed = close != null && level != null && (up ? close < level : close > level);
   let behavior;
-  if (up && !candleUp) behavior = "向上推动失败，冲高回落";
-  else if (!up && candleUp) behavior = "向下推动失败，下探收回";
+  if (reclaimed && up) behavior = "收盘重新跌回BOS下方，向上推动失败";
+  else if (reclaimed && !up) behavior = "收盘重新站回BOS上方，向下推动失败";
+  else if ((up && !candleUp) || (!up && candleUp)) behavior = `${up ? "向上" : "向下"}位移后收平/反向，尚未确认失败`;
   else if (effectiveBias === "NEUTRAL") behavior = "短线位移，仅观察";
   else if (directionFromDisp(d) === effectiveBias) behavior = "顺有效方向位移";
   else behavior = "与有效方向相反，短线压力增加";
   const time = d.time != null ? `${bjHHMM(d.time)} ` : "";
-  const count = d.count > 1 ? `；本4H共${d.count}次位移` : "";
-  return `短线行为: ${time}5m${up ? "向上" : "向下"}位移 ${d.ratio.toFixed(1)}x（${behavior}${count}；${dispEvidence(d)}）`;
+  const counts = d.count > 1
+    ? `；本4H位移 向上${d.upCount ?? 0}次/向下${d.downCount ?? 0}次，主导${d.dominantDirection === "UP" ? "向上" : d.dominantDirection === "DOWN" ? "向下" : "均衡"}`
+    : "";
+  return `短线行为: ${time}5m${up ? "向上" : "向下"}位移 ${d.ratio.toFixed(1)}x（${behavior}${counts}；${dispEvidence(d)}）`;
+}
+
+function closeReportRisk({ structureEvent, nearInvalidation, spike, strongOppositeDisp, oppositeDisp, failedDisp }) {
+  if (structureEvent || nearInvalidation || (spike && strongOppositeDisp)) return "高";
+  if (spike || strongOppositeDisp || oppositeDisp || failedDisp) return "中";
+  return "低";
+}
+
+function closeReportAction(cur, risk) {
+  if (cur.bias === "NEUTRAL" || risk === "高") return "WAIT";
+  return cur.decision || "WAIT";
+}
+
+function closeReportConclusion({ cur, structureBias, risk, reportAction, conflict, nearInvalidation, oppositeDisp, failedDisp }) {
+  if (conflict) return "4H 与大周期冲突，等待反转证据闭环";
+  if (cur.bias === "NEUTRAL") return "当前没有可执行方向，继续等待";
+  const side = structureBias === "BULLISH" ? "多头" : "空头";
+  if (nearInvalidation) return `${side}尚未失效，但接近保护位，不适合继续追${side === "多头" ? "多" : "空"}`;
+  if (oppositeDisp) return `${side}仍有效，但短线存在逆势压力，等待压力解除`;
+  if (failedDisp) return `${side}仍有效，但本4H内的5m推动失败，等待重新确认动能`;
+  if (risk === "高") return `${side}结构仍有效，但当前波动风险高，暂时等待`;
+  return reportAction === "WATCH" ? `${side}结构有效，可继续观察入场条件` : `${side}结构有效，按计划等待更好位置`;
+}
+
+function compactCloseRow(symbol, pct, cur, risk, action) {
+  return `• **${symbol}** ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}% · ${biasDisplay(cur.bias)} · 风险${risk} · ${action}`;
 }
 
 function invalidationDistance(r, close) {

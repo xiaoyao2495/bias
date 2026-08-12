@@ -199,6 +199,8 @@ export function displacementFor4h(displacements, candle) {
   if (!candle || candle.time == null || candle.closeTime == null) return null;
   const inCandle = (displacements || []).filter((d) => d.time >= candle.time && d.time <= candle.closeTime);
   const last = inCandle[inCandle.length - 1];
+  const upCount = inCandle.filter((d) => d.direction === "UP").length;
+  const downCount = inCandle.filter((d) => d.direction === "DOWN").length;
   return last
     ? {
         time: last.time,
@@ -207,6 +209,9 @@ export function displacementFor4h(displacements, candle) {
         structureBreak: last.structureBreak,
         fvg: last.fvg,
         count: inCandle.length,
+        upCount,
+        downCount,
+        dominantDirection: upCount === downCount ? "NEUTRAL" : upCount > downCount ? "UP" : "DOWN",
       }
     : null;
 }

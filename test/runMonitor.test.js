@@ -128,12 +128,11 @@ test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据�
     { symbol: "ETHUSDT", last4h: { open: 100, close: 99.5 }, displacement: null, cur: { bias: "BEARISH", confidence: "LOW" }, confidenceScore: 10 },
   ]);
   assert.match(msg, /\*\*4H 收盘报告\*\*/);
+  assert.match(msg, /\*\*普通状态\*\*/);
   assert.match(msg, /\*\*BTCUSDT\*\* 收上 \+1.20%/);
-  assert.match(msg, /有效方向: 🟢 多头 · 信心度 MEDIUM 52/);
-  assert.match(msg, /环境: 4H多头结构有效 · 大周期方向未确认/);
-  assert.match(msg, /短线行为: 5m向上位移 2.0x（顺有效方向位移；5m BOS 101.5，5m FVG 99.9-101.5）/);
-  assert.match(msg, /\*\*ETHUSDT\*\* 收下 -0.50%/);
-  assert.match(msg, /有效方向: 🔴 空头 · 信心度 LOW 10/);
+  assert.match(msg, /模型信心 MEDIUM 52 · 当前风险 中/);
+  assert.match(msg, /收盘重新跌回BOS下方，向上推动失败/);
+  assert.match(msg, /\*\*ETHUSDT\*\* -0.50% · 🔴 空头 · 风险低 · WAIT/);
 });
 
 test("buildCloseReport: 位移方向与收线方向相反 → 直白显示推动失败，不再误称背离", () => {
@@ -141,7 +140,7 @@ test("buildCloseReport: 位移方向与收线方向相反 → 直白显示推动
     { symbol: "SPCXUSDT", last4h: { open: 137, close: 136.5 }, displacement: { direction: "UP", ratio: 2.4, structureBreak: { type: "BOS", direction: "UP", level: 138 }, fvg: { top: 136.8, bottom: 136.5 } }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 65 },
   ]);
   assert.match(msg, /收下 -0.36%/);
-  assert.match(msg, /短线行为: 5m向上位移 2.4x（向上推动失败，冲高回落；5m BOS 138，5m FVG 136.5-136.8）/);
+  assert.match(msg, /短线行为: 5m向上位移 2.4x（收盘重新跌回BOS下方，向上推动失败；5m BOS 138，5m FVG 136.5-136.8）/);
   assert.ok(!msg.includes("背离"));
 });
 
@@ -190,7 +189,8 @@ test("buildCloseReport: 有效方向中性时展示4H结构与日线冲突原因
       confidenceScore: 0,
     },
   ]);
-  assert.match(msg, /有效方向: ⚪ 中性 · 信心度 LOW 0 · 操作 WAIT/);
+  assert.match(msg, /方向: ⚪ 中性 · 模型信心 LOW 0 · 当前风险 高/);
+  assert.match(msg, /建议操作: WAIT/);
   assert.match(msg, /环境: 4H多头结构有效 · 日线偏空/);
   assert.match(msg, /4H 与大周期方向冲突，反转证据不足，暂时保持中性/);
 });
@@ -215,6 +215,36 @@ test("displacementFor4h: 只取本根4H内的5m位移，排除边界外事件", 
   assert.equal(d.time, 1900);
   assert.equal(d.direction, "DOWN");
   assert.equal(d.count, 2);
+  assert.equal(d.upCount, 1);
+  assert.equal(d.downCount, 1);
+  assert.equal(d.dominantDirection, "NEUTRAL");
+});
+
+test("buildCloseReport: 接近保护位时保留模型分数，但报告建议降为 WAIT", () => {
+  const msg = buildCloseReport([
+    {
+      symbol: "XRPUSDT", last4h: { open: 1, close: 1.02 },
+      cur: { bias: "BEARISH", structureBias: "BEARISH", confidence: "HIGH", decision: "WATCH" },
+      confidenceScore: 90, structureStatus: "VALID", invalidation: { price: 1.04 },
+    },
+  ]);
+  assert.match(msg, /模型信心 HIGH 90 · 当前风险 高/);
+  assert.match(msg, /建议操作: WAIT（模型 WATCH）/);
+  assert.match(msg, /空头尚未失效，但接近保护位，不适合继续追空/);
+});
+
+test("buildCloseReport: 多次位移按方向计数并标注主导方向", () => {
+  const msg = buildCloseReport([
+    {
+      symbol: "CYSUSDT", last4h: { open: 1.2, close: 1.1 },
+      cur: { bias: "BULLISH", structureBias: "BULLISH", confidence: "MEDIUM", decision: "WATCH" }, confidenceScore: 55,
+      displacement: {
+        direction: "DOWN", ratio: 3.9, count: 6, upCount: 2, downCount: 4, dominantDirection: "DOWN",
+        structureBreak: { level: 1.117 }, fvg: { top: 1.125, bottom: 1.102 },
+      },
+    },
+  ]);
+  assert.match(msg, /本4H位移 向上2次\/向下4次，主导向下/);
 });
 
 test("buildOverview: 首轮全览字段布局（Scenario · 信心度 · 机会质量 · 操作）", () => {
