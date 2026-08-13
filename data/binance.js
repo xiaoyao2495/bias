@@ -19,7 +19,7 @@
  *   { time, open, high, low, close, closeTime, quoteVol }
  *   time      — 开盘时间 (ms)
  *   closeTime — 收盘时间 (ms)，用于判断该 K 线是否已收盘
- *   quoteVol  — 成交量（USDT 成交额），数据驱动 Killzone（活跃时段）用
+ *   quoteVol  — 成交量（USDT 成交额），数据驱动活跃窗口用
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
@@ -45,7 +45,7 @@ const INTERVAL_MS = { "5m": 5 * 60_000, "4h": 4 * 3600_000, "1d": 24 * 3600_000,
  *  4H 是监控主周期，TTL 必须小于周期本身——否则 4H 收盘后缓存仍未过期，
  *  收盘报告滞后一根、结构/MSS 检测最长滞后 4h（M1 修复，见审计）。
  *  30min 折中（监控 10 分钟一轮 × 3），既及时看到新收盘 K，又避免每轮拉取。
- *  1h 供数据驱动 Killzone（活跃窗口）：每周一刷新一次（拉上周交易周数据），TTL 一周。 */
+ *  1h 供数据驱动活跃成交量窗口：每周一刷新一次（拉上周交易周数据），TTL 一周。 */
 const TTL_OVERRIDE_MIN = { "4h": 30, "1h": 7 * 24 * 60 };
 
 function mapKline(k) {
@@ -55,7 +55,7 @@ function mapKline(k) {
     high: +k[2],
     low: +k[3],
     close: +k[4],
-    quoteVol: +k[7] || 0, // 成交量（USDT 成交额），数据驱动 Killzone 用；旧缓存缺字段时为 0
+    quoteVol: +k[7] || 0, // 成交量（USDT 成交额），数据驱动活跃窗口用；旧缓存缺字段时为 0
     closeTime: k[6],
   };
 }
@@ -80,7 +80,7 @@ function writeCache(file, data) {
 
 function ttlMs(interval) {
   const base = TTL_OVERRIDE_MIN[interval] != null ? TTL_OVERRIDE_MIN[interval] * 60_000 : (INTERVAL_MS[interval] || DEFAULT_TTL_MS);
-  // 1h（数据驱动 Killzone）按周刷新，不受 4h 全局上限约束；其余周期仍受 DEFAULT 上限
+  // 1h（数据驱动活跃窗口）按周刷新，不受 4h 全局上限约束；其余周期仍受 DEFAULT 上限
   const cap = interval === "1h" ? 7 * 24 * 3600_000 : DEFAULT_TTL_MS;
   return Math.min(cap, base);
 }
@@ -158,8 +158,7 @@ export async function getHistory(symbol, interval, count, { force = false } = {}
  * 从 Binance 永续合约（fapi）拉取 K 线：代理 → 直连（无代理直接直连）、多端点轮询。
  * 统一使用永续数据：监控对象是 USDT 永续，杠杆代币/商品永续只在 fapi 存在；
  * BTC/ETH 等传统合约永续与现货结构几乎一致，直接用永续保证数据源一致。
- * 注意：必须用 undici.request 而非 fetch —— undici 8.10 的 fetch + ProxyAgent 存在
- * UND_ERR_INVALID_ARG 兼容 bug，request API 正常。
+ * 使用 undici.request 统一直连与 ProxyAgent dispatcher 调用路径。
  */
 async function fetchFromBinance(symbol, interval, limit, startTime = null, endTime = null) {
   const modes = PROXY

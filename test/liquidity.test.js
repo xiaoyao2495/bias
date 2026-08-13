@@ -3,7 +3,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeLiquidity, findEqualHighs, findEqualLows, rankLiquidityTargets, findPremarketRange, liquidityStateForLevel } from "../indicators/liquidity.js";
+import { computeLiquidity, findEqualHighs, findEqualLows, rankLiquidityTargets, findPremarketRange, isEquityLinkedSymbol, liquidityStateForLevel } from "../indicators/liquidity.js";
 
 const now = Date.now();
 
@@ -184,10 +184,10 @@ test("V1.5 已突破的方向侧目标被过滤（价格不在正确一侧）", 
   assert.equal(r.primary.price, 160);
 });
 
-// ---- V2.0 盘前区间（PRE_MARKET_HIGH/LOW，ICT 2022 Asian Range 的美股对应物）----
-// 美股盘前 = 北京 16:00-21:30（夏令时 EDT 4:00-9:30）；1H K open 在北京 16-21 点属于盘前
+// ---- V2.1 美股盘前区间（PRE_MARKET_HIGH/LOW）----
+// America/New_York 04:00-09:30；粗周期 K 必须整根位于窗口内，推荐生产使用 5m。
 
-test("V2.0 findPremarketRange: 取最近盘前时段（北京 16-21 点）的最高/最低", () => {
+test("V2.1 findPremarketRange: 粗周期不会把 09:30 后半小时混入盘前", () => {
   const T0 = Date.UTC(2026, 7, 7, 8, 0); // 北京 2026-08-07 16:00
   const h1 = [0, 1, 2, 3, 4, 5].map((i) => ({
     time: T0 + i * 3600_000,
@@ -198,12 +198,11 @@ test("V2.0 findPremarketRange: 取最近盘前时段（北京 16-21 点）的最
     closeTime: T0 + (i + 1) * 3600_000,
   }));
   const r = findPremarketRange(h1, Date.UTC(2026, 7, 7, 14, 30)); // 北京 22:30（盘后）
-  assert.equal(r.high, 102.5); // 最高 high
+  assert.equal(r.high, 102.4); // 21:00-22:00 北京 = 09:00-10:00 ET，跨过 09:30，整根排除
   assert.equal(r.low, 98); // 最低 low
-  assert.equal(r.bars, 6);
+  assert.equal(r.bars, 5);
   assert.equal(r.date, "2026-08-07");
-  // 极值形成时间：high 在 i=5（北京 21:00），low 在 i=0（北京 16:00）——扫损消息精确到"几点形成"
-  assert.equal(r.highTime, T0 + 5 * 3600_000);
+  assert.equal(r.highTime, T0 + 4 * 3600_000);
   assert.equal(r.lowTime, T0);
 });
 
@@ -236,7 +235,7 @@ test("V2.0 findPremarketRange: 无盘前时段 K（如全部为北京 22 点后�
   assert.equal(findPremarketRange(h1, Date.UTC(2026, 7, 7, 20, 0)), null);
 });
 
-test("V2.0 computeLiquidity: 传 h1 → buySide/sellSide 含 PRE_MARKET_HIGH/LOW", () => {
+test("V2.1 computeLiquidity: 美股关联 symbol 才注入 PRE_MARKET_HIGH/LOW", () => {
   const daily = [mkCandle(0, 50000, 48000, true)];
   const weekly = [mkCandle(0, 60000, 52000, true)];
   const T0 = Date.UTC(2026, 7, 7, 8, 0);
@@ -248,14 +247,46 @@ test("V2.0 computeLiquidity: 传 h1 → buySide/sellSide 含 PRE_MARKET_HIGH/LOW
     close: 101,
     closeTime: T0 + (i + 1) * 3600_000,
   }));
-  const l = computeLiquidity(daily, weekly, [], 0.002, Date.UTC(2026, 7, 7, 14, 30), 150, h1);
+  const l = computeLiquidity(daily, weekly, [], 0.002, Date.UTC(2026, 7, 7, 14, 30), 150, h1, null, { symbol: "MUUSDT" });
   const pmh = l.buySide.find((t) => t.type === "PRE_MARKET_HIGH");
   const pml = l.sellSide.find((t) => t.type === "PRE_MARKET_LOW");
-  assert.ok(pmh && pmh.price === 102.5);
+  assert.ok(pmh && pmh.price === 102.4);
   assert.ok(pml && pml.price === 98);
-  // 形成时间：high 在 i=5（北京 21:00），low 在 i=0（北京 16:00）
-  assert.equal(pmh.time, T0 + 5 * 3600_000);
+  assert.equal(pmh.time, T0 + 4 * 3600_000);
   assert.equal(pml.time, T0);
+});
+
+test("V2.1 盘前区间：冬夏令时都按纽约 04:00-09:30，且排除 09:30 后 K", () => {
+  const candle = (time, high) => ({ time, closeTime: time + 5 * 60_000, open: 100, high, low: 90, close: 100 });
+  const summer = [
+    candle(Date.UTC(2026, 7, 7, 8, 0), 101),   // 04:00 EDT
+    candle(Date.UTC(2026, 7, 7, 13, 25), 105), // 09:25 EDT，最后一根盘前
+    candle(Date.UTC(2026, 7, 7, 13, 30), 999), // 09:30 EDT，不得纳入
+  ];
+  const winter = [
+    candle(Date.UTC(2026, 0, 7, 9, 0), 102),   // 04:00 EST
+    candle(Date.UTC(2026, 0, 7, 14, 25), 106), // 09:25 EST
+  ];
+  assert.equal(findPremarketRange(summer, Date.UTC(2026, 7, 7, 14)).high, 105);
+  assert.equal(findPremarketRange(winter, Date.UTC(2026, 0, 7, 15)).high, 106);
+});
+
+test("V2.1 盘前区间：忽略周末的同一纽约时段", () => {
+  const candle = (time, high) => ({ time, closeTime: time + 5 * 60_000, open: 100, high, low: 90, close: 100 });
+  const weekday = candle(Date.UTC(2026, 7, 7, 8), 103); // 周五 04:00 EDT
+  const weekend = candle(Date.UTC(2026, 7, 8, 8), 999); // 周六 04:00 EDT
+  const r = findPremarketRange([weekday, weekend], Date.UTC(2026, 7, 8, 14));
+  assert.equal(r.date, "2026-08-07");
+  assert.equal(r.high, 103);
+});
+
+test("V2.1 盘前流动性只对显式美股关联标的启用", () => {
+  assert.equal(isEquityLinkedSymbol("MUUSDT"), true);
+  assert.equal(isEquityLinkedSymbol("BTCUSDT"), false);
+  const t = Date.UTC(2026, 7, 7, 8, 0);
+  const intraday = [{ time: t, closeTime: t + 5 * 60_000, open: 100, high: 102, low: 98, close: 101 }];
+  const btc = computeLiquidity([], [], [], 0.002, t + 60 * 60_000, 150, intraday, null, { symbol: "BTCUSDT" });
+  assert.equal(btc.buySide.some((x) => x.type === "PRE_MARKET_HIGH"), false);
 });
 
 test("V2.0 rankLiquidityTargets: 优先级 PWH > PDH > PRE_MARKET_HIGH > EQH", () => {

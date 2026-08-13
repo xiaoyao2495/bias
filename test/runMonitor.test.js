@@ -74,7 +74,7 @@ test("buildChanged: 非 bias 变化 — ℹ️ 头、信心度/操作 旧→新�
   // ℹ️ 更新也带背景：当前 Bias + 结构状态（bias 未变，无 旧→新 对比）
   assert.match(msg, /🟢 BULLISH/);
   assert.match(msg, /结构: VALID（新多头结构形成（HH\+HL））/);
-  assert.match(msg, /信心度: LOW → MEDIUM 52/);
+  assert.match(msg, /模型信心: LOW → MEDIUM · 共振评分 52/);
   assert.match(msg, /操作: WAIT → WATCH_FOR_ENTRY/);
   assert.match(msg, /机会质量: MEDIUM/);
   assert.match(msg, /原因: 信心度提升/);
@@ -91,7 +91,7 @@ test("buildChanged: Scenario 值 + 原因英译中（ETHUSDT 08-06 通知场景�
   });
   assert.match(msg, /市场背景: 4H 正在转多，但大周期仍偏空/);
   assert.match(msg, /原因: 方向概率可接受且上方空间充足/);
-  assert.match(msg, /Session: 活跃窗口 20:00-24:00（占比 28.6%）/);
+  assert.match(msg, /活跃成交量: 活跃窗口 20:00-24:00（占比 28.6%）/);
 });
 
 test("buildSweep: SSL 已收盘确认 — 侧/位/价/回收/背景字段齐全", () => {
@@ -108,7 +108,7 @@ test("buildSweep: SSL 已收盘确认 — 侧/位/价/回收/背景字段齐全"
   assert.match(msg, /市场背景:/);
   assert.match(msg, /Bias: ⚪ NEUTRAL/);
   assert.match(msg, /市场背景: 方向不明确，价格处于震荡/);
-  assert.match(msg, /信心度: LOW 0/);
+  assert.match(msg, /模型信心: LOW · 共振评分 0/);
   assert.match(msg, /操作: WAIT/);
 });
 
@@ -134,7 +134,7 @@ test("buildSweep: BSL 实时 — 刺破上方流动性且现价收回", () => {
   assert.match(msg, /流动性位形成: \d{2}\/\d{2}（日\/周 K）/);
 });
 
-test("buildSweep: 16:00-21:00 区间流动性位（PRE_MARKET）— 只显形成时间，不标时段名", () => {
+test("buildSweep: 纽约盘前区间流动性位（PRE_MARKET）— 只显形成时间，不标时段名", () => {
   const msg = buildSweep({
     symbol: "BICOUSDT", price: 0.0401,
     sweep: { side: "SSL", type: "PRE_MARKET_LOW", level: 0.04, sweptPrice: 0.0399, close: 0.0401, time: 111111, key: "k", realtime: false, closedTime: 111222, levelTime: 1754604000000, levelDate: "2026-08-07" },
@@ -145,7 +145,7 @@ test("buildSweep: 16:00-21:00 区间流动性位（PRE_MARKET）— 只显形成
   assert.ok(!msg.includes("盘前"), "虚拟币消息不应出现盘前字样");
 });
 
-test("buildSweep: 16:00-21:00 区间位无 highTime/lowTime（旧数据）→ 回退只显日期", () => {
+test("buildSweep: 纽约盘前区间位无 highTime/lowTime（旧数据）→ 回退只显日期", () => {
   const msg = buildSweep({
     symbol: "BICOUSDT", price: 0.0401,
     sweep: { side: "SSL", type: "PRE_MARKET_LOW", level: 0.04, sweptPrice: 0.0399, close: 0.0401, time: 111111, key: "k", realtime: false, closedTime: 111222, levelDate: "2026-08-07" },
@@ -183,7 +183,7 @@ test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据�
   assert.match(msg, /\*\*4H 收盘报告\*\*/);
   assert.match(msg, /\*\*普通状态\*\*/);
   assert.match(msg, /\*\*BTCUSDT\*\* 收上 \+1.20%/);
-  assert.match(msg, /模型信心 MEDIUM 52 · 当前风险 中/);
+  assert.match(msg, /模型信心 MEDIUM · 共振评分 52 · 当前风险 中/);
   assert.match(msg, /收盘重新跌回BOS下方，向上推动失败/);
   assert.match(msg, /推动区间: 多头推动（回撤低点\(HL\) 100 → 结构推进高点\(HH\) 101\.5）/);
   assert.match(msg, /位移 2\.0x（高质量）/);
@@ -245,7 +245,7 @@ test("buildCloseReport: 有效方向中性时展示4H结构与日线冲突原因
       confidenceScore: 0,
     },
   ]);
-  assert.match(msg, /方向: ⚪ 中性 · 模型信心 LOW 0 · 当前风险 高/);
+  assert.match(msg, /方向: ⚪ 中性 · 模型信心 LOW · 共振评分 0 · 当前风险 高/);
   assert.match(msg, /建议操作: WAIT/);
   assert.match(msg, /环境: 4H多头结构有效 · 日线偏空/);
   assert.match(msg, /4H 与大周期方向冲突，反转证据不足，暂时保持中性/);
@@ -284,7 +284,7 @@ test("buildCloseReport: 接近保护位时保留模型分数，但报告建议�
       confidenceScore: 90, structureStatus: "VALID", invalidation: { price: 1.04 },
     },
   ]);
-  assert.match(msg, /模型信心 HIGH 90 · 当前风险 高/);
+  assert.match(msg, /模型信心 HIGH · 共振评分 90 · 当前风险 高/);
   assert.match(msg, /建议操作: WAIT（模型 WATCH）/);
   assert.match(msg, /空头尚未失效，但接近保护位，不适合继续追空/);
 });
@@ -303,13 +303,13 @@ test("buildCloseReport: 多次位移按方向计数并标注主导方向", () =>
   assert.match(msg, /本4H位移 向上2次\/向下4次，主导向下/);
 });
 
-test("buildOverview: 首轮全览字段布局（Scenario · 信心度 · 机会质量 · 操作）", () => {
+test("buildOverview: 首轮全览字段布局（Scenario · 模型信心/共振评分 · 机会质量 · 操作）", () => {
   const msg = buildOverview([
     { symbol: "BTCUSDT", cur: { bias: "BULLISH", scenario: "BULLISH_CONTINUATION", confidence: "MEDIUM", quality: "MEDIUM", planR: 1.2, decision: "WATCH_FOR_ENTRY" }, confidenceScore: 52 },
   ]);
   assert.match(msg, /\*\*4H Bias Monitor\*\*/);
   assert.match(msg, /\*\*BTCUSDT\*\* 🟢 BULLISH/);
-  assert.match(msg, /市场背景: 4H 与大周期一致向上 · 信心度: MEDIUM 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
+  assert.match(msg, /市场背景: 4H 与大周期一致向上 · 模型信心: MEDIUM · 共振评分 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
 });
 
 test("buildChanged: 有效且距离较近的下方多头 BREAKER → 显示位置、作用和消耗状态", () => {
@@ -403,7 +403,7 @@ test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发
   assert.match(msg, /入场确认: 5m 收阳站回执行区中点确认 · 确认价 884\.1 · 21:35/);
   assert.match(msg, /5m交易计划: 确认价 884\.1 · 失效位 880\.5（5m执行区远端）/);
   assert.match(msg, /第一目标: 891\.3 · 交易 planR 2\.00/);
-  assert.match(msg, /环境: 🟢 BULLISH · 信心度 MEDIUM 45 · 操作 WATCH · 活跃窗口 20:00-24:00（占比 23.4%）/);
+  assert.match(msg, /环境: 🟢 BULLISH · 模型信心 MEDIUM · 共振评分 45 · 操作 WATCH · 活跃窗口 20:00-24:00（占比 23.4%） · 当前不在 ICT Killzone/);
   assert.match(msg, /阶段: 分发\(多头\) · 5m位移 2× 推动/);
   assert.match(msg, /触发: 价格回踩 FVG 880.5-882.5/);
   // 现价只出现在"观察位"行，不再有独立的尾部价格行（避免重复）
@@ -419,7 +419,7 @@ test("buildOpportunity: 带执行区（CHAIN 链）— 显示执行区行与 4H 
   const msg = buildOpportunity(op, env);
   assert.match(msg, /🔴 空头（扫损→MSS→回踩）· 评分 85/);
   assert.match(msg, /执行区: FVG 101-102/);
-  assert.match(msg, /环境: 🔴 BEARISH · 信心度 LOW 0 · 操作 NO TRADE · 非活跃窗口/);
+  assert.match(msg, /环境: 🔴 BEARISH · 模型信心 LOW · 共振评分 0 · 操作 NO TRADE · 非活跃窗口 · 当前不在 ICT Killzone/);
 });
 
 test("buildOpportunity: 关键位置普通MSS明确标注WATCH且非最高质量", () => {

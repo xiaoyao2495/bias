@@ -1,25 +1,25 @@
 /**
- * killzone.js — Killzone（Session）标注：数据驱动版
+ * killzone.js — 活跃成交量窗口 + ICT Session 标注
  *
- * ICT 2022 课程的 Killzone 是"机构执行大单的流动性高峰时段"，本质是高成交量窗口。
- * 但课程固定窗口（纽约本地时间）以外汇为主，加密市场（尤其美股相关代币，如
+ * ICT 2022 Killzone 是固定的纽约当地钟表时段。加密市场（尤其美股相关代币，如
  * SNDK/SOXL/MU/KORU 等）的实际活跃时段随标的资产交易时段漂移——例如美股代币的
  * 真实高峰在北京 20:00-24:00（美东 9:30-16:00），与课程"伦敦 14:00-17:00"错位。
  *
- * 因此这里改为**数据驱动**：用该合约真实 1h 成交量（USDT 成交额）按北京时间小时
- * 聚合，找出显著高于平均的连续时段作为"活跃窗口"（即该币的真实 Killzone）。
+ * 因此这里额外提供**数据驱动活跃窗口**：用该合约真实 1h 成交量（USDT 成交额）
+ * 按北京时间小时聚合。它是工程统计指标，不等同于 ICT 固定 Killzone。
  *
  * 判定规则：
  *   computeActiveWindows(h1) — 输入 1h K 线（含 quoteVol），输出活跃窗口
  *     [{ start, end, ratio }]（start/end 为北京时间小时，半开区间；ratio=窗口成交量占比%）
  *     活跃小时 = 该小时成交量 > 全天均值 × factor（默认 1.5），合并连续小时为窗口；
- *     窗口占比 < 10%（不足全天 1/10）的窗口视为碎片丢弃（Killzone = 流动性高峰）。
+ *     窗口占比 < 10%（不足全天 1/10）的窗口视为碎片丢弃。
  *     factor 用 1.5（而非 1.2）：三币上周实盘验证（BTC/SNDK/MU），1.2×均值 ≈ 5% 会把
  *     5-6% 的次级小峰（如 BTC 06/09 点、MU 08 点）误判为"活跃窗口"，与 15-17% 主峰
  *     同等待遇，产生碎片窗口误导 Session 展示；1.5×均值（≈6.25%）下碎片消失、主峰完整保留。
- *   killzoneOfK(k, windows)  — K 覆盖时段与活跃窗口的重叠时长，取重叠最长者；无 → null
+ *   activeVolumeWindowAt(time, windows) — 仅按事件当前时刻判定，避免整根 4H K 提前命中未来窗口
+ *   ictSessionAt(time) — 按纽约当地时间标注 ICT Asia/London/New York Killzone，不参与成交量评分
  *
- * 兼容性：旧缓存 K 线无 quoteVol 字段（视为 0）→ 无数据时返回 []，调用方降级为"非 Killzone"。
+ * 兼容性：旧缓存 K 线无 quoteVol 字段（视为 0）→ 无数据时返回 []。
  */
 
 const BJ_OFFSET_MS = 8 * 3600_000;
@@ -31,6 +31,40 @@ const WINDOW_MIN_RATIO = 10;
 function bjHour(ms) {
   const d = new Date(ms + BJ_OFFSET_MS);
   return d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600;
+}
+
+/** 当前事件时刻是否位于某个数据驱动活跃窗口。窗口是北京时间小时半开区间。 */
+export function activeVolumeWindowAt(time, windows) {
+  if (!Number.isFinite(Number(time)) || !windows || !windows.length) return null;
+  const hour = bjHour(Number(time));
+  for (const w of windows) {
+    const inside = w.start < w.end
+      ? hour >= w.start && hour < w.end
+      : hour >= w.start || hour < w.end;
+    if (inside) return { ...w, kind: "ACTIVE_VOLUME_WINDOW" };
+  }
+  return null;
+}
+
+/**
+ * ICT 固定时段标注（纽约当地钟表时间，DST 由 IANA 时区自动处理）。
+ * 只提供课程语境，不与数据驱动活跃窗口混用：Asia 20:00-00:00、London 02:00-05:00、
+ * New York 07:00-10:00（America/New_York）。
+ */
+export function ictSessionAt(time) {
+  if (!Number.isFinite(Number(time))) return null;
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hourCycle: "h23",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(new Date(Number(time)));
+  const value = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  const minutes = Number(value.hour) * 60 + Number(value.minute);
+  if (minutes >= 20 * 60) return { name: "ASIA", label: "ICT Asia Killzone", timeZone: "America/New_York" };
+  if (minutes >= 2 * 60 && minutes < 5 * 60) return { name: "LONDON", label: "ICT London Killzone", timeZone: "America/New_York" };
+  if (minutes >= 7 * 60 && minutes < 10 * 60) return { name: "NEW_YORK", label: "ICT New York Killzone", timeZone: "America/New_York" };
+  return null;
 }
 
 /**
@@ -55,7 +89,7 @@ export function lastTradingWeek(h1, now = Date.now()) {
 }
 
 /**
- * 由 1h K 线计算该合约的活跃窗口（真实 Killzone）。
+ * 由 1h K 线计算该合约的活跃成交量窗口。
  * @param {Array} h1 1h K 线（{time, quoteVol}，时间升序，任意天数——越久分布越稳）
  * @param {Object} [opt]
  * @param {number} [opt.factor=1.5] 活跃阈值：小时成交量 > 全天均值 × factor 记为活跃
@@ -97,7 +131,7 @@ export function computeActiveWindows(h1, { factor = 1.5 } = {}) {
     i = j;
   }
   windows.sort((a, b) => b.ratio - a.ratio);
-  // 碎片过滤：Killzone = 流动性高峰时段，占比 < 10%（不足全天 1/10）的窗口视为次级小峰
+  // 碎片过滤：占比 < 10%（不足全天 1/10）的窗口视为次级小峰
   // 碎片丢弃（实盘：XAG 02-03 点 7%、09-10 点 6.3% 相对主峰 17% 是噪声；factor 再提会
   // 误杀部分主峰尾部小时，如 BTC 23 点 5.9%）。真实主峰窗口（21-23 占 17-41%）不受影响。
   return windows.filter((w) => w.ratio >= WINDOW_MIN_RATIO);

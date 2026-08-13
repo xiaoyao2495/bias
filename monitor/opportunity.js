@@ -465,7 +465,7 @@ function scoreOpportunity(o, env) {
   else if (env.confidence === "MEDIUM") s += 15;
   if (env.quality === "HIGH") s += 15;
   else if (env.quality === "MEDIUM") s += 8;
-  if (env.session) s += 10; // 处于活跃窗口（Killzone）
+  if (env.ictSession) s += 10; // ICT 固定 Session；统计活跃成交量窗口不参与 ICT 共振评分
   if (env.structureStatus === "VALID") s += 5; // 4H 结构有效
   // 信号类型权重：完整链条 > 执行区回踩
   if (o.type === "CHAIN") s += 25;
@@ -494,7 +494,7 @@ if (__isCli) {
   }
   const m5 = await getHistory(symbol, "5m", 1000);
   const price = m5[m5.length - 1].close;
-  const env = { bias: process.argv[3] || "BULLISH", decision: "WATCH", price, confidence: "MEDIUM", quality: "HIGH", session: { start: 20, end: 24, ratio: 23.4 }, structureStatus: "VALID", sweep: null };
+  const env = { bias: process.argv[3] || "BULLISH", decision: "WATCH", price, confidence: "MEDIUM", quality: "HIGH", ictSession: { name: "NEW_YORK" }, structureStatus: "VALID", sweep: null };
   const opps = scanOpportunities({ symbol, env, m5 });
   const ctx = computeM5Context(m5, price);
   console.log(`${symbol} 现价 ${price} | 5m 结构 ${ctx.direction} | MSS/BOS 事件 ${ctx.events.length} | FVG ${ctx.pd.fvg.length} OB ${ctx.pd.ob.length}`);

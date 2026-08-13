@@ -42,7 +42,7 @@ const baseEnv = (over) => ({
   confidence: "HIGH",
   quality: "HIGH",
   decision: "WATCH",
-  session: { start: 20, end: 24, ratio: 20 },
+  ictSession: { name: "NEW_YORK" },
   structureStatus: "VALID",
   sweep: null,
   ...over,
@@ -288,7 +288,7 @@ test("环境过滤：4H bias NEUTRAL → 无机会", () => {
   assert.deepEqual(opps, []);
 });
 
-test("环境过滤：confidence LOW 且无活跃窗口 → 评分不足不出机会（避免噪声）", () => {
+test("环境过滤：confidence LOW 且无 ICT Session → 评分不足不出机会（避免噪声）", () => {
   const m5 = mkCandles([
     [100, 100, 100, 100],
     [101, 101, 101, 101],
@@ -296,7 +296,7 @@ test("环境过滤：confidence LOW 且无活跃窗口 → 评分不足不出机
     [101.5, 103, 101.5, 102],
     [101, 101.5, 100.8, 101],
   ]);
-  const env = baseEnv({ price: 101, confidence: "LOW", quality: "LOW", session: null });
+  const env = baseEnv({ price: 101, confidence: "LOW", quality: "LOW", ictSession: null });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   assert.equal(opps.length, 0, "LOW 环境 + 弱信号不应报机会");
 });

@@ -71,7 +71,7 @@ test("P0: 反转证据存在扫损时返回该事件，不引用未定义变量"
   assert.equal(evidence.mss, null);
 });
 
-test("P0-4: sessionCandle 决定 Session —— 进行中 4H 时间范围命中活跃窗口，已收盘末根不命中", () => {
+test("P0-4: 活跃窗口按 analysisTime 命中，不读取进行中 4H 的未来覆盖范围", () => {
   const now = Date.now();
   const BJ = 8 * 3600_000;
   const bj = new Date(now + BJ);
@@ -89,17 +89,15 @@ test("P0-4: sessionCandle 决定 Session —— 进行中 4H 时间范围命中�
   }
   const candles = h4Bull();
   const base = { candles, daily: [], weekly: [], price: 118, time: TIME, h1 };
-  // 不传 sessionCandle：回退已收盘 4H 末根（T0 末根北京 06:00-10:00）→ 不命中 20-24 → null
-  const r1 = analyzeBias(base);
-  assert.equal(r1.session, null);
-  // 传 sessionCandle（进行中 4H：北京 20:00-24:00）→ 命中活跃窗口
   const t20 = Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate(), 12, 0, 0); // UTC 12:00 = 北京 20:00
-  const r2 = analyzeBias({ ...base, sessionCandle: { time: t20, closeTime: t20 + H4, open: 1, high: 1, low: 1, close: 1 } });
-  assert.ok(r2.session, "进行中 4H 时间范围应命中活跃窗口");
-  assert.equal(r2.session.start, 20);
-  assert.equal(r2.session.end, 24);
-  // 进行中 K 只用于 Session，不参与结构（swings 结构应与不传时一致）
-  assert.equal(r1.structure.lastHigh.price, r2.structure.lastHigh.price);
+  const before = analyzeBias({ ...base, analysisTime: t20 - 10 * 60_000 }); // 19:50
+  assert.equal(before.activeVolumeWindow, null);
+  const inside = analyzeBias({ ...base, analysisTime: t20 + 10 * 60_000 }); // 20:10
+  assert.ok(inside.activeVolumeWindow);
+  assert.equal(inside.activeVolumeWindow.start, 20);
+  assert.equal(inside.session.start, 20); // 旧字段兼容
+  assert.equal(inside.bias.confidence.confluenceScore, before.bias.confidence.confluenceScore, "统计活跃窗口本身不得额外增加 ICT 共振评分");
+  assert.equal(before.structure.lastHigh.price, inside.structure.lastHigh.price);
 });
 
 test("4H BULLISH + 日线 BULLISH → htfDirection 注入，Scenario TREND_CONTINUATION，输出字段完整", () => {
@@ -242,7 +240,7 @@ test("P0-2 对照组: 结构失效的 TRANSITION → 硬门槛 LOW 0 不变", ()
   assert.equal(c.level, "LOW");
 });
 
-test("Session: 当前 4H 处于活跃窗口（Killzone）→ confidence +10（ICT：Killzone 内信号更有效）", () => {
+test("ICT Session：固定课程时段命中时 confluenceScore +10", () => {
   const base = {
     bias: "BULLISH",
     structure: { direction: "BULLISH" },
@@ -254,31 +252,29 @@ test("Session: 当前 4H 处于活跃窗口（Killzone）→ confidence +10（IC
     scenario: { state: "TRANSITION", htfDirection: "NEUTRAL" },
   };
   const without = computeConfidence(base);
-  assert.equal(without.score, 20); // 基准（P0-2 base 20，无 Killzone）
-  const inKz = computeConfidence({ ...base, session: { start: 21, end: 24, ratio: 26.7 } });
-  assert.equal(inKz.score, 30); // +10 Killzone active
-  assert.ok(inKz.factors.some((f) => f.name === "Killzone active" && f.value === "+10"));
+  assert.equal(without.score, 20); // 基准（P0-2 base 20，无 ICT Session）
+  const inKz = computeConfidence({ ...base, ictSession: { name: "NEW_YORK" } });
+  assert.equal(inKz.score, 30);
+  assert.ok(inKz.factors.some((f) => f.name === "ICT Session active" && f.value === "+10"));
 });
 
-test("P1: analysisTime 决定盘前流动性截断 —— 21:30 时 20:00–21:00 已收盘 1H K 不再被遗漏", () => {
-  const H1 = 3600_000;
-  const tCut = Date.UTC(2024, 1, 13, 12, 0, 0); // UTC 12:00 = 北京 20:00（最后已收盘 4H 结束时间）
-  const tAnalysis = tCut + 90 * 60_000; // 北京 21:30（最近已收盘 5m 时间）
-  // 北京 16:00~21:00 六根 1H K（UTC 08:00~13:00）；20:00-21:00 那根（UTC 12:00）带极端高低点
-  const h1 = [];
-  for (let h = 0; h < 6; h++) {
-    const t = tCut - 4 * H1 + h * H1;
-    const extreme = h === 4; // 北京 20:00-21:00
-    h1.push({ time: t, open: 100, high: extreme ? 999 : 110, low: extreme ? 1 : 90, close: 100, closeTime: t + H1 - 1 });
-  }
-  const rNo = analyzeBias({ candles: h4Bull(), daily: [], weekly: [], price: 118, time: tCut, h1 });
-  const rYes = analyzeBias({ candles: h4Bull(), daily: [], weekly: [], price: 118, time: tCut, analysisTime: tAnalysis, h1 });
+test("P1: analysisTime 决定 09:25-09:30 ET 最后一根盘前 5m 是否已收盘", () => {
+  const tCut = Date.UTC(2026, 7, 7, 13, 25); // 09:25 EDT，最后一根尚未收盘
+  const tAnalysis = Date.UTC(2026, 7, 7, 13, 30); // 09:30 EDT，最后一根刚收盘
+  const first = Date.UTC(2026, 7, 7, 8, 0); // 04:00 EDT
+  const m5 = [
+    { time: first, open: 100, high: 110, low: 90, close: 100, closeTime: first + 5 * 60_000 },
+    { time: tCut, open: 100, high: 999, low: 1, close: 100, closeTime: tAnalysis },
+  ];
+  const base = { symbol: "MUUSDT", candles: h4Bull(), daily: [], weekly: [], price: 118, time: tCut, m5 };
+  const rNo = analyzeBias(base);
+  const rYes = analyzeBias({ ...base, analysisTime: tAnalysis });
   const pmh = (liq) => liq.buySide.find((x) => x.type === "PRE_MARKET_HIGH");
   const pml = (liq) => liq.sellSide.find((x) => x.type === "PRE_MARKET_LOW");
-  // 不传 analysisTime（回退 time = 20:00）→ 20:00-21:00 已收盘 1H K 被遗漏 → 盘前区间不含极端值
+  // 不传 analysisTime → 09:25 K 尚未收盘，盘前区间不含极端值
   assert.equal(pmh(rNo.liquidity).price, 110);
   assert.equal(pml(rNo.liquidity).price, 90);
-  // 传 analysisTime（21:30）→ 盘前区间统计到 21:00 已收盘 K → 含极端值
+  // 传 09:30 analysisTime → 最后一根盘前 5m 已收盘，精确纳入
   assert.equal(pmh(rYes.liquidity).price, 999);
   assert.equal(pml(rYes.liquidity).price, 1);
   // 结构不受 analysisTime 影响（结构仍只用已收盘 4H candles）

@@ -11,8 +11,8 @@
  *
  * 形成时间字段（扫损消息"被扫的流动性是什么时候的"用，用户要对照图表定位该位）：
  *   time  — 形成 K 的开盘时间（ms）：PDH/PDL=昨日日 K、PWH/PWL=上周周 K、EQH/EQL=首个触点 4H K、
- *           EXTERNAL=外部 swing 4H K、PRE_MARKET=盘前区间形成极值的那根 1H K
- *   date  — 盘前区间（PRE_MARKET_HIGH/LOW）的北京日期字符串 "YYYY-MM-DD"（无 highTime/lowTime 的兜底）
+ *           EXTERNAL=外部 swing 4H K、PRE_MARKET=盘前区间形成极值的那根日内 K
+ *   date  — 盘前区间（PRE_MARKET_HIGH/LOW）的纽约交易日 "YYYY-MM-DD"（无 highTime/lowTime 的兜底）
  *   firstTime/lastTime — EQH/EQL 首个/最后触点的 4H K 开盘时间
  *
  * EQH / EQL：两个以上接近的 Swing High / Low（误差默认 0.2%）视为等高点。
@@ -21,9 +21,9 @@
  *   额外记录形成时间信息：touches（触点数量）、firstIndex / lastIndex（在 4H K 线中的位置），
  *   因为 ICT 流动性中"时间"很重要（越近的等高点越有效）。
  *
- * V2.0 盘前区间（PRE_MARKET_HIGH/LOW）：ICT 2022 Asian Range 在美股代币上的对应物。
- *   美股盘前（北京 16:00-21:30）形成的区间高低是开盘后最常被扫的流动性位，
- *   优先级置于 PDH/PDL 之后、EQH/EQL 之前。需要 1h K 线（analyzeBias 的 h1）计算。
+ * V2.1 盘前区间（PRE_MARKET_HIGH/LOW）：仅用于显式识别的美股关联合约。
+ *   用 America/New_York 当地 04:00-09:30 + 5m K 计算，DST 由 IANA 时区处理；
+ *   它是美股盘前流动性，不再称为 ICT Asian Range。
  */
 
 const EQ_TOLERANCE = 0.002; // 0.2%
@@ -125,45 +125,53 @@ function lastCompleted(candles, now = Date.now()) {
 }
 
 /**
- * V2.0 盘前区间（ICT 2022 Asian Range 的美股对应物）：
- *   美股盘前（北京 16:00-21:30，夏令时 EDT 4:00-9:30）形成的区间高低，
- *   是开盘后最常被扫的流动性位（开盘先扫盘前高低 → 再走真方向）。
+ * V2.1 美股盘前区间：纽约当地 04:00-09:30，自动处理 EST/EDT。
  *
- * 取"最近一个盘前时段"（now 之前、北京 open 小时 16-21 的 1H K）的最高/最低。
- *   - 无 1h 数据、非美股交易时段（找不到盘前 K）或区间无波动 → null
- *   - 回放：传历史 now，只认 closeTime <= now 的 1H K，幂等
- * @param {Array} [h1] 1H K 线（{time,open,high,low,close,closeTime}，time/closeTime 为 ms）
+ * 取 now 之前最近一个含已收盘盘前 K 的纽约交易日。使用 5m 可精确包含最后 09:25-09:30；
+ * 更粗 K 线只有在整根完全位于盘前窗口内时才纳入，避免把 09:30 后行情混入。
+ * @param {Array} [intraday] 日内 K 线（推荐 5m）
  * @param {number} [now] 参考时间（ms），默认当前时间
  * @returns {{ high:number, low:number, date:string, bars:number, highTime:number, lowTime:number, activeFrom:number }|null}
- *   highTime/lowTime：盘前区间内形成最高/最低的那根 1H K 的开盘时间（整点），
+ *   highTime/lowTime：盘前区间内形成最高/最低的那根日内 K 的开盘时间，
  *   供扫损消息精确展示"这个盘前位是几点形成的"（仅日期用户在图上找不到）
  */
-export function findPremarketRange(h1, now = Date.now()) {
-  if (!h1 || !h1.length) return null;
-  const BJ = 8 * 3600_000; // 北京时间 = UTC + 8h
-  const bjDate = (k) => new Date(k.time + BJ).toISOString().slice(0, 10); // 北京日期
-  const bjHour = (k) => new Date(k.time + BJ).getUTCHours(); // 北京小时
-  const inWindow = (k) => bjHour(k) >= 16 && bjHour(k) <= 21; // 北京 16:00-21:59（覆盖 21:30 盘前末段）
+export function findPremarketRange(intraday, now = Date.now()) {
+  if (!intraday || !intraday.length) return null;
+  const etParts = (ms) => {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York",
+      year: "numeric", month: "2-digit", day: "2-digit", weekday: "short",
+      hourCycle: "h23", hour: "2-digit", minute: "2-digit",
+    }).formatToParts(new Date(ms));
+    const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+    return { date: `${p.year}-${p.month}-${p.day}`, weekday: p.weekday, minute: Number(p.hour) * 60 + Number(p.minute) };
+  };
+  const inWindow = (k) => {
+    if (k.time == null || k.closeTime == null) return false;
+    const open = etParts(k.time);
+    const close = etParts(k.closeTime);
+    return !["Sat", "Sun"].includes(open.weekday) && open.date === close.date && open.minute >= 4 * 60 && open.minute < 9 * 60 + 30 && close.minute <= 9 * 60 + 30;
+  };
 
-  const closed = h1.filter((k) => k.closeTime && k.closeTime <= now);
+  const closed = intraday.filter((k) => k.closeTime && k.closeTime <= now);
   if (!closed.length) return null;
 
-  // 最近一个盘前时段：从末尾往前找第一根落在盘前窗口的 K 的北京日期
+  // 最近一个盘前时段：从末尾往前找第一根落在盘前窗口的 K 的纽约交易日
   let date = null;
   for (let i = closed.length - 1; i >= 0; i--) {
     if (inWindow(closed[i])) {
-      date = bjDate(closed[i]);
+      date = etParts(closed[i].time).date;
       break;
     }
   }
   if (!date) return null;
 
-  const ks = closed.filter((k) => bjDate(k) === date && inWindow(k));
+  const ks = closed.filter((k) => etParts(k.time).date === date && inWindow(k));
   if (!ks.length) return null;
   const high = Math.max(...ks.map((k) => k.high));
   const low = Math.min(...ks.map((k) => k.low));
   if (high === low) return null; // 盘前无波动 → 不构成区间
-  // 取形成极值的那根 1H K（并列时取最近一根）：扫损消息要精确到"几点形成"
+  // 取形成极值的那根日内 K（并列时取最近一根）：扫损消息要精确到"几点形成"
   const highK = [...ks].reverse().find((k) => k.high === high);
   const lowK = [...ks].reverse().find((k) => k.low === low);
   return {
@@ -177,6 +185,15 @@ export function findPremarketRange(h1, now = Date.now()) {
   };
 }
 
+/** 当前项目明确支持的美股/美股 ETF 关联永续；其他资产不得自动套用盘前语义。 */
+const EQUITY_LINKED_BASES = new Set(["MU", "SNDK", "SOXL", "SPCX", "KORU", "CLU"]);
+
+export function isEquityLinkedSymbol(symbol) {
+  if (!symbol) return false;
+  const normalized = String(symbol).toUpperCase().replace(/USDT$/, "");
+  return EQUITY_LINKED_BASES.has(normalized);
+}
+
 /**
  * @param {Array} dailyKlines  日 K 线（data/binance.js 输出）
  * @param {Array} weeklyKlines 周 K 线
@@ -184,10 +201,11 @@ export function findPremarketRange(h1, now = Date.now()) {
  * @param {number} tolerance    等高点容差（0.2% 默认）
  * @param {number} now          参考时间（ms）。回放时传历史时间，只认该时间前已收盘的日/周 K
  * @param {number} eqLookbackBars EQH/EQL 回看窗口（根 4H K 线，默认 150）
- * @param {Array} [h1Klines]    1H K 线（可选）：美股盘前区间（PRE_MARKET_HIGH/LOW）需要
+ * @param {Array} [intradayKlines] 日内 K（推荐 5m）：仅美股关联标的计算盘前区间
  * @param {Array} [referenceCandles] 已收盘 4H K，用于标记流动性 ACTIVE/SWEPT/BROKEN
+ * @param {Object} [options] { symbol, equityLinked }；默认按 symbol 白名单判断
  */
-export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = EQ_TOLERANCE, now = Date.now(), eqLookbackBars = EQ_LOOKBACK_BARS, h1Klines = null, referenceCandles = null) {
+export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = EQ_TOLERANCE, now = Date.now(), eqLookbackBars = EQ_LOOKBACK_BARS, intradayKlines = null, referenceCandles = null, options = {}) {
   const buySide = [];
   const sellSide = [];
 
@@ -203,8 +221,9 @@ export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = 
     sellSide.push({ type: "PWL", price: prevWeek.low, time: prevWeek.time, group: "HTF", ...(referenceCandles ? { activeFrom: prevWeek.closeTime } : {}) });
   }
 
-  // V2.0 盘前区间（需要 1h K 线；不传/非美股时段 → 忽略）
-  const premkt = findPremarketRange(h1Klines, now);
+  // V2.1 仅美股关联标的启用盘前流动性；BTC/ETH 等 24x7 资产不套用美股 session。
+  const equityLinked = options.equityLinked === true || isEquityLinkedSymbol(options.symbol);
+  const premkt = equityLinked ? findPremarketRange(intradayKlines, now) : null;
   if (premkt) {
     buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high, date: premkt.date, time: premkt.highTime, group: "SESSION", ...(referenceCandles ? { activeFrom: premkt.activeFrom } : {}) });
     sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low, date: premkt.date, time: premkt.lowTime, group: "SESSION", ...(referenceCandles ? { activeFrom: premkt.activeFrom } : {}) });

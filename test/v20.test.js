@@ -75,6 +75,7 @@ test("CONTINUATION + HTF 同向 + 全质量（VALID 回撤位）→ MEDIUM（sco
   const c = computeConfidence({ bias: "BULLISH", structure: struct, structureStatus: "VALID", draw, location: validLocation, pdArray: pdAligned, price: 120, scenario: contBull });
   assert.equal(c.level, "MEDIUM"); // 25+15+25+10−10 = 65 < 75
   assert.equal(c.score, 65);
+  assert.equal(c.confluenceScore, 65);
   assert.ok(c.factors.some((f) => f.name === "Retrace location (weak)"));
   assert.deepEqual(c.checks, {
     structureConfirmed: true,

@@ -22,13 +22,21 @@
  *   Alignment   : HTF 同向 +15（CONTINUATION 必触发），HTF 反向 -10
  *   Quality     : PD array aligned +25（最强）、Liquidity +10
  *   位置因子    : LATE_IMPULSE +15（趋势惯性）、VALID 折价/溢价位 -10（回撤/反抽）
- *   时机因子    : Killzone（Session）内 +10（ICT：活跃窗口内信号有效性更高）
+ *   时机因子    : ICT 固定 Session 内 +10（纽约当地钟表时间，自动处理 DST）
  *   微调        : 距目标 <2% +5（近目标惯性）、Wide range -10（防御）
  *
- * 输出 score(0-100) + level(HIGH/MEDIUM/LOW) + factors(因子明细)。
+ * 输出 confluenceScore(0-100) + level(HIGH/MEDIUM/LOW) + factors(因子明细)。
+ * score 为兼容别名；该值没有经过概率校准，不得展示为成功概率。
  * HIGH ≥ 75，MEDIUM ≥ 40，LOW < 40（经 BTC/ETH 双标的扫描验证：HIGH 75-79% > MEDIUM > LOW）。
  */
-export function computeConfidence({ bias, effectiveBias, structure, structureStatus, location, draw, pdArray, price, scenario, session }) {
+export function computeConfidence({ bias, effectiveBias, structure, structureStatus, location, draw, pdArray, price, scenario, ictSession }) {
+  const result = (level, score, factors, checks) => ({
+    level,
+    confluenceScore: score,
+    score, // 兼容旧调用；该数值是人工共振评分，不是成功概率
+    factors,
+    checks,
+  });
   const checks = {
     structureConfirmed: structure.direction !== "NEUTRAL",
     protectedValid: structureStatus === "VALID",
@@ -44,17 +52,12 @@ export function computeConfidence({ bias, effectiveBias, structure, structureSta
     const factors = [];
     if (!checks.structureConfirmed) factors.push({ name: "Structure not confirmed", value: "0" });
     if (!checks.protectedValid) factors.push({ name: "Protected level invalid", value: "0" });
-    return { level: "LOW", score: 0, factors, checks };
+    return result("LOW", 0, factors, checks);
   }
 
   // 结构方向与已确认 HTF 叙事冲突，且反转证据链尚未闭合时，不输出可交易概率。
   if (effectiveBias === "NEUTRAL" && bias !== "NEUTRAL") {
-    return {
-      level: "LOW",
-      score: 0,
-      factors: [{ name: "HTF conflict: reversal not confirmed", value: "0" }],
-      checks,
-    };
+    return result("LOW", 0, [{ name: "HTF conflict: reversal not confirmed", value: "0" }], checks);
   }
 
   const factors = [];
@@ -104,10 +107,10 @@ export function computeConfidence({ bias, effectiveBias, structure, structureSta
     factors.push({ name: "Retrace location (weak)", value: "-10" });
   }
 
-  // 5. 时机因子：当前 4H 处于该合约活跃窗口（Killzone）内 → 信号有效性更高（ICT 2022）
-  if (session) {
+  // 5. ICT 时机因子：只认课程固定 Session；数据驱动活跃窗口仅供市场活跃度展示。
+  if (ictSession) {
     score += 10;
-    factors.push({ name: "Killzone active", value: "+10" });
+    factors.push({ name: "ICT Session active", value: "+10" });
   }
 
   // 6. 微调：近目标惯性 +5；宽区间防御 -10
@@ -124,7 +127,7 @@ export function computeConfidence({ bias, effectiveBias, structure, structureSta
 
   score = Math.max(0, Math.min(95, Math.round(score)));
   const level = score >= LEVELS.HIGH ? "HIGH" : score >= LEVELS.MEDIUM ? "MEDIUM" : "LOW";
-  return { level, score, factors, checks };
+  return result(level, score, factors, checks);
 }
 
 // ---- 阈值与常量 ----

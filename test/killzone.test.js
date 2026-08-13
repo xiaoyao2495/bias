@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeActiveWindows, lastTradingWeek, killzoneOfK } from "../indicators/killzone.js";
+import { computeActiveWindows, lastTradingWeek, killzoneOfK, activeVolumeWindowAt, ictSessionAt } from "../indicators/killzone.js";
 
 const HOUR = 3600_000;
 /** 北京时刻 → epoch ms（北京 = UTC+8） */
@@ -107,4 +107,19 @@ test("killzoneOfK：防御 — 无窗口/异常 K → null", () => {
   assert.equal(killzoneOfK({ time: bjMs(2026, 8, 6, 20), closeTime: bjMs(2026, 8, 6, 24) }, []), null);
   assert.equal(killzoneOfK(null, [{ start: 20, end: 24, ratio: 28.6 }]), null);
   assert.equal(killzoneOfK({ time: bjMs(2026, 8, 6, 20) }, [{ start: 20, end: 24, ratio: 28.6 }]), null);
+});
+
+test("activeVolumeWindowAt：只按当前时刻命中，不因 4H 将覆盖未来窗口而提前生效", () => {
+  const windows = [{ start: 21, end: 23, ratio: 20 }];
+  assert.equal(activeVolumeWindowAt(bjMs(2026, 8, 6, 20) + 10 * 60_000, windows), null);
+  assert.deepEqual(activeVolumeWindowAt(bjMs(2026, 8, 6, 21) + 10 * 60_000, windows), {
+    ...windows[0], kind: "ACTIVE_VOLUME_WINDOW",
+  });
+});
+
+test("ictSessionAt：America/New_York 自动处理 DST", () => {
+  // 2026-08-06 11:30 UTC = 07:30 EDT；2026-01-06 12:30 UTC = 07:30 EST
+  assert.equal(ictSessionAt(Date.UTC(2026, 7, 6, 11, 30)).name, "NEW_YORK");
+  assert.equal(ictSessionAt(Date.UTC(2026, 0, 6, 12, 30)).name, "NEW_YORK");
+  assert.equal(ictSessionAt(Date.UTC(2026, 7, 6, 16, 0)), null); // 12:00 EDT
 });

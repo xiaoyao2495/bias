@@ -109,7 +109,8 @@ function analyzeAt(bars, daily, weekly, i, k, targetPct, windows) {
     structure: `${structure.direction}/${structure.type}`,
     scenario: bias.scenario ? bias.scenario.label : null,
     confidence: bias.confidence ? bias.confidence.level : null,
-    confidenceScore: bias.confidence ? bias.confidence.score : null,
+    confluenceScore: bias.confidence ? bias.confidence.confluenceScore : null,
+    confidenceScore: bias.confidence ? bias.confidence.score : null, // 历史 schema 兼容
     confidenceFactors: bias.confidence ? bias.confidence.factors : null,
     execution: bias.executionState,
     location: location.location,

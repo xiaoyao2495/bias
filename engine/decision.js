@@ -41,7 +41,7 @@ export function buildDecision({ bias, confidence, draw, price, invalidation }) {
     return { planR: null, opportunity: 0, tradeability: "LOW", decision: "WAIT", reason: "No directional bias" };
   }
 
-  const confScore = confidence && confidence.score != null ? confidence.score : 0;
+  const confScore = confidence?.confluenceScore ?? confidence?.score ?? 0;
   const confLevel = confidence && confidence.level ? confidence.level : "LOW";
 
   // Opportunity = Confidence × Space（space 归一化：planR 2 → 满分）

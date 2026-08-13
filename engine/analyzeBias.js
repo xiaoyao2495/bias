@@ -16,7 +16,7 @@ import { computeLiquidity, liquidityStateForLevel } from "../indicators/liquidit
 import { computeDealingRange } from "../indicators/dealingRange.js";
 import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
 import { computeHtfContext } from "../indicators/scenario.js";
-import { lastTradingWeek, computeActiveWindows, killzoneOfK } from "../indicators/killzone.js";
+import { lastTradingWeek, computeActiveWindows, activeVolumeWindowAt, ictSessionAt } from "../indicators/killzone.js";
 import { scanStructureEvents } from "../indicators/mss.js";
 import { computeDailyBias } from "./dailyBiasEngine.js";
 
@@ -29,20 +29,15 @@ import { computeDailyBias } from "./dailyBiasEngine.js";
  * @param {number} [p.structurePrice] 4H 结构确认价（必须是已收盘 4H close）；不传则回退 price
  * @param {number} p.time     分析时刻（ms，取 closeTime <= time 的已收盘日/周 K；回放 = 4H 收盘点）
  * @param {number} [p.analysisTime] 实时模式的流动性截断时刻（ms）＝当前最近已收盘 5m 的 closeTime。
- *                            日/周/盘前流动性用它截断；不传（回放/审计）→ 回退 time（4H 收盘点）。
- *                            避免盘前区间只统计到上一根已收盘 4H 的结束时间（如 21:30 漏掉 20:00-21:00
- *                            这根已收盘 1H K）。结构/FVG/OB 仍只用 candles（已收盘 4H），不受影响。
- * @param {Array}  [p.h1]     1h K 线（可选，数据驱动 Killzone：上周交易周成交量 → 活跃窗口）。
- *                            传入后统一计算 session（Killzone 标注 + confidence 时机因子）；
- *                            不传（回放/审计）→ session null，无 Killzone 因子，行为不变。
+ *                            日/周/盘前流动性与活跃窗口用它截断；不传（回放/审计）→ 回退 time。
+ * @param {Array}  [p.h1]     1h K 线（可选，上周交易周成交量 → 数据驱动活跃窗口）。
+ *                            传入后计算 activeVolumeWindow；不传则该统计因子为空。
  * @param {number} [p.pdArrayLimit=6] PD Array（FVG/OB）截取数量
- * @param {Object} [p.sessionCandle] 仅用于 Session（活跃窗口）判定的参考 K：传当前进行中 4H
- *   （取其时间范围 [openTime, closeTime)），避免用"上一根已收盘 4H"判断导致最多 4 小时的
- *   窗口滞后。它只提供时间范围，绝不参与 Structure/FVG/OB（那些仍只用 candles）。
- *   不传（回放/审计）→ 回退 candles 末根，行为不变。
- * @returns {{ structure, liquidity, location, pdArray, htfDirection, htfContext, session, bias }}
+ * @param {Array}  [p.m5]     5m K 线（可选，仅美股关联标的用于精确计算盘前 04:00-09:30 ET）。
+ * @param {string} [p.symbol] 合约代码；用于显式限定 PRE_MARKET 流动性的资产范围。
+ * @returns {{ structure, liquidity, location, pdArray, htfDirection, htfContext, activeVolumeWindow, ictSession, session, bias }}
  */
-export function analyzeBias({ candles, daily, weekly, price, structurePrice, time, analysisTime, h1, pdArrayLimit = 6, sessionCandle }) {
+export function analyzeBias({ candles, daily, weekly, price, structurePrice, time, analysisTime, h1, m5, symbol, pdArrayLimit = 6 }) {
   // P1：日/周/盘前流动性截断时刻与结构参考时刻拆分——结构只用已收盘 4H（candles），
   // 流动性截断用 analysisTime（实时 = 最近已收盘 5m 的 closeTime），回放回退 time（4H 收盘点）。
   const cutoff = analysisTime ?? time;
@@ -52,7 +47,7 @@ export function analyzeBias({ candles, daily, weekly, price, structurePrice, tim
   const swings = findSwings(candles);
   const labeled = analyzeSwings(swings);
   const structure = buildStructure(labeled);
-  const liquidity = computeLiquidity(day, week, swings, 0.002, cutoff, 150, h1, candles);
+  const liquidity = computeLiquidity(day, week, swings, 0.002, cutoff, 150, m5, candles, { symbol });
   annotateStructureLiquidityStates(structure, candles);
   const location = computeDealingRange(swings, structure, price);
   const fvgs = findFvgs(candles);
@@ -61,20 +56,17 @@ export function analyzeBias({ candles, daily, weekly, price, structurePrice, tim
   const htfContext = computeHtfContext(day, week, price);
   const htfDirection = htfContext.confirmedDirection;
   const reversalEvidence = findReversalEvidence(candles, structure, liquidity);
-  // Session（数据驱动 Killzone）：上周交易周（周一~五）1h 成交量 → 活跃窗口 →
-  // 当前 4H 覆盖的最长重叠窗口。参考 K 用 sessionCandle（当前进行中 4H 的时间范围）——
-  // 若用已收盘 4H 末根，21:30 会拿 16:00–20:00 那根判断窗口，Session +10 / 活跃窗口展示
-  // 全部滞后最多 4 小时；进行中 K 只取其时间范围，不参与结构。h1 不传/数据不足 → null。
-  let session = null;
+  // 数据驱动活跃窗口只按“当前分析时刻”命中，不能拿整根进行中 4H 的覆盖范围判断，
+  // 否则 20:10 会因该 K 将在 21:00 覆盖活跃窗口而提前获得评分。
+  let activeVolumeWindow = null;
   if (h1 && h1.length) {
-    // 实盘 sessionCandle 是当前进行中 4H，优先用它定位“上周”；回放则严格使用历史 cutoff。
-    const sessionNow = sessionCandle?.closeTime ?? cutoff;
-    const wk = lastTradingWeek(h1, sessionNow);
+    const wk = lastTradingWeek(h1, cutoff);
     if (wk.length >= 24) {
-      const sessionRef = sessionCandle || candles[candles.length - 1];
-      session = killzoneOfK(sessionRef, computeActiveWindows(wk));
+      activeVolumeWindow = activeVolumeWindowAt(cutoff, computeActiveWindows(wk));
     }
   }
+  const ictSession = ictSessionAt(cutoff);
+  const session = activeVolumeWindow; // 兼容旧 state/消息；新代码应读取 activeVolumeWindow
   const bias = computeDailyBias({
     structure,
     liquidity,
@@ -85,10 +77,10 @@ export function analyzeBias({ candles, daily, weekly, price, structurePrice, tim
     htfDirection,
     htfContext,
     reversalEvidence,
-    session,
+    ictSession,
   });
 
-  return { structure, liquidity, location, pdArray, htfDirection, htfContext, session, bias };
+  return { structure, liquidity, location, pdArray, htfDirection, htfContext, activeVolumeWindow, ictSession, session, bias };
 }
 
 function annotateStructureLiquidityStates(structure, candles) {

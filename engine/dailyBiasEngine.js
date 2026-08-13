@@ -35,7 +35,7 @@ import { buildDecision } from "./decision.js";
  * 第一版明确不做：MSS / BOS 分类 / Displacement / 5m Entry / Gate / Notification / Score / AI 判断
  */
 
-export function computeDailyBias({ structure, liquidity, location, price, structurePrice, pdArray, htfDirection, htfContext, reversalEvidence, session }) {
+export function computeDailyBias({ structure, liquidity, location, price, structurePrice, pdArray, htfDirection, htfContext, reversalEvidence, ictSession }) {
   const reason = [];
   const direction = structure.direction;
   // 4H 结构只能由已收盘 4H 确认；price 可继续使用最新 5m 收盘价计算执行空间。
@@ -169,8 +169,8 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
 
   // V2.0：Scenario State（HTF 参照，只描述状态）+ Bias Confidence（只描述可信度）
   const scenario = computeScenario({ direction: structureBias, structureStatus, htfDirection: confirmedHtf });
-  // V2.3：Confidence 改为成功概率评分（Scenario Base + HTF Alignment + Quality − Risk），输出 score/level/factors
-  const confidence = computeConfidence({ bias: structureBias, effectiveBias, structure, structureStatus, location, draw, pdArray: pdArrayRank, price, scenario, session });
+  // V2.3：共振评分（Scenario Base + HTF Alignment + Quality − Risk），不是成功概率。
+  const confidence = computeConfidence({ bias: structureBias, effectiveBias, structure, structureStatus, location, draw, pdArray: pdArrayRank, price, scenario, ictSession });
 
   // V2.1：Bias Explanation Chain（把各组件的依据翻译成人类可读的解释链，不改判定）
   const explanation = buildExplanation({ structure, draw, location, pdArray: pdArrayRank, bias: structureBias, invalidation, structureStatus });
@@ -180,11 +180,26 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
   // 即使 confidence LOW 兜底到 NO_TRADE，语义也不严谨（失效 = 无方向 = WAIT）。
   const decision = buildDecision({ bias: effectiveBias, confidence, draw, price, invalidation });
 
+  // 兼容增强：保留 narrativeBias 字符串，同时输出形成叙事的证据，避免把 HTF 方向本身
+  // 误称为完整 Daily Bias。后续消费者可逐步迁移到 narrativeContext/executionBias。
+  const narrativeContext = {
+    htfDirection: confirmedHtf,
+    structureDirection: structureBias,
+    drawOnLiquidity: draw,
+    location: location?.location || "UNKNOWN",
+    locationContext: location?.context || "UNKNOWN",
+    reversalEvidence: reversalEvidence || null,
+    conflict: narrativeConflict,
+  };
+
   return {
     bias: structureBias,
     structureBias,
     narrativeBias,
     effectiveBias,
+    executionBias: effectiveBias,
+    drawOnLiquidity: draw,
+    narrativeContext,
     structureStatus,
     draw,
     executionState,

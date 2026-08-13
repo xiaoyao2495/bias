@@ -63,10 +63,14 @@ const OPP_M5_LIMIT = 1000;
 /** 同一机会 key 推送冷却（避免同一执行区/同一链条每 10 分钟重复推） */
 const OPP_COOLDOWN_MS = 60 * 60_000;
 
-/** Session 展示（数据驱动活跃窗口）：活跃窗口 20:00-24:00（占比 23.4%） */
+/** 数据驱动活跃成交量窗口展示；它不是 ICT 固定 Killzone。 */
 function sessionText(s) {
   if (!s) return null;
   return `活跃窗口 ${String(s.start).padStart(2, "0")}:00-${String(s.end).padStart(2, "0")}:00（占比 ${s.ratio}%）`;
+}
+
+function ictSessionText(s) {
+  return s ? `ICT Session ${s.label}` : "当前不在 ICT Killzone";
 }
 
 // 市场背景直白化：说明 4H 结构与日线优先、周线兜底的高周期方向关系。
@@ -144,6 +148,9 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       bias: r.bias,
       structureBias: r.structureBias,
       narrativeBias: r.narrativeBias,
+      executionBias: r.executionBias || r.bias,
+      drawOnLiquidity: r.drawOnLiquidity || null,
+      narrativeContext: r.narrativeContext || null,
       htfContext: r.htfContext,
       confidence: r.confidence,
       decision: finalDecision,
@@ -152,7 +159,9 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       location: r.location,
       context: r.context,
       scenario: r.scenario,
-      session: r.session, // ICT Killzone 背景（通知展示）
+      activeVolumeWindow: r.activeVolumeWindow || r.session,
+      ictSession: r.ictSession || null,
+      session: r.session, // 兼容旧 state；语义为 activeVolumeWindow
       quality: r.quality,
       planR: r.planR,
       remotePlanR: r.remotePlanR,
@@ -174,6 +183,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     const item = {
       symbol: r.symbol,
       price: r.price,
+      confluenceScore: r.confluenceScore ?? r.confidenceScore,
       confidenceScore: r.confidenceScore,
       reason: r.reason,
       structureStatus: r.structureStatus,
@@ -329,7 +339,7 @@ export function buildCloseReport(overview) {
   const bjBoundary = new Date(boundary.getTime() + BJ_OFFSET_MS);
   const label = `${String(bjBoundary.getUTCHours()).padStart(2, "0")}:00`;
   // 数据驱动后无全局 Killzone 窗口：统计本时段处于自身活跃窗口的合约数，反映整体活跃度（0 时省略）
-  const activeCount = overview.filter((r) => r.cur?.session || r.session).length;
+  const activeCount = overview.filter((r) => r.cur?.activeVolumeWindow || r.activeVolumeWindow || r.cur?.session || r.session).length;
   const kzText = activeCount > 0 ? ` · 本时段 ${activeCount}/${overview.length} 合约处于活跃窗口` : "";
   const lines = [`**4H 收盘报告**${kzText}（北京 ${label} 收线）`, ""];
   const expanded = [];
@@ -370,7 +380,7 @@ export function buildCloseReport(overview) {
     const marker = spike ? "⚡" : structureEvent || nearInvalidation ? "⚠️" : strongOppositeDisp ? "△" : "•";
     const detail = [];
     detail.push(`${marker} **${r.symbol}** ${up ? "收上" : "收下"} ${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`);
-    detail.push(`方向: ${biasDisplay(cur.bias)} · 模型信心 ${cur.confidence || "-"}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 当前风险 ${risk}`);
+    detail.push(`方向: ${biasDisplay(cur.bias)} · 模型信心 ${cur.confidence || "-"}${(r.confluenceScore ?? r.confidenceScore) != null ? ` · 共振评分 ${r.confluenceScore ?? r.confidenceScore}` : ""} · 当前风险 ${risk}`);
     detail.push(`建议操作: ${reportAction}${cur.decision && cur.decision !== reportAction ? `（模型 ${cur.decision}）` : ""}`);
     detail.push(`环境: ${structureSummary(structureBias, r.structureStatus)} · ${htfSummary(r.htfContext || cur.htfContext)}`);
     // 推动区间（审计）：说清当前 Impulse Range 从哪来、被什么推到哪（ICT Impulse = Liquidity → Displacement → Expansion）
@@ -543,7 +553,8 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
   lines.push(
     "环境:",
     `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,
-    `Session: ${sessionText(cur.session) || "非 Killzone"}`,
+    `活跃成交量: ${sessionText(cur.activeVolumeWindow || cur.session) || "当前不在统计活跃窗口"}`,
+    ictSessionText(cur.ictSession),
     `市场背景: ${scenarioCN(cur.scenario, cur.htfContext)}`,
   );
   // P1-B：5m 结构事件（扫损→收回→MSS 是 ICT 经典链条，标注当前 5m 结构状态）
@@ -552,7 +563,7 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
     const status = ev.confirmed ? "已确认" : ev.realtime ? "实时" : "";
     lines.push(`5m 结构: ${ev.type} ${ev.direction} @ ${ev.level}（${status}）`);
   }
-  lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
+  lines.push(`模型信心: ${cur.confidence}${confidenceScore != null ? ` · 共振评分 ${confidenceScore}` : ""}`);
   lines.push(`操作: ${cur.decision}`);
   return lines.join("<br/>");
 }
@@ -640,7 +651,7 @@ export function buildOverview(list) {
   const lines = [`**4H Bias Monitor**  ${nowHHMM()}`, ""];
   for (const r of list) {
     lines.push(`**${r.symbol}** ${ICON[r.cur.bias] || ""} ${r.cur.bias}`);
-    lines.push(`市场背景: ${scenarioCN(r.cur.scenario, r.cur.htfContext)} · 信心度: ${r.cur.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${formatPlanR(r.cur.planR)})` : ""} · 操作: ${r.cur.decision}`);
+    lines.push(`市场背景: ${scenarioCN(r.cur.scenario, r.cur.htfContext)} · 模型信心: ${r.cur.confidence}${(r.confluenceScore ?? r.confidenceScore) != null ? ` · 共振评分 ${r.confluenceScore ?? r.confidenceScore}` : ""} · 机会质量: ${r.cur.quality}${r.cur.planR != null ? ` (${formatPlanR(r.cur.planR)})` : ""} · 操作: ${r.cur.decision}`);
     lines.push("");
   }
   return lines.join("<br/>");
@@ -776,7 +787,7 @@ export function buildOpportunity(op, env) {
     const remaining = Number.isFinite(op.marketState.remainingR) ? formatPlanR(op.marketState.remainingR) : "-";
     lines.push(`当前状态: 已运行 ${progress}R · 剩余空间比 ${remaining}`);
   }
-  lines.push(`环境: ${ICON[cur.bias] || ""} ${cur.bias || "-"} · 信心度 ${cur.confidence || "-"}${env.confidenceScore != null ? ` ${env.confidenceScore}` : ""} · 操作 ${cur.decision || "-"} · ${sessionText(cur.session) || "非活跃窗口"}`);
+  lines.push(`环境: ${ICON[cur.bias] || ""} ${cur.bias || "-"} · 模型信心 ${cur.confidence || "-"}${(env.confluenceScore ?? env.confidenceScore) != null ? ` · 共振评分 ${env.confluenceScore ?? env.confidenceScore}` : ""} · 操作 ${cur.decision || "-"} · ${sessionText(cur.activeVolumeWindow || cur.session) || "非活跃窗口"} · ${ictSessionText(cur.ictSession)}`);
   if (env.amd) lines.push(`阶段: ${amdSummary(env.amd)}`);
   lines.push(`触发: ${op.trigger}`);
   if (keyMss) lines.push(`结论: 有效的5m转向证据；${op.displacementConfirmed ? "带位移确认" : "未形成位移/FVG，不是最高质量信号"}，操作 WATCH`);
@@ -844,12 +855,13 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
       lines.push("大周期临时突破已解除，继续采用上次收盘确认方向");
     }
   }
-  if (cur.session) lines.push(`Session: ${sessionText(cur.session)}`);
+  if (cur.activeVolumeWindow || cur.session) lines.push(`活跃成交量: ${sessionText(cur.activeVolumeWindow || cur.session)}`);
+  if (cur.ictSession) lines.push(ictSessionText(cur.ictSession));
   // 辅助状态：OB 细类（ICT 2022 L4），仅在有关注价值时显示，避免噪音
   const ob = obText(cur.ob, cur.bias, price);
   if (ob) lines.push(ob);
-  if (changes.includes("confidence")) lines.push(`信心度: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
-  else if (biasFlipped) lines.push(`信心度: ${cur.confidence}${confidenceScore != null ? ` ${confidenceScore}` : ""}`);
+  if (changes.includes("confidence")) lines.push(`模型信心: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` · 共振评分 ${confidenceScore}` : ""}`);
+  else if (biasFlipped) lines.push(`模型信心: ${cur.confidence}${confidenceScore != null ? ` · 共振评分 ${confidenceScore}` : ""}`);
   if (changes.includes("decision")) lines.push(`操作: ${prev.decision} → ${cur.decision}`);
   else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
   if (cur.directionDecision && cur.directionDecision !== cur.decision) lines.push(`方向评级: ${cur.directionDecision}（执行区尚未就绪）`);
@@ -931,8 +943,8 @@ function klineSpan(openMs) {
  *   PDH/PDL/PWH/PWL → 日/周 K（显示日期，日 K 恒为北京 08:00 开盘，时间无信息量）
  *   EQH/EQL/EXTERNAL → 4H swing K（显示日期+时间，精确到该根 4H）
  *   INTERNAL_HIGH/LOW → 1H swing K（显示日期+时间，精确到该根 1H）
- *   PRE_MARKET_HIGH/LOW → 16:00-21:00 区间（虚拟币无盘前概念，不标时段名，只显示形成极值的
- *     那根 1H K 时间）；仅旧数据无 highTime/lowTime 时回退显示日期
+ *   PRE_MARKET_HIGH/LOW → 纽约 04:00-09:30 盘前区间（仅美股关联合约，自动处理夏/冬令时；
+ *     显示形成极值的日内 K 时间）；仅旧数据无 highTime/lowTime 时回退显示日期
  * 无形成时间（旧数据/未注入）→ null，消息里省略该段。
  */
 function levelFormedText(sweep) {

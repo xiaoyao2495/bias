@@ -214,6 +214,10 @@ test("4H 与已确认 HTF 冲突：证据未闭环保持中性，扫损+位移 M
 
   const confirmed = computeDailyBias({ ...base, reversalEvidence: { confirmed: true, sweep: {}, mss: {} } });
   assert.equal(confirmed.effectiveBias, "BULLISH");
+  assert.equal(confirmed.executionBias, "BULLISH");
+  assert.equal(confirmed.narrativeContext.htfDirection, "BEARISH");
+  assert.equal(confirmed.narrativeContext.structureDirection, "BULLISH");
+  assert.deepEqual(confirmed.drawOnLiquidity, confirmed.draw);
 });
 
 // ---- V1.9 Location Context ----

@@ -45,11 +45,11 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     getHistory(symbol, "4h", HISTORY["4h"], { force: force4h }),
     getHistory(symbol, "1d", HISTORY["1d"]),
     getHistory(symbol, "1w", HISTORY["1w"]),
-    // 5m 用于流动性扫损/位移检测（辅助信息，缓存 TTL 5 分钟）；拉取失败降级为 []，
-    // 不阻断主分析（否则 5m 抖动会导致整个合约分析失败）
-    getKlines(symbol, "5m", 100).catch(() => []),
-    // 1h 用于数据驱动 Killzone（活跃窗口）：只取上周一~五（上周交易周）的 1h 成交量分布，
-    // 缓存 TTL 一周（每周一刷新，分布短期稳定无需每轮重算）；拉取失败降级为 [] → 非 Killzone
+    // 5m 同时用于盘前区间、流动性扫损和位移检测。1000 根覆盖约 3.5 天，
+    // 可跨周末保留最近完整盘前；与机会扫描共用同一份缓存。拉取失败降级为 []。
+    getHistory(symbol, "5m", 1000).catch(() => []),
+    // 1h 用于数据驱动活跃成交量窗口：只取上周一~五的 1h 成交量分布；
+    // 缓存 TTL 一周；拉取失败降级为 []，不影响 ICT Session 独立标注。
     getKlines(symbol, "1h", 720).catch(() => []),
   ]);
 
@@ -90,13 +90,10 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   }
 
   // 核心判定链路（与 Historical Scanner 共用 analyzeBias，见 engine/analyzeBias.js）
-  // session（数据驱动 Killzone）在 analyzeBias 内统一计算：h1 → 上周交易周成交量 →
-  // 当前 4H K 覆盖的活跃窗口，同时供 confidence 时机因子与展示使用。
-  // P0-4：Session 参考 K 与结构参考 K 拆分——sessionCandle 用原始 h4 末根（进行中 4H）的
-  // 时间范围，否则 21:30 会拿 16:00–20:00 那根已收盘 K 判断活跃窗口（滞后最多 4 小时）；
-  // 进行中 K 只提供时间范围，不参与任何结构/FVG/OB 判定（那些仍只用 closed4h）。
-  const sessionCandle = h4[h4.length - 1];
-  const { structure, liquidity, location, pdArray, session, htfContext, bias } = analyzeBias({
+  // 活跃成交量窗口按 analysisTime 精确命中；ICT Session 独立标注，不再借整根进行中 4H
+  // 的未来覆盖范围提前生效。m5 同时用于美股关联标的的 04:00-09:30 ET 盘前流动性。
+  const { structure, liquidity, location, pdArray, activeVolumeWindow, ictSession, session, htfContext, bias } = analyzeBias({
+    symbol,
     candles: closed4h,
     daily,
     weekly,
@@ -105,7 +102,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     time,
     analysisTime,
     h1,
-    sessionCandle,
+    m5,
   });
   // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导；
   // 同时供扫损 Judas Swing 判定（方向与 bias 相反的 NY Open 扫损 = 开盘假动作）
@@ -183,20 +180,24 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     .filter((z) => z && z.top != null && z.bottom != null && z.status === "VALID")
     .map((z) => ({ type: z.type, top: z.top, bottom: z.bottom, location: z.location }));
 
-  // 数据驱动 Killzone（真实活跃窗口）：由 analyzeBias 计算（见上）。
-  // 返回 { start, end, ratio } | null（ratio = 窗口成交量占比%）；无数据 → null → "非 Killzone"
+  // activeVolumeWindow 是统计窗口；ictSession 是课程固定时段，两者不得混称。
 
   return {
     symbol,
     time: new Date(time).toISOString().slice(0, 16).replace("T", " "),
     price,
     session,
+    activeVolumeWindow,
+    ictSession,
     // 最后已收盘 4H（收盘报告用：收于开盘上方/下方）
     last4h: { open: lastClosed.open, close: lastClosed.close, openTime: lastClosed.time, time: lastClosed.closeTime },
     // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导
     bias: effectiveBias,
+    executionBias: bias.executionBias || effectiveBias,
     structureBias: bias.structureBias || bias.bias,
     narrativeBias: bias.narrativeBias || bias.bias,
+    drawOnLiquidity: bias.drawOnLiquidity || null,
+    narrativeContext: bias.narrativeContext || null,
     htfContext,
     provisionalStructureBreak: bias.provisionalStructureBreak || null,
     reversalEvidence: bias.reversalEvidence || null,
@@ -210,7 +211,8 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
       : null,
     scenario: bias.scenario ? bias.scenario.label : "-",
     confidence: bias.confidence ? bias.confidence.level : "-",
-    confidenceScore: bias.confidence ? bias.confidence.score : null,
+    confluenceScore: bias.confidence ? bias.confidence.confluenceScore : null,
+    confidenceScore: bias.confidence ? bias.confidence.score : null, // 兼容旧 state/报告
     sweep, // { side, type, level, sweptPrice, close, time } | null（流动性扫损事件）
     mss5m, // { direction, lastEvent } | null（5m 层最近 MSS/BOS 事件，扫损消息标注）
     displacement, // { time, direction, ratio, structureBreak, fvg } | null（位移 K，最近 4 小时内，三条件证据齐备）
@@ -345,9 +347,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         }
         console.log(`${r.symbol}  ${r.price}`);
         console.log(`Bias: ${icon[r.bias] || ""} ${r.bias}`);
-        console.log(`Session: ${r.session ? `活跃窗口 ${String(r.session.start).padStart(2, "0")}:00-${String(r.session.end).padStart(2, "0")}:00（占比 ${r.session.ratio}%）` : "非 Killzone"}`);
+        console.log(`活跃成交量: ${r.activeVolumeWindow ? `窗口 ${String(r.activeVolumeWindow.start).padStart(2, "0")}:00-${String(r.activeVolumeWindow.end).padStart(2, "0")}:00（占比 ${r.activeVolumeWindow.ratio}%）` : "当前不在统计活跃窗口"}`);
+        console.log(`ICT Session: ${r.ictSession ? r.ictSession.label : "当前不在 Killzone"}`);
         console.log(`Scenario: ${r.scenario}`);
-        console.log(`信心度: ${r.confidence}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""}`);
+        console.log(`模型信心: ${r.confidence}${r.confluenceScore != null ? ` · 共振评分 ${r.confluenceScore}` : ""}`);
         console.log(`机会质量: ${r.quality}${r.planR != null ? ` (planR ${r.planR.toFixed(2)})` : ""}`);
         console.log(`操作: ${r.decisionLabel}`);
         console.log(`原因: ${r.reason}`);

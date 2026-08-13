@@ -8,9 +8,9 @@
     "test": "node --test"
   },
   "engines": {
-    "node": ">=18.13.0"
+    "node": ">=18.17.0"
   },
   "dependencies": {
-    "undici": "^8.10.0"
+    "undici": "^6.28.0"
   }
 }
