@@ -52,10 +52,11 @@ function log(...args) {
 // 模块加载即打点：诊断 pm2 进程是否真正加载/进入了该脚本
 log(`[runMonitor] 模块加载（argv1=${process.argv[1] || "(无)"}，pm_exec_path=${process.env.pm_exec_path || "(无)"}，cwd=${process.cwd()}）`);
 
-const TOP_N = 20;
+const TOP_N = 30;
 /** 监控排除名单：用户不关注的合约（不参与 Top 排名，若在 N 内由后续补位）
- *  SOLUSDT 数据异常；KORUUSDT 标的为韩国半导体股，流动性时段特殊且近期误报频繁 */
-const EXCLUDE_SYMBOLS = ["SOLUSDT", "KORUUSDT"];
+ *  SOLUSDT 数据异常；KORUUSDT 标的为韩国半导体股，流动性时段特殊且近期误报频繁；
+ *  SNXXUSDT、SKHYNIXUSDT 用户指定屏蔽 */
+const EXCLUDE_SYMBOLS = ["SOLUSDT", "KORUUSDT", "SNXXUSDT", "SKHYNIXUSDT"];
 const ICON = { BULLISH: "🟢", BEARISH: "🔴", NEUTRAL: "⚪" };
 const BJ_OFFSET_MS = 8 * 3600_000;
 /** 5m 机会扫描：5m 历史长度（≈3.5 天，swing 结构/执行区/MSS-BOS 历史用，缓存 TTL 5 分钟） */
@@ -113,7 +114,7 @@ export function resolveFinalAction(r, prev = null) {
  * 执行一轮监控：扫描 → 比较 → 推送变化 → 存状态。
  * @param {Object} [p]
  * @param {string[]} [p.symbols] 指定合约列表（默认 Top20，排除 SOLUSDT/KORUUSDT）
- * @param {number} [p.topN=20]
+ * @param {number} [p.topN=30]
  * @param {boolean} [p.dryRun] 只计算不推送
  */
 export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {}) {
