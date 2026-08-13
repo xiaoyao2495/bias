@@ -209,6 +209,10 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     execution: bias.executionState || "-",
     location: location.location,
     context: location.context || "-",
+    // 推动区间（审计）：区间高低 + 起点/终点 swing 语义（ICT Impulse = Liquidity → Displacement → Expansion）
+    range: location && location.rangeType && location.rangeType !== "NONE"
+      ? { high: location.high, low: location.low, rangeType: location.rangeType, startReason: location.startReason || null, endReason: location.endReason || null }
+      : null,
   };
 }
 
@@ -252,6 +256,7 @@ export function displacementFor4h(displacements, candle) {
         time: last.time,
         direction: last.direction,
         ratio: last.ratio,
+        quality: last.quality || (last.ratio >= 2 ? "HIGH" : "MEDIUM"), // 透传位移质量（旧输入无 quality 时按 ratio 兜底）
         structureBreak: last.structureBreak,
         fvg: last.fvg,
         count: inCandle.length,

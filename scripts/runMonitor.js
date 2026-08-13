@@ -373,6 +373,11 @@ export function buildCloseReport(overview) {
     detail.push(`方向: ${biasDisplay(cur.bias)} · 模型信心 ${cur.confidence || "-"}${r.confidenceScore != null ? ` ${r.confidenceScore}` : ""} · 当前风险 ${risk}`);
     detail.push(`建议操作: ${reportAction}${cur.decision && cur.decision !== reportAction ? `（模型 ${cur.decision}）` : ""}`);
     detail.push(`环境: ${structureSummary(structureBias, r.structureStatus)} · ${htfSummary(r.htfContext || cur.htfContext)}`);
+    // 推动区间（审计）：说清当前 Impulse Range 从哪来、被什么推到哪（ICT Impulse = Liquidity → Displacement → Expansion）
+    if (r.range && r.range.startReason && r.range.endReason) {
+      const rangeTypeCN = r.range.rangeType === "IMPULSE_BULLISH" ? "多头推动" : r.range.rangeType === "IMPULSE_BEARISH" ? "空头推动" : "近期区间";
+      detail.push(`推动区间: ${rangeTypeCN}（${r.range.startReason} ${fmtPrice(r.range.low)} → ${r.range.endReason} ${fmtPrice(r.range.high)}）`);
+    }
 
     if (conflict) detail.push(`状态: 4H 与大周期方向冲突，反转证据不足，暂时保持中性`);
     if (r.structureStatus === "INVALIDATED" && r.mss) {
@@ -452,7 +457,7 @@ function displacementSummary(d, candleUp, effectiveBias, candleClose) {
   const counts = d.count > 1
     ? `；本4H位移 向上${d.upCount ?? 0}次/向下${d.downCount ?? 0}次，主导${d.dominantDirection === "UP" ? "向上" : d.dominantDirection === "DOWN" ? "向下" : "均衡"}`
     : "";
-  return `短线行为: ${time}5m${up ? "向上" : "向下"}位移 ${d.ratio.toFixed(1)}x（${behavior}${counts}；${dispEvidence(d)}）`;
+  return `短线行为: ${time}5m${up ? "向上" : "向下"}位移 ${d.ratio.toFixed(1)}x${d.quality === "HIGH" ? "（高质量）" : ""}（${behavior}${counts}；${dispEvidence(d)}）`;
 }
 
 function closeReportRisk({ structureEvent, nearInvalidation, spike, strongOppositeDisp, oppositeDisp, failedDisp }) {

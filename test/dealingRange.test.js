@@ -18,6 +18,9 @@ test("Case1 Bullish: LOW100→HIGH150→LOW130→HIGH180 → IMPULSE_BULLISH 130
   assert.equal(r.equilibrium, 155);
   assert.equal(r.location, "DISCOUNT"); // 120 < 155
   assert.equal(r.context, "DISCOUNT_VALID"); // V1.9：距高点 (180-120)/50=100% > 60%，有效折价区
+  // 审计字段：起点 = 回撤低点(HL)，终点 = 结构推进高点(HH)
+  assert.equal(r.startReason, "回撤低点(HL)");
+  assert.equal(r.endReason, "结构推进高点(HH)");
 });
 
 test("Case2 Bearish: HIGH200→LOW150→HIGH170→LOW120 → IMPULSE_BEARISH 170-120（最近 LH→LL 下跌）", () => {
@@ -31,6 +34,9 @@ test("Case2 Bearish: HIGH200→LOW150→HIGH170→LOW120 → IMPULSE_BEARISH 170
   assert.equal(r.equilibrium, 145);
   assert.equal(r.location, "PREMIUM"); // 160 > 145
   assert.equal(r.context, "PREMIUM_VALID"); // V1.9：距低点 (160-120)/50=80% > 60%，有效溢价区
+  // 审计字段：起点 = 反抽高点(LH)，终点 = 结构推进低点(LL)
+  assert.equal(r.startReason, "反抽高点(LH)");
+  assert.equal(r.endReason, "结构推进低点(LL)");
 });
 
 test("Case3 Fallback: 无结构 → RECENT（最近 swing 高低）", () => {

@@ -76,6 +76,9 @@ export function findDisplacements(h5m, { lookback = 20, threshold = 1.5 } = {}) 
       body,
       avgBody,
       ratio,
+      // 位移质量（审计/展示）：满足三条件才有此条目，因此最低为 MEDIUM；
+      // ratio ≥ 2× 平均实体为强位移（与 4H 收盘报告的 strongOppositeDisp 同语义）
+      quality: ratio >= 2 ? "HIGH" : "MEDIUM",
       close: c.close,
       index: i, // 在 closed（已收盘）数组中的索引——供 mss.js 与结构事件对齐打标
       // FVG 真正确认的 K 索引（P1 防前视）：

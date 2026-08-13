@@ -56,6 +56,7 @@ test("UP：BODY + STRUCTURE BREAK + FVG 三条件齐备 → 输出位移（含�
   assert.equal(out[0].body, 6);
   assert.equal(out[0].ratio, 6); // 前 20 根 body 均 1 → avgBody=1
   assert.equal(out[0].close, 106);
+  assert.equal(out[0].quality, "HIGH"); // ratio 6 ≥ 2 → 高质量位移
   // 结构突破：最近 Swing High 101.5（index 8）
   assert.deepEqual(out[0].structureBreak, { type: "BOS", direction: "UP", level: 101.5, swingIndex: 8 });
   // FVG 证据（位移 K 为第三根）：top = K20.low(99.9) > bottom = K18.high(99.8)，中间根 = 19
@@ -69,6 +70,7 @@ test("DOWN：三条件齐备 → 跌破最近 Swing Low + bearish FVG", () => {
   assert.equal(out[0].direction, "DOWN");
   assert.equal(out[0].body, 6);
   assert.ok(out[0].ratio >= 5); // avgBody = (19×1 + 0.5)/20 = 0.975
+  assert.equal(out[0].quality, "HIGH"); // ratio ≥ 2 → 高质量位移
   assert.deepEqual(out[0].structureBreak, { type: "BOS", direction: "DOWN", level: 98.5, swingIndex: 8 });
   // FVG 证据（位移 K 为中间根）：top = K19.low(100.0) > bottom = K21.high(99.8)，中间根 = 20
   assert.deepEqual(out[0].fvg, { top: 100.0, bottom: 99.8, middleIndex: 20 });

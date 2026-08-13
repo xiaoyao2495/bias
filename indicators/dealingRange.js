@@ -37,7 +37,7 @@ export function computeDealingRange(swings, structure, price) {
   const range = findImpulseRange(swings, structure) || findRecentRange(swings);
 
   if (!range) {
-    return { high: null, low: null, equilibrium: null, location: "UNKNOWN", rangeType: "NONE", context: "UNKNOWN" };
+    return { high: null, low: null, equilibrium: null, location: "UNKNOWN", rangeType: "NONE", context: "UNKNOWN", startReason: null, endReason: null };
   }
 
   const equilibrium = (range.high + range.low) / 2;
@@ -47,7 +47,7 @@ export function computeDealingRange(swings, structure, price) {
 
   const context = computeLocationContext(range, structure, price, equilibrium);
 
-  return { high: range.high, low: range.low, equilibrium, location, rangeType: range.type, context };
+  return { high: range.high, low: range.low, equilibrium, location, rangeType: range.type, context, startReason: range.startReason || null, endReason: range.endReason || null };
 }
 
 /**
@@ -75,6 +75,10 @@ export function computeLocationContext(range, structure, price, equilibrium) {
  *   BULLISH : 最后一个 HH 与其之前最近的 LOW → { low: LOW, high: HH }
  *   BEARISH : 最后一个 LL 与其之前最近的 HIGH → { low: LL, high: HIGH }
  * 支持直接传入已打标的 swings（带 label），否则内部调用 analyzeSwings 打标。
+ *
+ * 审计字段 startReason / endReason（ICT 2022：Impulse = Liquidity → Displacement → Expansion）：
+ *   描述区间起点/终点 swing 的结构语义（是回撤位、外部启动位还是结构推进位），
+ *   供消息/日志说清"这个区间从哪来、被什么推到哪"，不改任何行为。
  */
 export function findImpulseRange(swings, structure) {
   if (!structure || (structure.direction !== "BULLISH" && structure.direction !== "BEARISH")) {
@@ -95,7 +99,15 @@ export function findImpulseRange(swings, structure) {
       }
     }
     if (hh && low) {
-      return { high: hh.price, low: low.price, highIndex: hh.index, lowIndex: low.index, type: "IMPULSE_BULLISH" };
+      return {
+        high: hh.price,
+        low: low.price,
+        highIndex: hh.index,
+        lowIndex: low.index,
+        type: "IMPULSE_BULLISH",
+        startReason: low.label === "LL" ? "外部结构启动低点(LL)" : "回撤低点(HL)",
+        endReason: "结构推进高点(HH)",
+      };
     }
   } else if (structure.direction === "BEARISH") {
     let ll = null;
@@ -109,7 +121,15 @@ export function findImpulseRange(swings, structure) {
       }
     }
     if (ll && high) {
-      return { high: high.price, low: ll.price, highIndex: high.index, lowIndex: ll.index, type: "IMPULSE_BEARISH" };
+      return {
+        high: high.price,
+        low: ll.price,
+        highIndex: high.index,
+        lowIndex: ll.index,
+        type: "IMPULSE_BEARISH",
+        startReason: high.label === "HH" ? "外部结构启动高点(HH)" : "反抽高点(LH)",
+        endReason: "结构推进低点(LL)",
+      };
     }
   }
 
@@ -126,5 +146,13 @@ export function findRecentRange(swings) {
   }
 
   if (!high || !low) return null;
-  return { high: high.price, low: low.price, highIndex: high.index, lowIndex: low.index, type: "RECENT" };
+  return {
+    high: high.price,
+    low: low.price,
+    highIndex: high.index,
+    lowIndex: low.index,
+    type: "RECENT",
+    startReason: "最近摆动低点",
+    endReason: "最近摆动高点",
+  };
 }

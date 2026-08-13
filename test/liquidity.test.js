@@ -26,16 +26,16 @@ test("PDH/PDL/PWH/PWL: 取最近已收盘的日/周 K 线", () => {
   const l = computeLiquidity(daily, weekly, [], 0.002);
 
   assert.deepEqual(l.buySide, [
-    { type: "PWH", price: 60000, time: 0 },
-    { type: "PDH", price: 50000, time: 0 },
+    { type: "PWH", price: 60000, time: 0, group: "HTF" },
+    { type: "PDH", price: 50000, time: 0, group: "HTF" },
   ]);
   assert.deepEqual(l.sellSide, [
-    { type: "PDL", price: 48000, time: 0 },
-    { type: "PWL", price: 52000, time: 0 },
+    { type: "PDL", price: 48000, time: 0, group: "HTF" },
+    { type: "PWL", price: 52000, time: 0, group: "HTF" },
   ]);
   // ICT 优先级：买侧 PWH > PDH，卖侧 PWL > PDL（time = 形成该位 K 线的开盘时间）
-  assert.deepEqual(l.primaryBuyDraw, { type: "PWH", price: 60000, time: 0 });
-  assert.deepEqual(l.primarySellDraw, { type: "PWL", price: 52000, time: 0 });
+  assert.deepEqual(l.primaryBuyDraw, { type: "PWH", price: 60000, time: 0, group: "HTF" });
+  assert.deepEqual(l.primarySellDraw, { type: "PWL", price: 52000, time: 0, group: "HTF" });
 });
 
 test("EQH: 0.2% 容差内的多个高点归为等高点（含时间信息）", () => {

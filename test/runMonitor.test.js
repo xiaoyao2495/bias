@@ -155,9 +155,9 @@ test("buildSweep: 16:00-21:00 区间位无 highTime/lowTime（旧数据）→ �
   assert.ok(!msg.includes("盘前"), "虚拟币消息不应出现盘前字样");
 });
 
-test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据）", () => {
+test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据）+ 推动区间审计行", () => {
   const msg = buildCloseReport([
-    { symbol: "BTCUSDT", last4h: { open: 100, close: 101.2 }, displacement: { direction: "UP", ratio: 2, structureBreak: { type: "BOS", direction: "UP", level: 101.5 }, fvg: { top: 101.5, bottom: 99.9 } }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 52 },
+    { symbol: "BTCUSDT", last4h: { open: 100, close: 101.2 }, displacement: { direction: "UP", ratio: 2, quality: "HIGH", structureBreak: { type: "BOS", direction: "UP", level: 101.5 }, fvg: { top: 101.5, bottom: 99.9 } }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 52, range: { rangeType: "IMPULSE_BULLISH", low: 100, high: 101.5, startReason: "回撤低点(HL)", endReason: "结构推进高点(HH)" } },
     { symbol: "ETHUSDT", last4h: { open: 100, close: 99.5 }, displacement: null, cur: { bias: "BEARISH", confidence: "LOW" }, confidenceScore: 10 },
   ]);
   assert.match(msg, /\*\*4H 收盘报告\*\*/);
@@ -165,6 +165,8 @@ test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据�
   assert.match(msg, /\*\*BTCUSDT\*\* 收上 \+1.20%/);
   assert.match(msg, /模型信心 MEDIUM 52 · 当前风险 中/);
   assert.match(msg, /收盘重新跌回BOS下方，向上推动失败/);
+  assert.match(msg, /推动区间: 多头推动（回撤低点\(HL\) 100 → 结构推进高点\(HH\) 101\.5）/);
+  assert.match(msg, /位移 2\.0x（高质量）/);
   assert.match(msg, /\*\*ETHUSDT\*\* -0.50% · 🔴 空头 · 风险低 · WAIT/);
 });
 

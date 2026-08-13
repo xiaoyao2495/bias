@@ -73,6 +73,7 @@ export function rankLiquidityTargets(structure, liquidity, direction, price) {
       type: isBuy ? "EXTERNAL_HIGH" : "EXTERNAL_LOW",
       price: ext,
       priority: 1,
+      group: "HTF",
       reason: isBuy ? "External swing high (HTF objective)" : "External swing low (HTF objective)",
     });
   }
@@ -83,7 +84,7 @@ export function rankLiquidityTargets(structure, liquidity, direction, price) {
   for (const t of priorityList) {
     const found = pool.find((x) => x.type === t);
     if (found) {
-      candidates.push({ type: t, price: found.price, priority: priorityList.indexOf(t) + 2, reason: TYPE_REASON[t] });
+      candidates.push({ type: t, price: found.price, priority: priorityList.indexOf(t) + 2, ...(found.group ? { group: found.group } : {}), reason: TYPE_REASON[t] });
     }
   }
 
@@ -97,6 +98,7 @@ export function rankLiquidityTargets(structure, liquidity, direction, price) {
         type: isBuy ? "INTERNAL_HIGH" : "INTERNAL_LOW",
         price: lastSwing.price,
         priority: 5,
+        group: "SWING",
         reason: isBuy ? "Internal swing high" : "Internal swing low",
       });
     }
@@ -107,7 +109,7 @@ export function rankLiquidityTargets(structure, liquidity, direction, price) {
   const alternatives = sorted
     .slice(1)
     .sort((a, b) => (isBuy ? a.price - b.price : b.price - a.price)) // 从近到远
-    .map(({ type, price }) => ({ type, price }));
+    .map(({ type, price, group }) => ({ type, price, ...(group ? { group } : {}) }));
 
   return { primary, alternatives };
 }
@@ -191,21 +193,21 @@ export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = 
 
   const prevDay = lastCompleted(dailyKlines, now);
   if (prevDay) {
-    buySide.push({ type: "PDH", price: prevDay.high, time: prevDay.time, ...(referenceCandles ? { activeFrom: prevDay.closeTime } : {}) });
-    sellSide.push({ type: "PDL", price: prevDay.low, time: prevDay.time, ...(referenceCandles ? { activeFrom: prevDay.closeTime } : {}) });
+    buySide.push({ type: "PDH", price: prevDay.high, time: prevDay.time, group: "HTF", ...(referenceCandles ? { activeFrom: prevDay.closeTime } : {}) });
+    sellSide.push({ type: "PDL", price: prevDay.low, time: prevDay.time, group: "HTF", ...(referenceCandles ? { activeFrom: prevDay.closeTime } : {}) });
   }
 
   const prevWeek = lastCompleted(weeklyKlines, now);
   if (prevWeek) {
-    buySide.push({ type: "PWH", price: prevWeek.high, time: prevWeek.time, ...(referenceCandles ? { activeFrom: prevWeek.closeTime } : {}) });
-    sellSide.push({ type: "PWL", price: prevWeek.low, time: prevWeek.time, ...(referenceCandles ? { activeFrom: prevWeek.closeTime } : {}) });
+    buySide.push({ type: "PWH", price: prevWeek.high, time: prevWeek.time, group: "HTF", ...(referenceCandles ? { activeFrom: prevWeek.closeTime } : {}) });
+    sellSide.push({ type: "PWL", price: prevWeek.low, time: prevWeek.time, group: "HTF", ...(referenceCandles ? { activeFrom: prevWeek.closeTime } : {}) });
   }
 
   // V2.0 盘前区间（需要 1h K 线；不传/非美股时段 → 忽略）
   const premkt = findPremarketRange(h1Klines, now);
   if (premkt) {
-    buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high, date: premkt.date, time: premkt.highTime, ...(referenceCandles ? { activeFrom: premkt.activeFrom } : {}) });
-    sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low, date: premkt.date, time: premkt.lowTime, ...(referenceCandles ? { activeFrom: premkt.activeFrom } : {}) });
+    buySide.push({ type: "PRE_MARKET_HIGH", price: premkt.high, date: premkt.date, time: premkt.highTime, group: "SESSION", ...(referenceCandles ? { activeFrom: premkt.activeFrom } : {}) });
+    sellSide.push({ type: "PRE_MARKET_LOW", price: premkt.low, date: premkt.date, time: premkt.lowTime, group: "SESSION", ...(referenceCandles ? { activeFrom: premkt.activeFrom } : {}) });
   }
 
   // EQH/EQL 只取近端 swing（按 4H K 线 index 回看）
@@ -213,10 +215,10 @@ export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = 
   const recentSwings = swings.filter((s) => s.index >= maxIdx - eqLookbackBars + 1);
 
   const eqh = findEqualHighs(recentSwings, tolerance);
-  if (eqh) buySide.push({ type: "EQH", ...eqh, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eqh.formedIndex) ?? eqh.formedTime } : {}) });
+  if (eqh) buySide.push({ type: "EQH", group: "HTF", ...eqh, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eqh.formedIndex) ?? eqh.formedTime } : {}) });
 
   const eql = findEqualLows(recentSwings, tolerance);
-  if (eql) sellSide.push({ type: "EQL", ...eql, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eql.formedIndex) ?? eql.formedTime } : {}) });
+  if (eql) sellSide.push({ type: "EQL", group: "HTF", ...eql, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eql.formedIndex) ?? eql.formedTime } : {}) });
 
   if (referenceCandles) {
     annotateLiquidityStates(buySide, true, referenceCandles);
