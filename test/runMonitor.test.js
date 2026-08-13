@@ -76,7 +76,7 @@ test("buildChanged: 非 bias 变化 — ℹ️ 头、信心度/操作 旧→新�
   assert.match(msg, /结构: VALID（新多头结构形成（HH\+HL））/);
   assert.match(msg, /信心度: LOW → MEDIUM 52/);
   assert.match(msg, /操作: WAIT → WATCH_FOR_ENTRY/);
-  assert.match(msg, /机会质量: MEDIUM \(第一目标结构空间比 1.20\)/);
+  assert.match(msg, /机会质量: MEDIUM/);
   assert.match(msg, /原因: 信心度提升/);
   assert.match(msg, /价格: 3500/);
 });
@@ -155,9 +155,29 @@ test("buildSweep: 16:00-21:00 区间位无 highTime/lowTime（旧数据）→ �
   assert.ok(!msg.includes("盘前"), "虚拟币消息不应出现盘前字样");
 });
 
+test("buildSweep: 内部摆动位（INTERNAL_LOW，1H swing 低点）— 显示中文标签+形成时间（1H K）", () => {
+  const msg = buildSweep({
+    symbol: "BTCUSDT", price: 64200,
+    sweep: { side: "SSL", type: "INTERNAL_LOW", level: 64100, sweptPrice: 64080, close: 64250, time: 111111, key: "k", realtime: false, closedTime: 111222, levelTime: 1754604000000 },
+    cur: baseCur, confidenceScore: 0, mss5m: null,
+  });
+  assert.match(msg, /跌破 内部摆动低点 64100/);
+  assert.match(msg, /流动性位形成: \d{2}\/\d{2} \d{2}:\d{2}（1H K）/, "内部摆动位是 1H swing，应标注 1H K 形成时间");
+});
+
+test("buildSweep: 内部摆动位（INTERNAL_HIGH，1H swing 高点）— BSL 侧同样显示", () => {
+  const msg = buildSweep({
+    symbol: "BTCUSDT", price: 65200,
+    sweep: { side: "BSL", type: "INTERNAL_HIGH", level: 65500, sweptPrice: 65550, close: 65100, time: 222222, key: "k", realtime: true },
+    cur: baseCur, confidenceScore: 0, mss5m: null,
+  });
+  assert.match(msg, /刺破 内部摆动高点 65500/);
+  assert.match(msg, /\*\*⚡ BTCUSDT 流动性扫损（实时）\*\*/);
+});
+
 test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据）+ 推动区间审计行", () => {
   const msg = buildCloseReport([
-    { symbol: "BTCUSDT", last4h: { open: 100, close: 101.2 }, displacement: { direction: "UP", ratio: 2, quality: "HIGH", structureBreak: { type: "BOS", direction: "UP", level: 101.5 }, fvg: { top: 101.5, bottom: 99.9 } }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 52, range: { rangeType: "IMPULSE_BULLISH", low: 100, high: 101.5, startReason: "回撤低点(HL)", endReason: "结构推进高点(HH)" } },
+    { symbol: "BTCUSDT", last4h: { open: 100, close: 101.2 }, displacement: { direction: "UP", ratio: 2, quality: "HIGH", structureBreak: { type: "BOS", direction: "UP", level: 101.5 }, fvg: { top: 101.5, bottom: 99.9 } }, cur: { bias: "BULLISH", confidence: "MEDIUM" }, confidenceScore: 52, range: { rangeType: "IMPULSE_BULLISH", low: 100, high: 101.5, startReason: "回撤低点(HL)", endReason: "结构推进高点(HH)" }, amd: { stage: "DISTRIBUTION", direction: "BULLISH", reason: "5m位移 2× 推动" } },
     { symbol: "ETHUSDT", last4h: { open: 100, close: 99.5 }, displacement: null, cur: { bias: "BEARISH", confidence: "LOW" }, confidenceScore: 10 },
   ]);
   assert.match(msg, /\*\*4H 收盘报告\*\*/);
@@ -167,6 +187,7 @@ test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据�
   assert.match(msg, /收盘重新跌回BOS下方，向上推动失败/);
   assert.match(msg, /推动区间: 多头推动（回撤低点\(HL\) 100 → 结构推进高点\(HH\) 101\.5）/);
   assert.match(msg, /位移 2\.0x（高质量）/);
+  assert.match(msg, /阶段: 分发\(多头\) · 5m位移 2× 推动/);
   assert.match(msg, /\*\*ETHUSDT\*\* -0.50% · 🔴 空头 · 风险低 · WAIT/);
 });
 
@@ -374,7 +395,7 @@ test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发
     trade: { entry: 884.1, stop: 880.5, stopSource: "EXECUTION_ZONE", target: 891.3, planR: 2 },
     trigger: "价格回踩 FVG 880.5-882.5（5 根 5m 前形成，未消耗）", score: 70, key: "k", time: Date.now(),
   };
-  const env = { price: 884.1, confidenceScore: 45, cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", session: { start: 20, end: 24, ratio: 23.4 } } };
+  const env = { price: 884.1, confidenceScore: 45, cur: { bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", session: { start: 20, end: 24, ratio: 23.4 } }, amd: { stage: "DISTRIBUTION", direction: "BULLISH", reason: "5m位移 2× 推动" } };
   const msg = buildOpportunity(op, env);
   assert.match(msg, /\*\*🎯 MUUSDT 5m 机会\*\*/);
   assert.match(msg, /🟢 多头（执行区回踩）· 评分 70/);
@@ -383,8 +404,10 @@ test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发
   assert.match(msg, /5m交易计划: 确认价 884\.1 · 失效位 880\.5（5m执行区远端）/);
   assert.match(msg, /第一目标: 891\.3 · 交易 planR 2\.00/);
   assert.match(msg, /环境: 🟢 BULLISH · 信心度 MEDIUM 45 · 操作 WATCH · 活跃窗口 20:00-24:00（占比 23.4%）/);
+  assert.match(msg, /阶段: 分发\(多头\) · 5m位移 2× 推动/);
   assert.match(msg, /触发: 价格回踩 FVG 880.5-882.5/);
-  assert.match(msg, /价格: 884.1/);
+  // 现价只出现在"观察位"行，不再有独立的尾部价格行（避免重复）
+  assert.ok(!/价格: 884\.1/.test(msg), "机会消息不应再重复推送价格行");
 });
 
 test("buildOpportunity: 带执行区（CHAIN 链）— 显示执行区行与 4H 操作", () => {

@@ -378,6 +378,8 @@ export function buildCloseReport(overview) {
       const rangeTypeCN = r.range.rangeType === "IMPULSE_BULLISH" ? "多头推动" : r.range.rangeType === "IMPULSE_BEARISH" ? "空头推动" : "近期区间";
       detail.push(`推动区间: ${rangeTypeCN}（${r.range.startReason} ${fmtPrice(r.range.low)} → ${r.range.endReason} ${fmtPrice(r.range.high)}）`);
     }
+    // AMD 阶段（ICT Market Maker Model：积累→操纵→分发；仅分发阶段有交易价值）
+    if (r.amd) detail.push(`阶段: ${amdSummary(r.amd)}`);
 
     if (conflict) detail.push(`状态: 4H 与大周期方向冲突，反转证据不足，暂时保持中性`);
     if (r.structureStatus === "INVALIDATED" && r.mss) {
@@ -417,6 +419,15 @@ export function buildCloseReport(overview) {
 
 function biasDisplay(bias) {
   return `${ICON[bias] || ""} ${{ BULLISH: "多头", BEARISH: "空头", NEUTRAL: "中性" }[bias] || bias || "-"}`;
+}
+
+/** AMD 阶段文案：积累/操纵/分发 + 方向 + 证据（ICT Market Maker Model） */
+function amdSummary(amd) {
+  if (!amd) return "-";
+  const stageCN = { ACCUMULATION: "积累", MANIPULATION: "操纵", DISTRIBUTION: "分发" }[amd.stage] || amd.stage;
+  const dirCN = amd.direction === "BULLISH" ? "多头" : amd.direction === "BEARISH" ? "空头" : null;
+  const dir = dirCN ? `(${dirCN})` : "";
+  return `${stageCN}${dir} · ${amd.reason || "-"}`;
 }
 
 function structureSummary(bias, status) {
@@ -578,6 +589,8 @@ function sweepTypeLabel(type) {
       EQL: "等低点",
       EXTERNAL_HIGH: "外部结构高点",
       EXTERNAL_LOW: "外部结构低点",
+      INTERNAL_HIGH: "内部摆动高点",
+      INTERNAL_LOW: "内部摆动低点",
     }[type] || type
   );
 }
@@ -764,9 +777,9 @@ export function buildOpportunity(op, env) {
     lines.push(`当前状态: 已运行 ${progress}R · 剩余空间比 ${remaining}`);
   }
   lines.push(`环境: ${ICON[cur.bias] || ""} ${cur.bias || "-"} · 信心度 ${cur.confidence || "-"}${env.confidenceScore != null ? ` ${env.confidenceScore}` : ""} · 操作 ${cur.decision || "-"} · ${sessionText(cur.session) || "非活跃窗口"}`);
+  if (env.amd) lines.push(`阶段: ${amdSummary(env.amd)}`);
   lines.push(`触发: ${op.trigger}`);
   if (keyMss) lines.push(`结论: 有效的5m转向证据；${op.displacementConfirmed ? "带位移确认" : "未形成位移/FVG，不是最高质量信号"}，操作 WATCH`);
-  lines.push(`价格: ${env.price}`);
   return lines.join("<br/>");
 }
 
@@ -843,11 +856,12 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
   if (!biasFlipped && cur.scenario) lines.push(`市场背景: ${scenarioCN(cur.scenario, cur.htfContext)}`);
   if (mssInvalidation?.price != null) lines.push(`4H MSS确认位: ${fmtPrice(mssInvalidation.price)}（收盘突破才确认结构转移）`);
   if (structureProtection?.price != null) lines.push(`4H深层保护位: ${fmtPrice(structureProtection.price)}（趋势最后防线，不是5m止损）`);
-  lines.push(`机会质量: ${cur.quality}${cur.planR != null ? ` (第一目标结构空间比 ${formatPlanR(cur.planR)})` : ""}`);
+  // planR 只出现在目标行（机会质量等级由 planR 决定），避免同一数值重复展示
+  lines.push(`机会质量: ${cur.quality}`);
   const first = cur.targets?.first;
   const remote = cur.targets?.remote;
-  if (first) lines.push(`第一目标: ${targetTypeCN(first.type)} ${fmtPrice(first.price)}（结构空间比 ${formatPlanR(first.planR)}）`);
-  if (remote) lines.push(`远端目标: ${targetTypeCN(remote.type)} ${fmtPrice(remote.price)}（结构空间比 ${formatPlanR(remote.planR)}）`);
+  if (first) lines.push(`第一目标: ${targetTypeCN(first.type)} ${fmtPrice(first.price)}（${formatPlanR(first.planR)}R）`);
+  if (remote) lines.push(`远端目标: ${targetTypeCN(remote.type)} ${fmtPrice(remote.price)}（${formatPlanR(remote.planR)}R）`);
   // 非 bias 变化时 reason 是可信度/空间原因；bias 变化时原因已在结构行解释
   if (!biasFlipped) lines.push(`原因: ${finalReason(cur, reason)}`);
   lines.push(`价格: ${price}`);
@@ -860,7 +874,7 @@ function formatPlanR(value) {
 }
 
 function targetTypeCN(type) {
-  return ({ PDH: "昨日高点", PDL: "昨日低点", PWH: "上周高点", PWL: "上周低点", EQH: "等高点", EQL: "等低点", PRE_MARKET_HIGH: "时段高点", PRE_MARKET_LOW: "时段低点" })[type] || type;
+  return ({ PDH: "昨日高点", PDL: "昨日低点", PWH: "上周高点", PWL: "上周低点", EQH: "等高点", EQL: "等低点", PRE_MARKET_HIGH: "时段高点", PRE_MARKET_LOW: "时段低点", INTERNAL_HIGH: "内部摆动高点", INTERNAL_LOW: "内部摆动低点" })[type] || type;
 }
 
 function finalReason(cur, fallback) {
@@ -916,6 +930,7 @@ function klineSpan(openMs) {
  * 各类流动性位的时间语义不同：
  *   PDH/PDL/PWH/PWL → 日/周 K（显示日期，日 K 恒为北京 08:00 开盘，时间无信息量）
  *   EQH/EQL/EXTERNAL → 4H swing K（显示日期+时间，精确到该根 4H）
+ *   INTERNAL_HIGH/LOW → 1H swing K（显示日期+时间，精确到该根 1H）
  *   PRE_MARKET_HIGH/LOW → 16:00-21:00 区间（虚拟币无盘前概念，不标时段名，只显示形成极值的
  *     那根 1H K 时间）；仅旧数据无 highTime/lowTime 时回退显示日期
  * 无形成时间（旧数据/未注入）→ null，消息里省略该段。
@@ -924,10 +939,11 @@ function levelFormedText(sweep) {
   if (sweep.levelTime != null) {
     const isDayK = sweep.type === "PDH" || sweep.type === "PDL" || sweep.type === "PWH" || sweep.type === "PWL";
     const isPremkt = sweep.type === "PRE_MARKET_HIGH" || sweep.type === "PRE_MARKET_LOW";
+    const is1h = sweep.type === "INTERNAL_HIGH" || sweep.type === "INTERNAL_LOW";
     const opts = { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour12: false };
     if (!isDayK) Object.assign(opts, { hour: "2-digit", minute: "2-digit" });
     const t = new Date(sweep.levelTime).toLocaleString("zh-CN", opts);
-    const suffix = isDayK ? "（日/周 K）" : isPremkt ? "" : "（4H K）";
+    const suffix = isDayK ? "（日/周 K）" : isPremkt ? "" : is1h ? "（1H K）" : "（4H K）";
     return `流动性位形成: ${t}${suffix}`;
   }
   const d = sweep.levelDate; // PRE_MARKET 旧数据兜底："2026-08-07"

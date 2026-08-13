@@ -24,6 +24,9 @@ import { getHistory, getKlines } from "../data/binance.js";
 import { detectSweeps } from "../indicators/sweep.js";
 import { findDisplacements } from "../indicators/displacement.js";
 import { detectStructureEvents } from "../indicators/mss.js";
+import { computeAmdStage } from "../indicators/amd.js";
+import { findSwings, analyzeSwings } from "../indicators/swing.js";
+import { liquidityStateForLevel } from "../indicators/liquidity.js";
 import { analyzeBias } from "../engine/analyzeBias.js";
 import { pathToFileURL } from "node:url";
 
@@ -121,8 +124,24 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow, state: extLowState }]
     : [];
   if (extLow.length && structure.externalSwingLowTime != null) extLow[0].time = structure.externalSwingLowTime;
-  const buyLevels = (liquidity.buySide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extHigh.filter((x) => !x.state || x.state === "ACTIVE"));
-  const sellLevels = (liquidity.sellSide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extLow.filter((x) => !x.state || x.state === "ACTIVE"));
+  // 内部摆动流动性（1H 层最近 swing 高低点）：完美链条里被扫的"前低/前高"常属此类，
+  // 此前不在扫损监控内（只有 PDH/PDL/EQH/盘前/外部位），普通前低被扫不报警，链条无法触发。
+  // 不用 4H 摆动点：4H swing 距现价通常数天，48 根 5m 扫损窗口（≈4 小时）根本够不着；
+  // 1H swing 距现价 2-12 小时，扫损窗口内可达，才是"扫下方流动性低点"里那个低点。
+  // 状态用与外部结构位一致的 liquidityStateForLevel（activeFrom = swing 所在 1H K 收盘后）：
+  // 只取 ACTIVE（未被刺破/未收盘破位），避免重复触发同一内部位。
+  const closed1h = h1.filter((k) => k.closeTime <= now);
+  const swings1h = analyzeSwings(findSwings(closed1h, 1, 1));
+  const lastHigh1h = swings1h.filter((s) => s.type === "HIGH").pop();
+  const lastLow1h = swings1h.filter((s) => s.type === "LOW").pop();
+  const internalHigh = lastHigh1h && liquidityStateForLevel({ price: lastHigh1h.price }, true, closed1h, closed1h[lastHigh1h.index].closeTime).state === "ACTIVE"
+    ? [{ type: "INTERNAL_HIGH", price: lastHigh1h.price, state: "ACTIVE", ...(lastHigh1h.time != null ? { time: lastHigh1h.time } : {}) }]
+    : [];
+  const internalLow = lastLow1h && liquidityStateForLevel({ price: lastLow1h.price }, false, closed1h, closed1h[lastLow1h.index].closeTime).state === "ACTIVE"
+    ? [{ type: "INTERNAL_LOW", price: lastLow1h.price, state: "ACTIVE", ...(lastLow1h.time != null ? { time: lastLow1h.time } : {}) }]
+    : [];
+  const buyLevels = (liquidity.buySide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extHigh.filter((x) => !x.state || x.state === "ACTIVE"), internalHigh);
+  const sellLevels = (liquidity.sellSide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extLow.filter((x) => !x.state || x.state === "ACTIVE"), internalLow);
   const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48, effectiveBias);
 
   // P1-B：5m 层 MSS/BOS（周期无关检测；5m 用 ICT 最小 swing 窗口每侧 1 根，收盘确认）
@@ -213,6 +232,24 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     range: location && location.rangeType && location.rangeType !== "NONE"
       ? { high: location.high, low: location.low, rangeType: location.rangeType, startReason: location.startReason || null, endReason: location.endReason || null }
       : null,
+    // AMD 阶段（Accumulation/Manipulation/Distribution）：只标注不参与 Bias/Decision。
+    // 依据最近窗口内证据：位移（分发）> 扫损收回（操纵）> 有证据积累（ER 横盘+区间内+无推进）> 未定。
+    // UNSET 时返回 null → 消息层省略阶段行，不误标"积累"。
+    amd: (() => {
+      const amdStage = computeAmdStage({
+        displacement,
+        sweep,
+        structure,
+        range: location && location.rangeType && location.rangeType !== "NONE"
+          ? { high: location.high, low: location.low, rangeType: location.rangeType }
+          : null,
+        mssEvents: mss5m && mss5m.lastEvent ? [mss5m.lastEvent] : [],
+        m5,
+        price,
+        now: time,
+      });
+      return amdStage.stage === "UNSET" ? null : amdStage;
+    })(),
   };
 }
 
