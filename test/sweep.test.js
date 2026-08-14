@@ -144,6 +144,24 @@ test("已收盘确认：位形成之后收盘在外侧 → 已消费，插针不
   assert.equal(detectSweeps([...bars, liveK(98, 99, 97, 98)], [{ type: "PDH", price: 105, time: 20 * M5 }], [], 98), null);
 });
 
+test("已收盘确认：扫损 K 在位形成之前 → 不报（CYSUSDT 08/15 时间倒挂回归）", () => {
+  // 位 time=40*M5 形成；bars[20]（time=20*M5，位形成前）刺破 100（low 98）后收回 101，
+  // 但那时位尚不存在 → 不能算扫这个位；位形成后无刺破 → null
+  const bars = Array.from({ length: 50 }, (_, i) => closedK(i, 101, 102, 100, 101));
+  bars[20] = closedK(20, 100, 102, 98, 101); // 位形成前刺破收回（若位已存在会报 SSL）
+  assert.equal(detectSweeps([...bars, liveK(101, 102, 100, 101)], [], [{ type: "INTERNAL_LOW", price: 100, time: 40 * M5 }], 101), null);
+});
+
+test("已收盘确认：扫损 K 在位形成之后 → 正常报（formedAfter 不误伤新位）", () => {
+  // 位 time=20*M5 形成；bars[45]（位形成后）刺破 100（low 98）后收回 102 → 应报 SSL
+  const bars = Array.from({ length: 50 }, (_, i) => closedK(i, 101, 102, 100, 101));
+  bars[45] = closedK(45, 100, 102, 98, 101); // 位形成后刺破收回
+  const s = detectSweeps([...bars, liveK(101, 102, 100, 101)], [], [{ type: "INTERNAL_LOW", price: 100, time: 20 * M5 }], 101);
+  assert.equal(s.side, "SSL");
+  assert.equal(s.level, 100);
+  assert.equal(s.sweptPrice, 98);
+});
+
 test("已收盘确认：SSL 已被历史收盘消费 → 不再报扫损", () => {
   const bars = Array.from({ length: 50 }, (_, i) => normal(i));
   bars[30] = closedK(30, 94, 95, 93, 94); // 位早已消费（收在下方）
