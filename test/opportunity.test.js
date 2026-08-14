@@ -154,12 +154,11 @@ test("关键位置 MSS：没有触及4H同向执行区 → 不提示", () => {
   assert.equal(detectKeyPositionMss({ env, ctx: { candles, events: [event] }, bias: "BEARISH" }), null);
 });
 
-test("关键位置 MSS 时效：只接受最近3根已收盘5m，旧事件不因程序重启补发", () => {
+test("关键位置 MSS 时效：只接受最近 45 分钟（约 9 根已收盘 5m），陈旧事件不补发", () => {
   const now = Date.now();
   const candles = Array.from({ length: 6 }, (_, i) => ({ time: now - (6 - i) * 300_000, closeTime: now - (5 - i) * 300_000 }));
-  assert.equal(isRecentKeyMss({ time: candles[3].closeTime }, candles, now), true, "后面只有2根已收盘K，应仍有效");
-  assert.equal(isRecentKeyMss({ time: candles[2].closeTime }, candles, now), false, "后面已有3根已收盘K，应过期");
-  assert.equal(isRecentKeyMss({ time: now - 20 * 60_000 }, [{ closeTime: now - 20 * 60_000 }], now), false, "行情数据陈旧时也不得补发");
+  assert.equal(isRecentKeyMss({ time: candles[0].closeTime }, candles, now), true, "45min 窗口内（即使后面已有 5 根）仍有效");
+  assert.equal(isRecentKeyMss({ time: now - 50 * 60_000 }, candles, now), false, "超过 45 分钟窗口 → 过期，不补发");
 });
 
 test("关键位置 MSS 追价：已运行超过0.5R或当前剩余空间不足1R均过滤", () => {
@@ -260,7 +259,26 @@ test("环境过滤：4H decision NO_TRADE → 无机会（决策层拦截，避�
   assert.deepEqual(opps, [], "decision NO_TRADE 时机会层必须返回空");
 });
 
-test("P0.5：最终操作 WAIT 即使出现有效回踩也不生成 5m 机会", () => {
+test("V2.6 门禁：最终操作 WAIT 但方向标签 WATCH（planR≥1）→ 有效回踩生成 RETRACE", () => {
+  const m5 = mkCandles([
+    [100, 100, 100, 100],
+    [101, 101, 101, 101],
+    [102, 102, 102, 102],
+    [101.5, 103, 101, 102],
+    [101, 101.5, 100.8, 101],
+    [101, 102.2, 100.9, 102.1], // 收阳站回中点 → 确认
+  ]);
+  const opps = scanOpportunities({
+    symbol: "BTCUSDT",
+    env: baseEnv({ price: 102.1, decision: "WAIT", decisionLabel: "WATCH" }),
+    m5,
+  });
+  const retrace = opps.find((o) => o.type === "RETRACE");
+  assert.ok(retrace, "directionDecision/decisionLabel 为 WATCH 时，最终操作 WAIT 也应报 RETRACE（位置由回踩确认把关）");
+  assert.ok(retrace.score >= 60, `score ${retrace.score} 应达推送门槛`);
+});
+
+test("P0.5：最终操作 WAIT 且方向标签非 WATCH → 无机会", () => {
   const m5 = mkCandles([
     [100, 100, 100, 100],
     [101, 101, 101, 101],
@@ -270,7 +288,7 @@ test("P0.5：最终操作 WAIT 即使出现有效回踩也不生成 5m 机会", 
   ]);
   const opps = scanOpportunities({
     symbol: "BTCUSDT",
-    env: baseEnv({ price: 101, decision: "WAIT" }),
+    env: baseEnv({ price: 101, decision: "WAIT", decisionLabel: "WAIT" }),
     m5,
   });
   assert.deepEqual(opps, []);

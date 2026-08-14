@@ -28,9 +28,12 @@ import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArra
 // ---- 常量 ----
 const ZONE_AGE_MAX = 60; // 执行区最大年龄（根 5m = 5 小时，太旧价值低）
 const SWEEP_WINDOW_MS = 4 * 3600_000; // 扫损有效窗口（4 小时，与 sweep.js window=48 一致）
-const CONFIRM_LOOKBACK = 3; // 确认必须发生在最近 3 根已收盘 5m 内，避免复用陈旧触发
+const CONFIRM_LOOKBACK = 3; // 执行区触碰/确认必须发生在最近 3 根已收盘 5m 内，避免复用陈旧触发
 const M5_MS = 5 * 60_000;
-export const KEY_MSS_MAX_AGE_MS = CONFIRM_LOOKBACK * M5_MS;
+// KEY_MSS 补发窗口：45 分钟（原 15 分钟过于苛刻——MSS 后 15min 内恰好同时满足
+// 扫损 + 4H 执行区 + 追价 ≤0.5R 的时刻太少，导致关键位置 MSS 几乎从不推送）
+export const KEY_MSS_MAX_AGE_MS = 45 * 60_000;
+export const KEY_MSS_LOOKBACK = Math.ceil(KEY_MSS_MAX_AGE_MS / M5_MS); // 9 根（45min）
 export const KEY_MSS_MAX_PROGRESS_R = 0.5;
 export const KEY_MSS_MIN_REMAINING_R = 1;
 /** 推送门槛：低于此分不推送（环境差/信号弱 = 噪声） */
@@ -91,10 +94,22 @@ export function scanOpportunities({ symbol, env, m5 }) {
   const opps = [];
   // 关键位置 MSS 是“结构转向 WATCH”，不是直接入场：方向评级允许、但最终操作因等待
   // 4H 执行区而为 WAIT 时仍可提示。完整 RETRACE/CHAIN 继续严格服从最终 WATCH。
-  const directionWatch = env.directionDecision === "WATCH" || env.decision === "WATCH";
+  // V2.6：方向可交易 = 决策层标签 WATCH（4H planR ≥ 1 的 WATCH_FOR_ENTRY）。
+  // 注意 analyzeSymbol 摘要字段名是 decisionLabel（decision 是最终操作 WATCH/WAIT/NO_TRADE，
+  // 受 execution READY 约束，常为 WAIT）；曾误用 directionDecision（不存在，恒 undefined）
+  // 导致门禁形同虚设、RETRACE/CHAIN 从不扫描。三种写法兼容各调用方。
+  const directionWatch =
+    env.decisionLabel === "WATCH" ||
+    env.directionDecision === "WATCH" ||
+    env.decision === "WATCH";
   const keyMss = directionWatch ? detectKeyPositionMss({ env, ctx, bias }) : null;
   if (keyMss) opps.push(keyMss);
-  if (env.decision !== "WATCH") return finalizeOpportunities(opps, symbol, env);
+  // V2.6：CHAIN/RETRACE 门禁放宽到"方向可交易"（directionWatch = 4H planR ≥ 1）。
+  // 原要求最终 decision === "WATCH"（execution READY），但 execution 依赖 4H dealing range
+  // 顺位区，价格常不在顺位侧 → 真实运行几乎永远 WAIT → RETRACE（执行区回踩，本应最
+  // 频繁）从不扫描。位置质量改由机会自身的确认条件把关（回踩 + 收盘确认/结构确认），
+  // 不再叠加 4H execution；decision === "WATCH" 时行为不变（兼容旧测试）。
+  if (!directionWatch) return finalizeOpportunities(opps, symbol, env);
   const chain = detectChain({ env, ctx, bias, price, zones });
   if (chain) opps.push(chain);
   const retrace = detectRetrace({ ctx, bias, price, zones });
@@ -158,12 +173,12 @@ export function detectKeyPositionMss({ env, ctx, bias }) {
   };
 }
 
-/** KEY_MSS 只在确认后的最近 3 根已收盘 5m 内有效；同时校验真实时间，防止陈旧行情补发。 */
+/** KEY_MSS 只在确认后 45 分钟内有效（约 9 根已收盘 5m）；同时校验真实时间，防止陈旧行情补发。 */
 export function isRecentKeyMss(event, candles, now = Date.now()) {
   const age = now - Number(event?.time);
   if (!Number.isFinite(age) || age < 0 || age > KEY_MSS_MAX_AGE_MS) return false;
   const eventIndex = candles.findIndex((k) => (k.closeTime ?? k.time) === event.time);
-  return eventIndex >= 0 && eventIndex >= candles.length - CONFIRM_LOOKBACK;
+  return eventIndex >= 0 && eventIndex >= candles.length - KEY_MSS_LOOKBACK;
 }
 
 /**
