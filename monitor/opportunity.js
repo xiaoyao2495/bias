@@ -327,7 +327,7 @@ function near(a, b) {
  * 信号 2 — 完整链条：扫损 → 5m MSS 转向 → 回踩同向执行区。
  * 只认顺 Bias 链：BULLISH 需 SSL 被扫（下方流动性扫掉 → 向上反转）→ MSS UP；
  * BEARISH 需 BSL 被扫 → MSS DOWN。sweep 由 biasMonitor 已计算（env.sweep）。
- * P1：MSS 突破腿必须为位移确认（实体扩张 + FVG，confirmedByDisplacement=true）——
+ * P1：MSS 突破腿必须为位移确认（BODY + VOLUME，confirmedByDisplacement=true）——
  * 低动能、贴线式结构转移不构成机构链条，否则 扫损→MSS→回踩 会频繁误报。
  * P1：CHAIN 执行区必须由该 MSS 位移腿产生（linkedToMss 按索引/价格精确匹配），
  * 普通 RETRACE 仍可用全部有效执行区，但高质量 CHAIN 不用旧 FVG/OB 拼凑。

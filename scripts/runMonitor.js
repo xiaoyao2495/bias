@@ -29,6 +29,7 @@ import { analyzeSymbols } from "../monitor/biasMonitor.js";
 import { scanOpportunities, OPP_MIN_SCORE } from "../monitor/opportunity.js";
 import { loadState, saveState, compareState, cleanupState } from "../monitor/state.js";
 import { sendMarkdown } from "../monitor/dingTalk.js";
+import { loadCalendarEvents, loadExchangeInfo, newsLineFor } from "../monitor/newsCalendar.js";
 import { getHistory } from "../data/binance.js";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -122,6 +123,15 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
   log(`[runMonitor] 开始，合约数=${list.length}: ${list.join(",")}`);
   const prevState = loadState();
   const isFirstRun = Object.keys(prevState).length === 0;
+  // 消息面窗口（范围：股票代币 + BTCUSDT/ETHUSDT；每周拉一次缓存一周，exchangeInfo 进程内缓存）
+  // 每轮只加载一次，扫损 / Bias 变化消息复用同一份窗口数据
+  let newsEvents = [];
+  let newsClasses = {};
+  try {
+    [newsEvents, newsClasses] = await Promise.all([loadCalendarEvents(), loadExchangeInfo()]);
+  } catch (e) {
+    log(`[runMonitor] 消息面日历加载失败（降级，不标注）: ${e.message}`);
+  }
   // 4H 收盘边界轮（到达新边界 或 首轮）→ 强制刷新 4H 缓存：
   // 收盘报告必须用最新已收盘 K（缓存快照在部分启动相位下会滞后一根，见 M1 相位扫描）；
   // 顺带让 Bias/结构检测在 4H 收盘后第一轮即生效，而非等 30min TTL 过期。
@@ -184,6 +194,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     const item = {
       symbol: r.symbol,
       price: r.price,
+      newsLine: newsLineFor(r.symbol, newsEvents, newsClasses), // 消息面窗口标注（股票代币 + BTC/ETH）
       confluenceScore: r.confluenceScore ?? r.confidenceScore,
       confidenceScore: r.confidenceScore,
       reason: r.reason,
@@ -529,7 +540,7 @@ function bjHHMM(ms) {
 }
 
 /** 扫损事件消息（⚡）：市场刚扫掉某流动性位后收回——带当前市场背景，帮助理解"在什么结构下发生" */
-export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }) {
+export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m, newsLine }) {
   const sideText = sweep.side === "BSL" ? "上方买方流动性（BSL）" : "下方卖方流动性（SSL）";
   const levelText = sweepTypeLabel(sweep.type);
   const sweptText = sweep.side === "BSL" ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回` : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
@@ -551,6 +562,11 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
     lines.push(`⚠️ 开盘假动作（NY Open 窗口）: 方向与 4H Bias 相反，留意反转`);
     lines.push("");
   }
+  // 消息面窗口（ICT 2022）：数据发布前的扫损可能是机构操纵，别当 Judas/结构信号
+  if (newsLine) {
+    lines.push(`⚠️ 消息面: ${newsLine}`);
+    lines.push("");
+  }
   lines.push(
     "环境:",
     `Bias: ${ICON[cur.bias] || ""} ${cur.bias}`,
@@ -569,8 +585,9 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m }
   return lines.join("<br/>");
 }
 
-/** 位移证据摘要：结构突破位（BOS）+ 缺口区间（FVG），让用户确认是否真为 ICT 三条件位移。
- *  FVG 极窄（宽度 ≤ 价格 0.02%，1 tick 级）时只显示单值，避免 0.05-0.05 噪音 */
+/** 位移证据摘要：结构突破位（BOS）+ 缺口区间（FVG）+ 量能倍率，让用户确认是否真为 ICT 位移
+ *  （BODY + VOLUME 门槛；BOS/FVG 为标签可能为空）。FVG 极窄（宽度 ≤ 价格 0.02%，1 tick 级）
+ *  时只显示单值，避免 0.05-0.05 噪音 */
 function dispEvidence(d) {
   const parts = [];
   if (d.structureBreak && d.structureBreak.level != null) parts.push(`5m BOS ${fmtPrice(d.structureBreak.level)}`);
@@ -578,6 +595,7 @@ function dispEvidence(d) {
     const narrow = d.fvg.top - d.fvg.bottom <= d.fvg.top * 0.0002;
     parts.push(narrow ? `5m FVG ${fmtPrice(d.fvg.bottom)}` : `5m FVG ${fmtPrice(d.fvg.bottom)}-${fmtPrice(d.fvg.top)}`);
   }
+  if (d.volumeRatio != null) parts.push(`量 ${d.volumeRatio.toFixed(1)}x`);
   return parts.join("，");
 }
 
@@ -811,7 +829,7 @@ export function buildOpportunityDigest(list) {
  * 变化原因分层：Bias 变化 → 市场状态（结构失效/新结构），与 Confidence 原因分离，
  * 避免"结构失效"被误读为"方向概率低"。
  */
-export function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mssInvalidation, structureProtection, mss, provisionalStructureBreak, htfContext }) {
+export function buildChanged({ symbol, price, reason, changes, prev, cur, confidenceScore, structureStatus, invalidation, mssInvalidation, structureProtection, mss, provisionalStructureBreak, htfContext, newsLine }) {
   const biasFlipped = changes.includes("bias");
   const head = biasFlipped ? `**⚠️ ${symbol} 4H Bias 变化**  🕐 ${nowHHMM()}` : `**ℹ️ ${symbol} 4H Bias 更新**  🕐 ${nowHHMM()}`;
   const lines = [head, ""];
@@ -856,6 +874,8 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
       lines.push("大周期临时突破已解除，继续采用上次收盘确认方向");
     }
   }
+  // 消息面窗口（ICT 2022）：数据发布前/后的 Bias 变化可能是操纵，勿当真实方向信号
+  if (newsLine) lines.push(`⚠️ 消息面: ${newsLine}`);
   if (cur.activeVolumeWindow || cur.session) lines.push(`活跃成交量: ${sessionText(cur.activeVolumeWindow || cur.session)}`);
   if (cur.ictSession) lines.push(ictSessionText(cur.ictSession));
   // 辅助状态：OB 细类（ICT 2022 L4），仅在有关注价值时显示，避免噪音

@@ -451,3 +451,36 @@ test("buildOpportunityDigest: 📊 机会榜汇总 Top 列表", () => {
   assert.match(msg, /1\. MUUSDT 🟢 多头 执行区回踩 @ 880\.5（70）/);
   assert.match(msg, /2\. ETHUSDT 🔴 空头 执行区回踩 @ 3500（65）/);
 });
+
+test("buildSweep: 消息面窗口标注（股票代币）— 数据前扫损勿当 Judas/结构信号", () => {
+  const msg = buildSweep({
+    symbol: "MUUSDT", price: 880,
+    sweep: { side: "SSL", type: "EQL", level: 875, sweptPrice: 872, close: 880, time: 111111, key: "k", realtime: false },
+    cur: baseCur, confidenceScore: 0, mss5m: null,
+    newsLine: "未来 8h 有高影响数据 CPI（20:30） —— 数据前波动多为操纵，勿当方向信号",
+  });
+  assert.match(msg, /⚠️ 消息面: 未来 8h 有高影响数据 CPI（20:30） —— 数据前波动多为操纵，勿当方向信号/);
+  // 无 Judas 时只出现消息面标注，不出"开盘假动作"
+  assert.ok(!msg.includes("开盘假动作"));
+});
+
+test("buildSweep: 无消息面窗口（山寨币 / 无事件）→ 不标注", () => {
+  const msg = buildSweep({
+    symbol: "DOGEUSDT", price: 0.2,
+    sweep: { side: "SSL", type: "EQL", level: 0.19, sweptPrice: 0.188, close: 0.2, time: 111111, key: "k", realtime: false },
+    cur: baseCur, confidenceScore: 0, mss5m: null,
+  });
+  assert.ok(!msg.includes("消息面"));
+});
+
+test("buildChanged: bias 翻转 + 消息面窗口标注（BTCUSDT 恒标注）", () => {
+  const msg = buildChanged({
+    symbol: "BTCUSDT", price: 108, reason: [],
+    changes: ["bias"], prev: basePrev, cur: baseCur,
+    confidenceScore: 0, structureStatus: "INVALIDATED",
+    invalidation: { type: "BREAK_PROTECTED_LOW", price: 108.5 },
+    mss: { type: "MSS", direction: "DOWN", level: 108.5, price: 108, confirmed: true, structureFrom: "BULLISH", structureTo: "NEUTRAL", time: "08/05 20:00" },
+    newsLine: "未来 8h 有 FOMC利率决议（02:00） —— 数据前波动多为操纵，勿当方向信号",
+  });
+  assert.match(msg, /⚠️ 消息面: 未来 8h 有 FOMC利率决议（02:00） —— 数据前波动多为操纵，勿当方向信号/);
+});

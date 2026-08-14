@@ -28,9 +28,10 @@
  *
  * 位移确认（P1）：close beyond 只是"最小结构转移"，ICT 2022 更关注"带位移"的结构转移。
  * 每个事件额外输出 confirmedByDisplacement：
- *   触发 K（或紧邻前一已收盘根）同时满足位移三条件（大实体 × 结构突破 × FVG，见 displacement.js）
- *   → true；否则（低动能、贴线式突破）→ false。
- * CHAIN 链至少要求 MSS 突破腿为位移确认（实体扩张 + FVG），过滤噪音结构转移。
+ *   触发 K（或紧邻前一已收盘根）为同向位移 K（BODY + VOLUME，见 displacement.js；
+ *   FVG/结构突破为标签）且位移 K 收盘跨越本次被突破的 swing 位 → true；
+ *   否则（低动能、贴线式突破）→ false。
+ * CHAIN 链至少要求 MSS 突破腿为位移确认（实体扩张 + 量能），过滤噪音结构转移。
  */
 
 import { findSwings, analyzeSwings } from "./swing.js";
@@ -76,8 +77,8 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
   // 判定价：优先实时 price（进行中提示），缺省末根 close（收盘确认）
   const p = price != null ? price : last ? last.close : null;
 
-  // 位移确认索引（index → {index, dir, confirmationIndex, level, close}）：触发事件的那根已收盘 K
-  // （或紧邻前一已收盘根）为同向位移 K（实体扩张 × 结构突破 × FVG）→ 该事件"带位移"。
+  // 位移确认索引（index → {index, dir, confirmationIndex, close, fvg}）：触发事件的那根已收盘 K
+  // （或紧邻前一已收盘根）为同向位移 K（BODY + VOLUME，FVG/结构突破为标签）→ 该事件"带位移"。
   // P1 防前视：位移 K 的 FVG 可能由"下一根"确认（中间根位移）——逐根历史扫描若读完整
   // 数组预计算结果，会在确认 K 到来之前就提前打标。只有 confirmationIndex <= 当前
   // 已收盘索引（lastIdx）时该位移才成立；进行中 K（realtime）同理不可确认位移。
@@ -90,7 +91,6 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
       index: d.index,
       dir: d.direction,
       confirmationIndex: d.confirmationIndex,
-      level: d.structureBreak.level,
       close: d.close,
       fvg: d.fvg,
     });
@@ -103,7 +103,11 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
     if (d1 && d1.dir === dir && d1.confirmationIndex <= lastIdx) return d1;
     return null;
   };
-  const levelMatch = (level, price) => Math.abs(level - price) / Math.max(price, 1e-9) < 0.0005;
+  // 位移腿绑定（P1）：位移必须实际跨越被突破的 swing 位——位移 K 收盘在 swing 另一侧。
+  // 结构突破已降级为标签（可能为 null），不能依赖 structureBreak.level 匹配；位移 K 自身
+  // 收盘越过该位，才是"这次突破的动能腿"。
+  const dispBeyondLevel = (d, dir, swingPrice) =>
+    d.close != null && swingPrice != null && (dir === "UP" ? d.close > swingPrice : d.close < swingPrice);
 
   /**
    * 统一绑定位移证据到结构事件（MSS/BOS）：
@@ -138,17 +142,17 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
     const d = dNear("UP");
     if (p != null && p > lastHigh.price) {
       // P1：位移确认必须匹配突破价位——附近同向位移不一定突破的是同一个 swing
-      const matchedD = d && levelMatch(d.level, lastHigh.price) ? d : null;
+      const matchedD = d && dispBeyondLevel(d, d.dir, lastHigh.price) ? d : null;
       events.push(attachDisplacement(mkEvent("BOS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price}`, lastClosed, !lastClosed && price != null, !!matchedD), matchedD));
-    } else if (lastClosed && d && levelMatch(d.level, lastHigh.price)) {
+    } else if (lastClosed && d && dispBeyondLevel(d, d.dir, lastHigh.price)) {
       events.push(attachDisplacement(mkEvent("BOS", "UP", lastHigh.price, d.close, lastHigh.index, `Displacement broke swing high ${lastHigh.price}`, true, false, true), d));
     }
   } else if (lastLow && (direction === "BEARISH" || direction === "NEUTRAL")) {
     const d = dNear("DOWN");
     if (p != null && p < lastLow.price) {
-      const matchedD = d && levelMatch(d.level, lastLow.price) ? d : null;
+      const matchedD = d && dispBeyondLevel(d, d.dir, lastLow.price) ? d : null;
       events.push(attachDisplacement(mkEvent("BOS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price}`, lastClosed, !lastClosed && price != null, !!matchedD), matchedD));
-    } else if (lastClosed && d && levelMatch(d.level, lastLow.price)) {
+    } else if (lastClosed && d && dispBeyondLevel(d, d.dir, lastLow.price)) {
       events.push(attachDisplacement(mkEvent("BOS", "DOWN", lastLow.price, d.close, lastLow.index, `Displacement broke swing low ${lastLow.price}`, true, false, true), d));
     }
   }
@@ -157,17 +161,17 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
   if (direction === "BULLISH" && lastLow) {
     const d = dNear("DOWN");
     if (p != null && p < lastLow.price) {
-      const matchedD = d && levelMatch(d.level, lastLow.price) ? d : null;
+      const matchedD = d && dispBeyondLevel(d, d.dir, lastLow.price) ? d : null;
       events.push(attachDisplacement(mkEvent("MSS", "DOWN", lastLow.price, p, lastLow.index, `Broke recent swing low ${lastLow.price} — structure shift`, lastClosed, !lastClosed && price != null, !!matchedD), matchedD));
-    } else if (lastClosed && d && levelMatch(d.level, lastLow.price)) {
+    } else if (lastClosed && d && dispBeyondLevel(d, d.dir, lastLow.price)) {
       events.push(attachDisplacement(mkEvent("MSS", "DOWN", lastLow.price, d.close, lastLow.index, `Displacement broke swing low ${lastLow.price} — structure shift`, true, false, true), d));
     }
   } else if (direction === "BEARISH" && lastHigh) {
     const d = dNear("UP");
     if (p != null && p > lastHigh.price) {
-      const matchedD = d && levelMatch(d.level, lastHigh.price) ? d : null;
+      const matchedD = d && dispBeyondLevel(d, d.dir, lastHigh.price) ? d : null;
       events.push(attachDisplacement(mkEvent("MSS", "UP", lastHigh.price, p, lastHigh.index, `Broke recent swing high ${lastHigh.price} — structure shift`, lastClosed, !lastClosed && price != null, !!matchedD), matchedD));
-    } else if (lastClosed && d && levelMatch(d.level, lastHigh.price)) {
+    } else if (lastClosed && d && dispBeyondLevel(d, d.dir, lastHigh.price)) {
       events.push(attachDisplacement(mkEvent("MSS", "UP", lastHigh.price, d.close, lastHigh.index, `Displacement broke swing high ${lastHigh.price} — structure shift`, true, false, true), d));
     }
   }
@@ -226,7 +230,9 @@ export function scanStructureEvents(candles, { lookback = 50, left = 2, right = 
   // P1：不得用合并覆盖事件起点——否则连续同 level 突破会把 atIndex/time 不断推后（价格
   // 10:00 首次 MSS 突破、10:30 仍在 swing 外 → time 被改到 10:30），而 opportunity 用
   // `e.time >= sweepTime` 判定链条时序，时间被推后会伪造"Sweep(10:20) 在 MSS 之前"的 CHAIN。
-  // 位移确认 OR 合并（任一腿为位移确认即成立），但不覆盖事件起点。
+  // 位移确认 OR 合并（任一腿为位移确认即成立），但不覆盖事件起点；位移腿字段（index/fvg）
+  // 须同步自"位移确认的那条腿"，否则 confirmedByDisplacement=true 却 displacementIndex 为空，
+  // opportunity 的 linkedToMss 匹配不上该腿产生的执行区。
   const deduped = [];
   for (const e of events) {
     const last = deduped[deduped.length - 1];
@@ -234,7 +240,12 @@ export function scanStructureEvents(candles, { lookback = 50, left = 2, right = 
       last.price = e.price;
       last.lastSeenAt = e.atIndex;
       last.lastSeenTime = e.time;
-      last.confirmedByDisplacement = last.confirmedByDisplacement || e.confirmedByDisplacement;
+      if (e.confirmedByDisplacement) {
+        last.confirmedByDisplacement = true;
+        last.displacementIndex = e.displacementIndex;
+        last.displacementConfirmationIndex = e.displacementConfirmationIndex;
+        last.displacementFvg = e.displacementFvg;
+      }
       continue;
     }
     deduped.push({ ...e, lastSeenAt: e.atIndex, lastSeenTime: e.time });

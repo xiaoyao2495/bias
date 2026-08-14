@@ -94,7 +94,7 @@ function buildOb(candles, prev, i, type, bullish, displacement) {
 
 /**
  * 找出所有 Order Block（ICT 2022：OB = 导致 Displacement 的 K 的前一根）。
- *   - 优先：位移 K（displacement.js 三条件）的前一根 → OB，标记 displacement: true
+ *   - 优先：位移 K（displacement.js：BODY + VOLUME）的前一根 → OB，标记 displacement: true
  *   - fallback：简化规则（阴线后强阳突破 / 阳线后强阴跌破），与位移 OB 区间重叠的跳过
  * kind = STANDARD | BREAKER | REJECTION；state = FRESH | USED（语义见 buildOb）
  */

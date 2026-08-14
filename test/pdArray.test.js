@@ -275,20 +275,20 @@ test("V1.6 rankPDArray: 反向 FVG（Bearish）+ Bullish bias → Ignore", () =>
 });
 
 // ---- V2.0 OB-Displacement 关联（ICT 2022：OB = 导致 Displacement 的 K 的前一根）----
-// 构造：前 20 根小实体横盘（avg body ≈ 0.21）→ K20 阴线（位移前一根）→ K21 大阳线
-// （body 14.2，收盘突破 K19 swing high 101.5，且 low 102 > K19.high → 三条件位移）
+// 构造：前 19 根小实体横盘（avg body ≈ 0.2）→ K19 swing high 101.5 → K20 小阴线（body 0.25，
+// ratio < 1.5，不构成位移）→ K21 大阳线（body 14.2，BODY 达标位移；fixture 无量跳过量门槛）
 // 期望：仅生成 1 个 BULLISH_OB（displacement: true），fallback 简化规则因区间重叠被去重
 
 function dispCandle(o, h, l, c, i) {
   return { time: i * 1000, open: o, high: h, low: l, close: c, closeTime: i * 1000 + 500 };
 }
 
-test("V2.0 位移驱动 OB：三条件位移 K 的前一根生成 OB（displacement: true），fallback 去重", () => {
+test("V2.0 位移驱动 OB：BODY 达标位移 K 的前一根生成 OB（displacement: true），fallback 去重", () => {
   const candles = [];
-  for (let i = 0; i < 19; i++) candles.push(dispCandle(100, 100.6, 99.8, 100.2, i)); // 横盘小实体
+  for (let i = 0; i < 19; i++) candles.push(dispCandle(100, 100.6, 99.8, 100.2, i)); // 横盘小实体（body 0.2）
   candles.push(dispCandle(100.2, 101.5, 100.0, 100.4, 19)); // K19: swing high 101.5
-  candles.push(dispCandle(101.2, 101.4, 100.6, 100.8, 20)); // K20: 阴线（位移 K 的前一根 → OB 区间 [100.6,101.4]）
-  candles.push(dispCandle(100.8, 116, 102, 115, 21)); // K21: 大阳线位移（BOS 101.5 + FVG 101.5-102）
+  candles.push(dispCandle(101.2, 101.4, 100.6, 100.95, 20)); // K20: 小阴线（body 0.25 < 1.5× avg，非位移）
+  candles.push(dispCandle(100.8, 116, 102, 115, 21)); // K21: 大阳线位移（BODY 达标）
 
   const obs = findOrderBlocks(candles);
   assert.equal(obs.length, 1);

@@ -1,33 +1,44 @@
 /**
- * displacement.js — 位移 K 检测（ICT 2022 三条件）
+ * displacement.js — 位移 K 检测（ICT 2022：BODY + VOLUME）
  *
- * ICT 2022 定义：Displacement 是价格快速离开某区域的行为，必须同时满足三条件：
- *   1. BODY（动量）     : 实体 |close−open| ≥ 阈值倍 × 前 lookback 根平均实体（大实体 K）
- *   2. STRUCTURE BREAK : 收盘越过最近 Swing High（UP）/ Swing Low（DOWN）→ BOS
- *   3. FVG（缺口）      : 位移 K 相邻形成同向 Fair Value Gap（UP → bullish FVG，DOWN → bearish FVG）
+ * ICT 2022 定义：Displacement = 动量 + 机构的量能，是价格快速离开某区域的行为。
+ * 两条是位移的判定条件（缺一不可）：
+ *   1. BODY（动量）  : 实体 |close−open| ≥ 阈值倍 × 前 lookback 根平均实体（大实体 K）
+ *   2. VOLUME（量能）: 位移 K 量 ≥ 阈值倍 × 前 volumeLookback 根均量（机构行为必须带量）
  *
- * 三条缺一不可：仅大实体（如趋势加速段）不算 displacement；必须伴随结构突破与 FVG，
- * 才是机构推动离场的特征。输出每条带 structureBreak 与 fvg 证据字段（供审计/展示）。
+ * FVG 与结构突破不是位移定义的必要条件，作为标签输出（可能为 null）：
+ *   - structureBreak : 位移收盘越过的最近 Swing（BOS）。位移是验证 MSS/BOS 的动能，
+ *                      区间内强动量（未破结构）同样是位移 → 标签可空
+ *   - fvg            : 位移留下的同向缺口（ICT 用 FVG 识别位移的"脚印"）→ 标签可空
  *
  * 输入用 5m K 线：位移是分钟级价格行为，5m 粒度能捕捉"刚刚"的强动量 K；
  * swing 参照用 ICT 最小窗口（每侧 1 根），与 5m MSS/BOS 检测（mss.js）一致。
+ * 成交量：优先 quoteVol（USDT 成交额，最能代表资金）；K 线源不提供成交量时
+ * （如测试 fixture）退化为纯实体判定——真实行情恒有 quoteVol，量门槛恒生效。
  */
 
 /**
- * @param {Array} h5m 5m K 线（{time,open,high,low,close,closeTime}）
+ * @param {Array} h5m 5m K 线（{time,open,high,low,close,closeTime,quoteVol?}）
  * @param {Object} [opt]
  * @param {number} [opt.lookback=20] 平均实体回看窗口（根）
  * @param {number} [opt.threshold=1.5] 实体倍数阈值
- * @returns {Array<{time,direction,body,avgBody,ratio,close,structureBreak,fvg}>}
+ * @param {number} [opt.volumeLookback=20] 均量回看窗口（根）
+ * @param {number} [opt.volumeThreshold=1.5] 量能倍数阈值
+ * @returns {Array<{time,direction,body,avgBody,ratio,volumeRatio,close,structureBreak,fvg}>}
  *   位移 K 列表（时间升序，time=K 收盘时间）。
- *   structureBreak: { type:"BOS", direction, level, swingIndex } 被突破的最近 swing
- *   fvg: { top, bottom, middleIndex } 相邻同向缺口（middleIndex = 缺口中间根）
+ *   structureBreak: { type:"BOS", direction, level, swingIndex } | null（结构突破标签）
+ *   fvg: { top, bottom, middleIndex } | null（缺口标签）
+ *   volumeRatio: 位移 K 量 / 前 volumeLookback 根均量（无成交量数据时为 null）
  */
-export function findDisplacements(h5m, { lookback = 20, threshold = 1.5 } = {}) {
+export function findDisplacements(h5m, { lookback = 20, threshold = 1.5, volumeLookback = 20, volumeThreshold = 1.5 } = {}) {
   const closed = h5m.filter((k) => k.closeTime <= Date.now());
   if (closed.length <= lookback) return [];
 
-  // 逐 index 记录"该 K 之前最近已确认的 Swing High/Low"（结构 break 参照）。
+  // 成交量数据是否存在（真实 kline 恒有 quoteVol；测试 fixture 无量 → 跳过量门槛）
+  const volOf = (k) => (k && (k.quoteVol ?? k.volume)) || 0;
+  const hasVolData = closed.some((k) => volOf(k) > 0);
+
+  // 逐 index 记录"该 K 之前最近已确认的 Swing High/Low"（结构 break 标签参照）。
   // 不用 findSwings()：其 dedupeAlternating 会把"位移 K 自身"（更极端的同类型 swing）
   // 合并成最近 swing，导致 break 参照被位移 K 自己顶掉、结构突破永远检测不到
   // （位移 K 本身就是新极值）。这里按 1/1 窗口逐根确认：i 到达时确认 i-1 是否为 swing
@@ -61,14 +72,29 @@ export function findDisplacements(h5m, { lookback = 20, threshold = 1.5 } = {}) 
     const ratio = body / avgBody;
     if (ratio < threshold) continue;
 
+    // 成交量确认（ICT 2022：机构行为带量）—— 量 ≥ 前 volumeLookback 根均量 × volumeThreshold
+    let volumeRatio = null;
+    if (hasVolData) {
+      const vFrom = Math.max(0, i - volumeLookback);
+      let vsum = 0;
+      for (let j = vFrom; j < i; j++) vsum += volOf(closed[j]);
+      const avgVol = vsum / (i - vFrom);
+      if (avgVol > 0) {
+        const vr = volOf(c) / avgVol;
+        if (vr < volumeThreshold) continue;
+        volumeRatio = vr;
+      }
+    }
+
     const dir = c.close >= c.open ? "UP" : "DOWN";
-    // 条件 2：结构突破 —— 收盘越过最近 swing（BOS，与 MSS 检测同用 close beyond 语义）
+    // 标签 1：结构突破（BOS）—— 收盘越过最近 swing；区间内强动量可能没有 → null
     const swingRef = dir === "UP" ? lastHighAt[i] : lastLowAt[i];
-    const broke = swingRef && (dir === "UP" ? c.close > swingRef.price : c.close < swingRef.price);
-    if (!broke) continue;
-    // 条件 3：FVG —— 位移 K 相邻（第三根或中间根）形成同向缺口（与 pdArray.findFvgs 定义一致）
+    const structureBreak = swingRef && (dir === "UP" ? c.close > swingRef.price : c.close < swingRef.price)
+      ? { type: "BOS", direction: dir, level: swingRef.price, swingIndex: swingRef.index }
+      : null;
+    // 标签 2：FVG（位移的"脚印"）—— 位移 K 相邻（第三根或中间根）形成同向缺口；
+    // 与 pdArray.findFvgs 定义一致；没有 → null
     const fvg = dir === "UP" ? bullishFvg(closed, i) : bearishFvg(closed, i);
-    if (!fvg) continue;
 
     out.push({
       time: c.closeTime,
@@ -76,18 +102,19 @@ export function findDisplacements(h5m, { lookback = 20, threshold = 1.5 } = {}) 
       body,
       avgBody,
       ratio,
-      // 位移质量（审计/展示）：满足三条件才有此条目，因此最低为 MEDIUM；
-      // ratio ≥ 2× 平均实体为强位移（与 4H 收盘报告的 strongOppositeDisp 同语义）
+      volumeRatio,
+      // 位移质量（审计/展示）：ratio ≥ 2× 平均实体为强位移（与 4H 收盘报告的 strongOppositeDisp 同语义）
       quality: ratio >= 2 ? "HIGH" : "MEDIUM",
       close: c.close,
       index: i, // 在 closed（已收盘）数组中的索引——供 mss.js 与结构事件对齐打标
-      // FVG 真正确认的 K 索引（P1 防前视）：
+      // FVG 标签真正确认的 K 索引（P1 防前视）：
       //   位移 K 为第三根 → FVG 由位移 K 自身确认 → confirmationIndex = i
       //   位移 K 为中间根 → FVG 由下一根（i+1）确认 → confirmationIndex = i + 1
+      //   无 FVG → 位移（实体+量）在自身收盘即成立 → confirmationIndex = i
       // 消费方（mss.js）必须确认 confirmationIndex 已到（<= 当前已收盘索引）才能使用，
       // 否则逐根历史扫描会提前一根读到"未来的确认 K"。
-      confirmationIndex: fvg.middleIndex + 1,
-      structureBreak: { type: "BOS", direction: dir, level: swingRef.price, swingIndex: swingRef.index },
+      confirmationIndex: fvg ? fvg.middleIndex + 1 : i,
+      structureBreak,
       fvg,
     });
   }

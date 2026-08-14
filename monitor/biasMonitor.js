@@ -153,7 +153,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   }
 
   // P1-C：位移 K（5m 粒度：最近 48 根 5m ≈ 4 小时内出现位移 K，用于收盘报告标注）
-  // 保留三条件证据（structureBreak/fvg），供消息层展示"为什么算 ICT 位移"而非仅凭大实体
+  // 门槛 = BODY + VOLUME（ICT 2022）；structureBreak/fvg 为标签（可空），供消息层展示证据
   const dispList = findDisplacements(m5);
   // 收盘报告只能展示“刚收完的这根 4H”内部发生的 5m 位移，不能用滚动四小时窗口，
   // 否则边界附近会把上一根或新一根 4H 的位移拼到本根报告里。
@@ -295,6 +295,7 @@ export function displacementFor4h(displacements, candle) {
         time: last.time,
         direction: last.direction,
         ratio: last.ratio,
+        volumeRatio: last.volumeRatio, // 量/均量（BODY + VOLUME 门槛的量证据；无量数据为 null）
         quality: last.quality || (last.ratio >= 2 ? "HIGH" : "MEDIUM"), // 透传位移质量（旧输入无 quality 时按 ratio 兜底）
         structureBreak: last.structureBreak,
         fvg: last.fvg,
