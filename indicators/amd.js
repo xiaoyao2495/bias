@@ -35,7 +35,7 @@ export function computeAmdStage({ displacement, sweep, structure, range, mssEven
       time: displacement.time,
       stage: "DISTRIBUTION",
       direction: displacement.direction === "UP" ? "BULLISH" : "BEARISH",
-      reason: `5m位移 ${displacement.ratio}× 推动`,
+      reason: `5m位移 ${displacement.ratio.toFixed(1)}× 推动`,
     });
   }
 

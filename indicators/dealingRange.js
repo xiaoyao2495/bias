@@ -33,21 +33,24 @@ import { analyzeSwings } from "./swing.js";
 /** V1.9：距目标 < 60% 区间高度 → 视为接近目标（推动末端） */
 const LATE_IMPULSE_THRESHOLD = 0.6;
 
-export function computeDealingRange(swings, structure, price) {
-  const range = findImpulseRange(swings, structure) || findRecentRange(swings);
+export function computeDealingRange(swings, structure, price, liquidity) {
+  const range = findImpulseRange(swings, structure, liquidity) || findRecentRange(swings);
 
   if (!range) {
-    return { high: null, low: null, equilibrium: null, location: "UNKNOWN", rangeType: "NONE", context: "UNKNOWN", startReason: null, endReason: null };
+    return { high: null, low: null, equilibrium: null, location: "UNKNOWN", rangeType: "NONE", context: "UNKNOWN", startReason: null, endReason: null, position: null };
   }
 
   const equilibrium = (range.high + range.low) / 2;
   let location = "AT_EQ";
   if (price > equilibrium) location = "PREMIUM";
   else if (price < equilibrium) location = "DISCOUNT";
+  // 连续位置（通用位置度量）：0 = 区间低点，1 = 区间高点，0.5 = 中点。
+  // 不做 clamp（价格突破区间时 >1 / <0 本身是有意义的信息，消费方可自行截断）。
+  const position = range.high > range.low ? (price - range.low) / (range.high - range.low) : null;
 
   const context = computeLocationContext(range, structure, price, equilibrium);
 
-  return { high: range.high, low: range.low, equilibrium, location, rangeType: range.type, context, startReason: range.startReason || null, endReason: range.endReason || null };
+  return { high: range.high, low: range.low, equilibrium, location, rangeType: range.type, context, startReason: range.startReason || null, endReason: range.endReason || null, position };
 }
 
 /**
@@ -79,8 +82,11 @@ export function computeLocationContext(range, structure, price, equilibrium) {
  * 审计字段 startReason / endReason（ICT 2022：Impulse = Liquidity → Displacement → Expansion）：
  *   描述区间起点/终点 swing 的结构语义（是回撤位、外部启动位还是结构推进位），
  *   供消息/日志说清"这个区间从哪来、被什么推到哪"，不改任何行为。
+ *   传入 liquidity 时进一步核对起点是否命中"已被扫损的流动性位"（SWEPT）：
+ *   若区间起点就是被扫掉的下方/上方流动性（SSL/BSL Sweep 后启动的推动），
+ *   用"扫下方流动性后启动"这类描述，体现 Impulse 的流动性源头（仍为审计字段，无行为变化）。
  */
-export function findImpulseRange(swings, structure) {
+export function findImpulseRange(swings, structure, liquidity) {
   if (!structure || (structure.direction !== "BULLISH" && structure.direction !== "BEARISH")) {
     return null;
   }
@@ -105,7 +111,7 @@ export function findImpulseRange(swings, structure) {
         highIndex: hh.index,
         lowIndex: low.index,
         type: "IMPULSE_BULLISH",
-        startReason: low.label === "LL" ? "外部结构启动低点(LL)" : "回撤低点(HL)",
+        startReason: sweptLevelReason(liquidity, "SELL", low.price) || (low.label === "LL" ? "外部结构启动低点(LL)" : "回撤低点(HL)"),
         endReason: "结构推进高点(HH)",
       };
     }
@@ -127,13 +133,27 @@ export function findImpulseRange(swings, structure) {
         highIndex: high.index,
         lowIndex: ll.index,
         type: "IMPULSE_BEARISH",
-        startReason: high.label === "HH" ? "外部结构启动高点(HH)" : "反抽高点(LH)",
+        startReason: sweptLevelReason(liquidity, "BUY", high.price) || (high.label === "HH" ? "外部结构启动高点(HH)" : "反抽高点(LH)"),
         endReason: "结构推进低点(LL)",
       };
     }
   }
 
   return null;
+}
+
+/**
+ * 检查区间起点是否命中已被扫损的流动性位（state === "SWEPT"）：
+ * 是则用"扫流动性后启动"描述区间来源，体现 Impulse 的流动性源头。
+ * side: "SELL" = 下方流动性位（sellSide，扫下方后启动多头推动）；"BUY" = 上方（buySide）。
+ * 容差 0.1%：流动性位与 swing 价格存在小偏差，取近似命中。
+ */
+function sweptLevelReason(liquidity, side, price) {
+  if (!liquidity) return null;
+  const levels = side === "SELL" ? liquidity.sellSide || [] : liquidity.buySide || [];
+  const hit = levels.find((l) => l && l.price != null && Math.abs(l.price - price) < price * 0.001 && l.state === "SWEPT");
+  if (!hit) return null;
+  return side === "SELL" ? "扫下方流动性后启动(SSL Sweep)" : "扫上方流动性后启动(BSL Sweep)";
 }
 
 /** fallback：最近一个 Swing High 与最近一个 Swing Low */
