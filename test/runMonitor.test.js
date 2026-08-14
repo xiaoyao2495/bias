@@ -7,7 +7,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf } from "../scripts/runMonitor.js";
+import { readFileSync, rmSync, utimesSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf, appendNotification } from "../scripts/runMonitor.js";
 import { displacementFor4h, buildTargetSummary } from "../monitor/biasMonitor.js";
 
 test("最终操作服从执行区，并在 1R 临界区保留旧状态", () => {
@@ -79,6 +82,26 @@ test("buildChanged: 非 bias 变化 — ℹ️ 头、信心度/操作 旧→新�
   assert.match(msg, /机会质量: MEDIUM/);
   assert.match(msg, /原因: 信心度提升/);
   assert.match(msg, /价格: 3500/);
+});
+
+test("appendNotification: 追加存档 + 超 24h 清空重写", () => {
+  const file = join(tmpdir(), `notify-test-${Date.now()}-${Math.random()}.jsonl`);
+  try {
+    appendNotification("消息1", "t1", file);
+    appendNotification("消息2", "t2", file);
+    const lines = readFileSync(file, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2, "两条消息都应追加");
+    assert.match(lines[0], /"title":"t1".*"text":"消息1"/);
+    // 模拟过期：文件 mtime 拨到 25h 前 → 下次写入应清空重写
+    const past = new Date(Date.now() - 25 * 3600_000);
+    utimesSync(file, past, past);
+    appendNotification("消息3", "t3", file);
+    const after = readFileSync(file, "utf8").trim().split("\n");
+    assert.equal(after.length, 1, "过期文件应先清空再写，只保留新消息");
+    assert.match(after[0], /"text":"消息3"/);
+  } finally {
+    rmSync(file, { force: true });
+  }
 });
 
 test("buildChanged: Scenario 值 + 原因英译中（ETHUSDT 08-06 通知场景）", () => {

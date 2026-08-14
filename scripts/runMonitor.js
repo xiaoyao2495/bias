@@ -31,7 +31,7 @@ import { loadState, saveState, compareState, cleanupState } from "../monitor/sta
 import { sendMarkdown } from "../monitor/dingTalk.js";
 import { loadCalendarEvents, loadExchangeInfo, newsLineFor } from "../monitor/newsCalendar.js";
 import { getHistory } from "../data/binance.js";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,6 +39,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOG_FILE = join(__dirname, "..", "monitor", "log.txt");
 const CLOSE_REPORT_FILE = join(__dirname, "..", "monitor", "closeReport.json"); // 记录已推送收盘报告的 4H 边界
 const OPP_DIGEST_FILE = join(__dirname, "..", "monitor", "opportunityDigest.json"); // 记录机会榜上次推送时间
+const NOTIFY_FILE = join(__dirname, "..", "monitor", "notifications.jsonl"); // 推送消息存档（JSONL，可下载供 AI 分析）
+const NOTIFY_RETENTION_MS = 24 * 3600_000; // 存档保留时长：超过 24h 未更新则清空重写，文件始终只保留最近一天
 
 /** 文件日志：Windows 上 pm2 的 out/err 日志空白，写文件便于在服务器上排查 */
 function log(...args) {
@@ -48,6 +50,33 @@ function log(...args) {
     appendFileSync(LOG_FILE, line + "\n");
   } catch {}
   console.error(line);
+}
+
+/** 推送消息存档：每条钉钉消息追加一行 JSON 到 notifications.jsonl。
+ *  用户可从服务器下载该文件（或粘贴内容）供 AI 分析实盘通知。
+ *  保留策略：文件超过 NOTIFY_RETENTION_MS（24h）未更新则清空重写——文件永远只有最近一天的消息。
+ *  @param {string} [filePath] 测试注入用；默认 NOTIFY_FILE */
+export function appendNotification(text, title = "", filePath = NOTIFY_FILE) {
+  try {
+    const now = Date.now();
+    const entry = {
+      ts: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }),
+      tsMs: now,
+      title,
+      text,
+    };
+    try {
+      if (now - statSync(filePath).mtimeMs > NOTIFY_RETENTION_MS) writeFileSync(filePath, "");
+    } catch {}
+    appendFileSync(filePath, JSON.stringify(entry) + "\n");
+  } catch {}
+}
+
+/** 发送钉钉通知并同步存档（推送成功才入档，dry run 不推送自然不存档） */
+async function sendNotification(text, title) {
+  const data = await sendMarkdown(text, title);
+  appendNotification(text, title);
+  return data;
 }
 
 // 模块加载即打点：诊断 pm2 进程是否真正加载/进入了该脚本
@@ -222,7 +251,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
   if (!dryRun) {
     if (isFirstRun) {
       try {
-        await sendMarkdown(buildOverview(overview), "4H Bias Monitor");
+        await sendNotification(buildOverview(overview), "4H Bias Monitor");
         log(`[runMonitor] 首轮全览已推送（${overview.length} 合约）`);
       } catch (e) {
         log(`[runMonitor] 首轮全览推送失败: ${e.message}`);
@@ -232,7 +261,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
         // 新加入合约（isNew）无 prev→cur 对比上下文，不推送（静默存状态，等下次变化再推）
         if (item.isNew) continue;
         try {
-          await sendMarkdown(buildChanged(item), `${item.symbol} Bias`);
+          await sendNotification(buildChanged(item), `${item.symbol} Bias`);
           log(`[runMonitor] 已推送 ${item.symbol}（${item.changes.join(",")}）`);
         } catch (e) {
           // 推送失败不落地新状态 → 下一轮 compareState 仍变化 → 重推（宁可重复不漏报）
@@ -245,7 +274,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       for (const item of overview) {
         if (item.sweep && item.prev && item.prev.sweepTime !== item.sweep.key) {
           try {
-            await sendMarkdown(buildSweep(item), `${item.symbol} 扫损`);
+            await sendNotification(buildSweep(item), `${item.symbol} 扫损`);
             log(`[runMonitor] 已推送 ${item.symbol} 扫损（${item.sweep.side} @ ${item.sweep.level}）`);
           } catch (e) {
             // 保留旧 sweepTime → 下一轮仍视为新扫损 → 重推（不漏报流动性事件）
@@ -268,7 +297,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     // boundaryMs 已在轮首计算（同时决定 force4h 刷新）
     if (!isFirstRun && boundaryMs > loadCloseReport()) {
       try {
-        await sendMarkdown(buildCloseReport(overview), "4H 收盘报告");
+        await sendNotification(buildCloseReport(overview), "4H 收盘报告");
         log(`[runMonitor] 4H 收盘报告已推送（边界 ${new Date(boundaryMs).toISOString()}）`);
         saveCloseReport(boundaryMs); // 推送成功才记录边界，失败下轮重试
       } catch (e) {
@@ -730,7 +759,7 @@ async function scanAndPushOpportunities({ overview, prevState, nextState, dryRun
       continue;
     }
     try {
-      await sendMarkdown(buildOpportunity(op, itemOf(op, overview)), `${op.symbol} 5m机会`);
+      await sendNotification(buildOpportunity(op, itemOf(op, overview)), `${op.symbol} 5m机会`);
       pushed[op.key] = Date.now();
       log(`[runMonitor] 已推送 ${op.symbol} 5m 机会（${op.type} score=${op.score}）`);
     } catch (e) {
@@ -747,7 +776,7 @@ async function scanAndPushOpportunities({ overview, prevState, nextState, dryRun
       return;
     }
     try {
-      await sendMarkdown(buildOpportunityDigest(top), "5m 机会榜");
+      await sendNotification(buildOpportunityDigest(top), "5m 机会榜");
       saveDigestTs(Date.now());
       log(`[runMonitor] 5m 机会榜已推送（${top.length} 条）`);
     } catch (e) {
