@@ -258,6 +258,9 @@ function collectZones(ctx, bias) {
     const top = it.top ?? it.high;
     const bottom = it.bottom ?? it.low;
     if (top == null || bottom == null || top <= bottom) continue;
+    // V2.7：窄区过滤——宽度不足 0.15% 的 FVG/OB 是噪声级 gap（如 NBIS 259.15-259.46 仅
+    // 0.12%），不构成 ICT 有效执行区，浅插上沿会被误当回踩。低价标的按比例同规则。
+    if (((top - bottom) / top) * 100 < 0.15) continue;
     zones.push({
       type: it.type.includes("FVG") ? "FVG" : "OB",
       sourceType: it.type,
@@ -401,7 +404,13 @@ function confirmExecutionZone({ ctx, zone, bias, afterTime = 0 }) {
   for (let i = first; i < candles.length; i++) {
     const k = candles[i];
     if ((k.closeTime ?? k.time) < afterTime) continue;
-    if (k.low <= zone.top && k.high >= zone.bottom) touch = { candle: k, index: i };
+    if (k.low <= zone.top && k.high >= zone.bottom) {
+      // V2.7：触碰深度要求——多头 K 须插到执行区中点及以下（low ≤ mid），空头须插到
+      // 中点及以上（high ≥ mid）。浅插上沿（如 NBIS low 259.39 距 mid 259.305 还差 0.085）
+      // 是插针不是回踩，不构成入场确认。
+      const touchedMid = bias === "BULLISH" ? k.low <= zone.mid : k.high >= zone.mid;
+      if (touchedMid) touch = { candle: k, index: i };
+    }
   }
   if (!touch) return null;
 

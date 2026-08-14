@@ -826,7 +826,11 @@ export function buildOpportunity(op, env) {
     const stopSource = ["SWEEP_EXTREME", "LOCAL_SWEEP_EXTREME"].includes(op.trade.stopSource) ? "扫损极值" : "5m执行区远端";
     lines.push(`${keyMss ? "5m参考计划" : "5m交易计划"}: 确认价 ${fmtPrice(op.trade.entry)} · 失效位 ${fmtPrice(op.trade.stop)}（${stopSource}）`);
     if (op.trade.target != null) {
-      lines.push(`第一目标: ${fmtPrice(op.trade.target)} · ${keyMss ? "参考" : "交易"} planR ${formatPlanR(op.trade.planR)}`);
+      const planR = op.trade.planR;
+      // V2.7：5m 微距止损 ÷ 4H 远端目标会让 planR 虚高到失真（如 NBIS 28.77R——
+      // 止损 0.2% 一个插针即扫）。超过 10R 时标注止损过近，避免误读成高盈亏比。
+      const warn = !keyMss && Number.isFinite(planR) && planR > 10 ? " · ⚠️止损过近，盈亏比失真" : "";
+      lines.push(`第一目标: ${fmtPrice(op.trade.target)} · ${keyMss ? "参考" : "交易"} planR ${formatPlanR(planR)}${warn}`);
     } else {
       lines.push(`${keyMss ? "参考" : "交易"} planR: 暂无有效第一目标，暂不估算`);
     }
