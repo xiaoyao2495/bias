@@ -45,7 +45,9 @@ const INTERVAL_MS = { "5m": 5 * 60_000, "4h": 4 * 3600_000, "1d": 24 * 3600_000,
  *  4H 是监控主周期，TTL 必须小于周期本身——否则 4H 收盘后缓存仍未过期，
  *  收盘报告滞后一根、结构/MSS 检测最长滞后 4h（M1 修复，见审计）。
  *  30min 折中（监控 10 分钟一轮 × 3），既及时看到新收盘 K，又避免每轮拉取。
- *  1h 供数据驱动活跃成交量窗口：每周一刷新一次（拉上周交易周数据），TTL 一周。 */
+ *  1h 供数据驱动活跃成交量窗口：每周一刷新一次（拉上周交易周数据），TTL 一周。
+ *  注意：内部摆动流动性（internalHigh/Low）的 1h 数据用 ttlMin 参数单独覆盖为 30min，
+ *  不能用这里的周 TTL——陈旧 1h 缓存会算出已被新高/新低取消的 swing（EDENUSDT 08/14 扫损根因）。 */
 const TTL_OVERRIDE_MIN = { "4h": 30, "1h": 7 * 24 * 60 };
 
 function mapKline(k) {
@@ -78,19 +80,25 @@ function writeCache(file, data) {
   writeFileSync(file, JSON.stringify(data));
 }
 
-function ttlMs(interval) {
-  const base = TTL_OVERRIDE_MIN[interval] != null ? TTL_OVERRIDE_MIN[interval] * 60_000 : (INTERVAL_MS[interval] || DEFAULT_TTL_MS);
+function ttlMs(interval, ttlMin) {
+  // 调用方 ttlMin 优先（内部摆动流动性需要 1h 30min 级时效，见 biasMonitor）；否则用周期默认覆盖
+  const base = ttlMin != null
+    ? ttlMin * 60_000
+    : TTL_OVERRIDE_MIN[interval] != null
+      ? TTL_OVERRIDE_MIN[interval] * 60_000
+      : (INTERVAL_MS[interval] || DEFAULT_TTL_MS);
   // 1h（数据驱动活跃窗口）按周刷新，不受 4h 全局上限约束；其余周期仍受 DEFAULT 上限
   const cap = interval === "1h" ? 7 * 24 * 3600_000 : DEFAULT_TTL_MS;
   return Math.min(cap, base);
 }
 
 /** 获取 K 线：优先读本地缓存，未命中则经代理拉取并落盘。
- *  @param {Object} [opts.force] 跳过缓存强制拉取（4H 收盘报告用：边界轮必须拿到最新已收盘 K，见 M1） */
-export async function getKlines(symbol, interval, limit = 500, { force = false } = {}) {
+ *  @param {Object} [opts.force] 跳过缓存强制拉取（4H 收盘报告用：边界轮必须拿到最新已收盘 K，见 M1）
+ *  @param {number} [opts.ttlMin] 覆盖该次调用的缓存 TTL（分钟）；内部摆动流动性的 1h 用 30min，见 biasMonitor */
+export async function getKlines(symbol, interval, limit = 500, { force = false, ttlMin } = {}) {
   const file = cacheFile(symbol, interval, limit);
 
-  if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval)) {
+  if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval, ttlMin)) {
     const cached = readCache(file);
     if (cached) {
       console.error(`[binance] 命中本地缓存: ${file}`);
@@ -118,10 +126,10 @@ export async function getKlines(symbol, interval, limit = 500, { force = false }
  * 用于回放（Case Replay）等需要长历史数据的场景。
  * 缓存文件：{SYMBOL}_{INTERVAL}_h{count}.json
  */
-export async function getHistory(symbol, interval, count, { force = false } = {}) {
+export async function getHistory(symbol, interval, count, { force = false, ttlMin } = {}) {
   const file = cacheFile(symbol, interval, `h${count}`);
 
-  if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval)) {
+  if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval, ttlMin)) {
     const cached = readCache(file);
     if (cached) {
       console.error(`[binance] 命中本地缓存: ${file}`);

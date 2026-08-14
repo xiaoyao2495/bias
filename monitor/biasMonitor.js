@@ -41,7 +41,7 @@ const HISTORY = { "4h": 5000, "1d": 2000, "1w": 400 };
  * @returns {Promise<Object>} 摘要对象（字段见 analyzeSymbol 返回）
  */
 export async function analyzeSymbol(symbol, { force4h = false } = {}) {
-  const [h4, daily, weekly, m5, h1] = await Promise.all([
+  const [h4, daily, weekly, m5, h1, h1Swing] = await Promise.all([
     getHistory(symbol, "4h", HISTORY["4h"], { force: force4h }),
     getHistory(symbol, "1d", HISTORY["1d"]),
     getHistory(symbol, "1w", HISTORY["1w"]),
@@ -51,6 +51,11 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     // 1h 用于数据驱动活跃成交量窗口：只取上周一~五的 1h 成交量分布；
     // 缓存 TTL 一周；拉取失败降级为 []，不影响 ICT Session 独立标注。
     getKlines(symbol, "1h", 720).catch(() => []),
+    // 1h 内部摆动流动性（internalHigh/Low）专用：48 根 ≈ 2 天，TTL 30 分钟。
+    // 必须与成交量窗口的 1h（TTL 一周）分开——内部摆动是"最近 2-12 小时会被扫的位"，
+    // 陈旧 1h 缓存会算出已被新高/新低取消的 swing（EDENUSDT 08/14 扫损消息根因：
+    // 08:00 的 0.0828 在 09:00 收出 0.08686 后已不是 swing，旧缓存仍当内部高点）。
+    getKlines(symbol, "1h", 48, { ttlMin: 30 }).catch(() => []),
   ]);
 
   if (!h4.length) throw new Error(`${symbol} 无 4H 数据`);
@@ -127,7 +132,9 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // 1H swing 距现价 2-12 小时，扫损窗口内可达，才是"扫下方流动性低点"里那个低点。
   // 状态用与外部结构位一致的 liquidityStateForLevel（activeFrom = swing 所在 1H K 收盘后）：
   // 只取 ACTIVE（未被刺破/未收盘破位），避免重复触发同一内部位。
-  const closed1h = h1.filter((k) => k.closeTime <= now);
+  // 数据源用 h1Swing（48 根、TTL 30min，见上），不能用成交量窗口的周 TTL 1h 缓存——
+  // 否则内部 swing 可能陈旧到已被更新高低点取消，导致扫过期的位。
+  const closed1h = h1Swing.filter((k) => k.closeTime <= now);
   const swings1h = analyzeSwings(findSwings(closed1h, 1, 1));
   const lastHigh1h = swings1h.filter((s) => s.type === "HIGH").pop();
   const lastLow1h = swings1h.filter((s) => s.type === "LOW").pop();
