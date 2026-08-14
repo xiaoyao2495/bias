@@ -123,6 +123,27 @@ test("已收盘确认：BSL 已被历史收盘消费 → 不再报扫损", () =>
   assert.equal(detectSweeps([...bars, liveK(98, 99, 97, 98)], [{ type: "EQH", price: 105 }], [], 98), null);
 });
 
+test("已收盘确认：位形成之前的历史收盘在外侧 → 不算消费，扫损仍上报", () => {
+  // 位 time=20*M5 形成；bars[10]（time=10*M5，位形成前）收 106 在 105 上方，
+  // 位形成后从未收在上方 → 位未消费 → 插针后收回应报 BSL（08/15 误吞修复回归）。
+  const bars = Array.from({ length: 50 }, (_, i) => closedK(i, 100, 101, 99, 100));
+  bars[10] = closedK(10, 106, 107, 105, 106); // 位形成前收在 105 上方（不算消费）
+  bars[48] = closedK(48, 100, 107, 99, 97); // 插针 K：high 107 > 105，close 97 < 105 → 有效扫损
+  const s = detectSweeps([...bars, liveK(98, 99, 97, 98)], [{ type: "PDH", price: 105, time: 20 * M5 }], [], 98);
+  assert.equal(s.side, "BSL");
+  assert.equal(s.level, 105);
+  assert.equal(s.sweptPrice, 107);
+});
+
+test("已收盘确认：位形成之后收盘在外侧 → 已消费，插针不再报", () => {
+  // bars[30]/bars[31]（time ≥ 位形成）收 106 在 105 上方且次根未收回 → 位形成后被消费
+  const bars = Array.from({ length: 50 }, (_, i) => closedK(i, 100, 101, 99, 100));
+  bars[30] = closedK(30, 106, 107, 105, 106); // 位形成后收在上方（消费，无收回 → 本身不算扫损）
+  bars[31] = closedK(31, 106, 107, 105, 106); // 次根也收在上方 → bars[30] 无跨根收回
+  bars[48] = closedK(48, 100, 107, 99, 97); // 插针后收回，但位已消费 → 不报
+  assert.equal(detectSweeps([...bars, liveK(98, 99, 97, 98)], [{ type: "PDH", price: 105, time: 20 * M5 }], [], 98), null);
+});
+
 test("已收盘确认：SSL 已被历史收盘消费 → 不再报扫损", () => {
   const bars = Array.from({ length: 50 }, (_, i) => normal(i));
   bars[30] = closedK(30, 94, 95, 93, 94); // 位早已消费（收在下方）
