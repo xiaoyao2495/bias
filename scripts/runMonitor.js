@@ -122,7 +122,7 @@ const scenarioCN = (s, context) => (SCENARIO_CN[s] || s || "-").replaceAll("大�
 const REASON_CN = {
   "No directional bias": "无方向偏倚",
   "Direction probability too low": "方向概率过低",
-  "No reward estimate (missing draw or invalidation)": "缺少目标或4H深层保护位，无法评估结构空间",
+  "No reward estimate (missing draw or invalidation)": "缺少有效目标或止损参考，无法评估结构空间",
   "Direction correct but reward insufficient (planR < 0.5)": "方向正确但第一目标结构空间不足",
   "Acceptable direction, but room limited — wait for retracement to improve R": "方向可接受但第一目标结构空间有限，等待更好位置",
   "Enough upside room with acceptable direction probability": "方向概率可接受且上方空间充足",

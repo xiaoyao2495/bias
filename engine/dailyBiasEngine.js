@@ -150,7 +150,7 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
   //   造成"永远方向正确但空间不足"（08/14 DRAM/MU/SOXL/SKHY 等大涨后全部 NO_TRADE 的观感）。
   //   止损语义与 5m 执行层一致（最近 swing）；深层保护位仍作为"趋势最后防线"单独展示。
   //   internalSwing 缺失（历史扫描/未传 1h 数据）时回退 4H 位，行为不变。
-  const riskLine = computeRiskLine(effectiveBias, structureProtection, mssInvalidation, internalSwing);
+  const riskLine = computeRiskLine(effectiveBias, structureProtection, mssInvalidation, internalSwing, price);
 
   // V1.4.1 MSS 事件化（P0）：结构失效 = 一次市场结构转移（MSS）。
   // 事件 schema 与 indicators/mss.js 统一：{ type, direction, level, price, confirmed }
@@ -231,14 +231,16 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
  *  @param {object|null} structureProtection 深层保护位（最后防线）
  *  @param {object|null} mssInvalidation     4H 最近 swing（BREAK_LAST_LOW/HIGH）
  *  @param {{low:number|null, high:number|null}|null} internalSwing 1h 最近 ACTIVE swing（实盘由 biasMonitor 注入）
+ *  @param {number|null} price               现价；同侧防御——多头只取 < price 的位、空头只取 > price 的位，
+ *                                          防止注入已被价格突破的位（risk 变负 → 目标/planR 全失效）。
  *  @returns {number|null} 失效线价格（用于 planR 的 Risk 分母）；无有效方向/无候选 → null（调用方回退） */
-function computeRiskLine(bias, structureProtection, mssInvalidation, internalSwing) {
+function computeRiskLine(bias, structureProtection, mssInvalidation, internalSwing, price) {
   if (bias === "BULLISH") {
-    const candidates = [structureProtection?.price, mssInvalidation?.price, internalSwing?.low].filter((v) => v != null);
+    const candidates = [structureProtection?.price, mssInvalidation?.price, internalSwing?.low].filter((v) => v != null && (price == null || v < price));
     return candidates.length ? Math.max(...candidates) : null;
   }
   if (bias === "BEARISH") {
-    const candidates = [structureProtection?.price, mssInvalidation?.price, internalSwing?.high].filter((v) => v != null);
+    const candidates = [structureProtection?.price, mssInvalidation?.price, internalSwing?.high].filter((v) => v != null && (price == null || v > price));
     return candidates.length ? Math.min(...candidates) : null;
   }
   return null;

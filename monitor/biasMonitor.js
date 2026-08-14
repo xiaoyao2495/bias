@@ -105,8 +105,12 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const closed1h = h1Swing.filter((k) => k.closeTime <= now);
   const swings1h = analyzeSwings(findSwings(closed1h, 1, 1));
   const isActive1h = (s, isBuy) => liquidityStateForLevel({ price: s.price }, isBuy, closed1h, closed1h[s.index].closeTime).state === "ACTIVE";
-  const lastActiveHigh1h = swings1h.filter((s) => s.type === "HIGH").reverse().find((s) => isActive1h(s, true));
-  const lastActiveLow1h = swings1h.filter((s) => s.type === "LOW").reverse().find((s) => isActive1h(s, false));
+  // 位必须与现价同侧：BEARISH 的 internalHigh 须仍在价格上方（价格未突破它），BULLISH 的
+  // internalLow 须仍在价格下方。价格已突破的位（如 BZUSDT 08/14 22:50 现价 85.84 > 1h swing high
+  // 85.76）既不能当失效线（risk = 位-现价 变负 → 目标/planR 全失效 →"机会质量 -"），
+  // 也不该再监控扫损（流动性已被价格吃掉）。从近往远回退到满足同侧条件的次近 ACTIVE swing。
+  const lastActiveHigh1h = swings1h.filter((s) => s.type === "HIGH").reverse().find((s) => isActive1h(s, true) && (price == null || s.price > price));
+  const lastActiveLow1h = swings1h.filter((s) => s.type === "LOW").reverse().find((s) => isActive1h(s, false) && (price == null || s.price < price));
   const internalHigh = lastActiveHigh1h
     ? [{ type: "INTERNAL_HIGH", price: lastActiveHigh1h.price, state: "ACTIVE", ...(lastActiveHigh1h.time != null ? { time: lastActiveHigh1h.time } : {}) }]
     : [];

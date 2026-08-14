@@ -280,3 +280,20 @@ test("P1: analysisTime 决定 09:25-09:30 ET 最后一根盘前 5m 是否已收�
   // 结构不受 analysisTime 影响（结构仍只用已收盘 4H candles）
   assert.equal(rNo.structure.direction, rYes.structure.direction);
 });
+
+test("riskLine 同侧防御：internalSwing.low 已被价格突破（在价格上方）→ 过滤，回退 4H 位", () => {
+  const candles = h4Bull();
+  const price = candles[candles.length - 1].close; // BULLISH，末根 close = 117
+  // 错误注入：low 120 > price 117（已被突破的位），不能当失效线
+  const r = analyzeBias({ candles, daily: dailyBull(), weekly: weeklyBull(), price, structurePrice: price, time: TIME, internalSwing: { low: 120, high: null } });
+  assert.ok(r.bias.riskLine != null, "应有兜底 riskLine");
+  assert.ok(r.bias.riskLine < price, `riskLine ${r.bias.riskLine} 应低于现价 ${price}`);
+  assert.notEqual(r.bias.riskLine, 120, "已被突破的 internalSwing.low 应被同侧过滤");
+});
+
+test("riskLine 正常注入：internalSwing.low 在价格下方 → 优先采用（最近失效线）", () => {
+  const candles = h4Bull();
+  const price = candles[candles.length - 1].close;
+  const r = analyzeBias({ candles, daily: dailyBull(), weekly: weeklyBull(), price, structurePrice: price, time: TIME, internalSwing: { low: 114.5, high: null } });
+  assert.equal(r.bias.riskLine, 114.5); // 114.5 是最近的下方失效线（> 4H MSS 107）
+});
