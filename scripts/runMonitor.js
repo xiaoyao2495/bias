@@ -887,7 +887,12 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
   else if (biasFlipped) lines.push(`操作: ${cur.decision}`);
   if (cur.directionDecision && cur.directionDecision !== cur.decision) lines.push(`方向评级: ${cur.directionDecision}（执行区尚未就绪）`);
   if (!biasFlipped && cur.scenario) lines.push(`市场背景: ${scenarioCN(cur.scenario, cur.htfContext)}`);
-  if (mssInvalidation?.price != null) lines.push(`4H MSS确认位: ${fmtPrice(mssInvalidation.price)}（收盘突破才确认结构转移）`);
+  if (mssInvalidation?.price != null) {
+    // MSS 位是"反势确认线"：多头结构 = 最近 swing low（收盘跌破才转空），空头结构 = 最近 swing high（收盘突破才转多）。
+    // 写死"突破"会把多头防守位误导成上方目标（INTCUSDT 08/14：100.33 是下方防线，价格 105.38 已在其上，并非"已突破待确认"）。
+    const mssDir = mssInvalidation.type === "BREAK_LAST_LOW" ? "跌破" : "突破";
+    lines.push(`4H MSS确认位: ${fmtPrice(mssInvalidation.price)}（收盘${mssDir}才确认结构转移）`);
+  }
   if (structureProtection?.price != null) lines.push(`4H深层保护位: ${fmtPrice(structureProtection.price)}（趋势最后防线，不是5m止损）`);
   // planR 只出现在目标行（机会质量等级由 planR 决定），避免同一数值重复展示
   lines.push(`机会质量: ${cur.quality}`);
