@@ -34,10 +34,12 @@ import { computeDailyBias } from "./dailyBiasEngine.js";
  *                            传入后计算 activeVolumeWindow；不传则该统计因子为空。
  * @param {number} [p.pdArrayLimit=6] PD Array（FVG/OB）截取数量
  * @param {Array}  [p.m5]     5m K 线（可选，仅美股关联标的用于精确计算盘前 04:00-09:30 ET）。
+ * @param {{low:number|null, high:number|null}} [p.internalSwing] 1h 最近 ACTIVE swing 高低点（实盘由 biasMonitor 注入，
+ *                            用于 planR 的最近失效线 riskLine；不传则回退 4H MSS/深层保护位）。
  * @param {string} [p.symbol] 合约代码；用于显式限定 PRE_MARKET 流动性的资产范围。
  * @returns {{ structure, liquidity, location, pdArray, htfDirection, htfContext, activeVolumeWindow, ictSession, session, bias }}
  */
-export function analyzeBias({ candles, daily, weekly, price, structurePrice, time, analysisTime, h1, m5, symbol, pdArrayLimit = 6 }) {
+export function analyzeBias({ candles, daily, weekly, price, structurePrice, time, analysisTime, h1, m5, symbol, internalSwing, pdArrayLimit = 6 }) {
   // P1：日/周/盘前流动性截断时刻与结构参考时刻拆分——结构只用已收盘 4H（candles），
   // 流动性截断用 analysisTime（实时 = 最近已收盘 5m 的 closeTime），回放回退 time（4H 收盘点）。
   const cutoff = analysisTime ?? time;
@@ -78,6 +80,7 @@ export function analyzeBias({ candles, daily, weekly, price, structurePrice, tim
     htfContext,
     reversalEvidence,
     ictSession,
+    internalSwing,
   });
 
   return { structure, liquidity, location, pdArray, htfDirection, htfContext, activeVolumeWindow, ictSession, session, bias };

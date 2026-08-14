@@ -35,7 +35,7 @@ import { buildDecision } from "./decision.js";
  * 第一版明确不做：MSS / BOS 分类 / Displacement / 5m Entry / Gate / Notification / Score / AI 判断
  */
 
-export function computeDailyBias({ structure, liquidity, location, price, structurePrice, pdArray, htfDirection, htfContext, reversalEvidence, ictSession }) {
+export function computeDailyBias({ structure, liquidity, location, price, structurePrice, pdArray, htfDirection, htfContext, reversalEvidence, ictSession, internalSwing }) {
   const reason = [];
   const direction = structure.direction;
   // 4H 结构只能由已收盘 4H 确认；price 可继续使用最新 5m 收盘价计算执行空间。
@@ -144,6 +144,13 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
   const mssInvalidation = buildMssInvalidation(structureBias, lastHigh, lastLow);
   const structureProtection = buildStructureProtection(structureBias, structure);
   const invalidation = structureProtection;
+  // 实盘 planR/Decision 用"最近的 ACTIVE 失效线"（riskLine）而非深层保护位：
+  //   BULLISH 取 max(深层保护位, 4H MSS lastLow, 1h 最近 ACTIVE swing low)，即"最近的下方支撑"；
+  //   BEARISH 取 min(...)。深层保护位常距现价 10%+（最后防线），用它算 planR 系统性偏低，
+  //   造成"永远方向正确但空间不足"（08/14 DRAM/MU/SOXL/SKHY 等大涨后全部 NO_TRADE 的观感）。
+  //   止损语义与 5m 执行层一致（最近 swing）；深层保护位仍作为"趋势最后防线"单独展示。
+  //   internalSwing 缺失（历史扫描/未传 1h 数据）时回退 4H 位，行为不变。
+  const riskLine = computeRiskLine(effectiveBias, structureProtection, mssInvalidation, internalSwing);
 
   // V1.4.1 MSS 事件化（P0）：结构失效 = 一次市场结构转移（MSS）。
   // 事件 schema 与 indicators/mss.js 统一：{ type, direction, level, price, confirmed }
@@ -178,7 +185,7 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
   // V2.5：Bias Decision Layer（融合 Confidence × planR，输出 Opportunity / Tradeability / Decision）
   // M2 修复：用 effectiveBias 而非 bias——结构失效后 bias 仍是旧方向，若按旧方向算 planR，
   // 即使 confidence LOW 兜底到 NO_TRADE，语义也不严谨（失效 = 无方向 = WAIT）。
-  const decision = buildDecision({ bias: effectiveBias, confidence, draw, price, invalidation });
+  const decision = buildDecision({ bias: effectiveBias, confidence, draw, price, invalidation: riskLine ?? structureProtection });
 
   // 兼容增强：保留 narrativeBias 字符串，同时输出形成叙事的证据，避免把 HTF 方向本身
   // 误称为完整 Daily Bias。后续消费者可逐步迁移到 narrativeContext/executionBias。
@@ -207,6 +214,7 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
     invalidation,
     mssInvalidation,
     structureProtection,
+    riskLine,
     mss,
     provisionalStructureBreak,
     reversalEvidence: reversalEvidence || null,
@@ -217,6 +225,23 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
     explanation,
     decision,
   };
+}
+
+/** 最近的 ACTIVE 失效线：多头取三个下方位中最高者（最近支撑），空头取三个上方位中最低者。
+ *  @param {object|null} structureProtection 深层保护位（最后防线）
+ *  @param {object|null} mssInvalidation     4H 最近 swing（BREAK_LAST_LOW/HIGH）
+ *  @param {{low:number|null, high:number|null}|null} internalSwing 1h 最近 ACTIVE swing（实盘由 biasMonitor 注入）
+ *  @returns {number|null} 失效线价格（用于 planR 的 Risk 分母）；无有效方向/无候选 → null（调用方回退） */
+function computeRiskLine(bias, structureProtection, mssInvalidation, internalSwing) {
+  if (bias === "BULLISH") {
+    const candidates = [structureProtection?.price, mssInvalidation?.price, internalSwing?.low].filter((v) => v != null);
+    return candidates.length ? Math.max(...candidates) : null;
+  }
+  if (bias === "BEARISH") {
+    const candidates = [structureProtection?.price, mssInvalidation?.price, internalSwing?.high].filter((v) => v != null);
+    return candidates.length ? Math.min(...candidates) : null;
+  }
+  return null;
 }
 
 function buildMssInvalidation(bias, lastHigh, lastLow) {

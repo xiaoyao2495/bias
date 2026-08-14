@@ -176,6 +176,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       quality: r.quality,
       planR: r.planR,
       remotePlanR: r.remotePlanR,
+      riskLine: r.riskLine ?? null, // planR 的最近失效线（消息层算等效回撤点用）
       structureSpaceRatio: r.structureSpaceRatio,
       remoteStructureSpaceRatio: r.remoteStructureSpaceRatio,
       targets: r.targets,
@@ -894,11 +895,24 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
     lines.push(`4H MSS确认位: ${fmtPrice(mssInvalidation.price)}（收盘${mssDir}才确认结构转移）`);
   }
   if (structureProtection?.price != null) lines.push(`4H深层保护位: ${fmtPrice(structureProtection.price)}（趋势最后防线，不是5m止损）`);
+  // planR 的 Risk 用最近的 ACTIVE 失效线（1h 最近 ACTIVE swing > 4H MSS > 深层保护位）。
+  // 与展示的 4H 位不同时标注出来，避免"planR 用 1h 止损算、消息却只显示 4H 位"的数字对不上。
+  if (cur.riskLine != null && cur.riskLine !== (mssInvalidation?.price ?? null) && cur.riskLine !== (structureProtection?.price ?? null)) {
+    lines.push(`止损参考: 最近1H摆动 ${fmtPrice(cur.riskLine)}（planR 风险基准）`);
+  }
   // planR 只出现在目标行（机会质量等级由 planR 决定），避免同一数值重复展示
   lines.push(`机会质量: ${cur.quality}`);
   const first = cur.targets?.first;
   const remote = cur.targets?.remote;
   if (first) lines.push(`第一目标: ${targetTypeCN(first.type)} ${fmtPrice(first.price)}（${formatPlanR(first.planR)}R）`);
+  // 等效回撤点：第一目标 planR < 1（空间不足/有限）时给出"回撤到哪才有合格 R"的可执行提示。
+  // 否则只会报"空间不足"，用户不知道差多少（DRAM/MU 08/14 其实只差 ~0.6% 回撤就有合格 R）。
+  // p(R) = (target + R×riskLine) / (1+R)；只显示在 (riskLine, 现价) 区间内的合理回撤点。
+  if (first && first.planR != null && first.planR < 1 && cur.riskLine != null) {
+    const r1 = (first.price + cur.riskLine) / 2; // 1R 等效回撤价
+    const inRange = cur.bias === "BULLISH" ? r1 < price && r1 > cur.riskLine : r1 > price && r1 < cur.riskLine;
+    if (inRange) lines.push(`回撤到 ${fmtPrice(r1)} 可达 1R`);
+  }
   if (remote) lines.push(`远端目标: ${targetTypeCN(remote.type)} ${fmtPrice(remote.price)}（${formatPlanR(remote.planR)}R）`);
   // 非 bias 变化时 reason 是可信度/空间原因；bias 变化时原因已在结构行解释
   if (!biasFlipped) lines.push(`原因: ${finalReason(cur, reason)}`);

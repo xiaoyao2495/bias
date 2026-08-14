@@ -94,6 +94,26 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     price = price4h;
   }
 
+  // 内部摆动流动性（1H 层最近 ACTIVE swing 高低点）：完美链条里被扫的"前低/前高"常属此类，
+  // 此前不在扫损监控内（只有 PDH/PDL/EQH/盘前/外部位），普通前低被扫不报警，链条无法触发。
+  // 不用 4H 摆动点：4H swing 距现价通常数天，48 根 5m 扫损窗口（≈4 小时）根本够不着；
+  // 1H swing 距现价 2-12 小时，扫损窗口内可达，才是"扫下方流动性低点"里那个低点。
+  // 取"最近 ACTIVE"（从近往远跳过 SWEPT/BROKEN）：SWEPT 的位已被消耗，既不该监控扫损，
+  // 也不该作为 riskLine 止损参考（MU/SOXL 08/14 最近 1h swing low 均被扫，需回退到次近 ACTIVE）。
+  // 数据源用 h1Swing（48 根、TTL 30min，见上），不能用成交量窗口的周 TTL 1h 缓存——
+  // 否则内部 swing 可能陈旧到已被更新高低点取消，导致扫过期的位。
+  const closed1h = h1Swing.filter((k) => k.closeTime <= now);
+  const swings1h = analyzeSwings(findSwings(closed1h, 1, 1));
+  const isActive1h = (s, isBuy) => liquidityStateForLevel({ price: s.price }, isBuy, closed1h, closed1h[s.index].closeTime).state === "ACTIVE";
+  const lastActiveHigh1h = swings1h.filter((s) => s.type === "HIGH").reverse().find((s) => isActive1h(s, true));
+  const lastActiveLow1h = swings1h.filter((s) => s.type === "LOW").reverse().find((s) => isActive1h(s, false));
+  const internalHigh = lastActiveHigh1h
+    ? [{ type: "INTERNAL_HIGH", price: lastActiveHigh1h.price, state: "ACTIVE", ...(lastActiveHigh1h.time != null ? { time: lastActiveHigh1h.time } : {}) }]
+    : [];
+  const internalLow = lastActiveLow1h
+    ? [{ type: "INTERNAL_LOW", price: lastActiveLow1h.price, state: "ACTIVE", ...(lastActiveLow1h.time != null ? { time: lastActiveLow1h.time } : {}) }]
+    : [];
+
   // 核心判定链路（与 Historical Scanner 共用 analyzeBias，见 engine/analyzeBias.js）
   // 活跃成交量窗口按 analysisTime 精确命中；ICT Session 独立标注，不再借整根进行中 4H
   // 的未来覆盖范围提前生效。m5 同时用于美股关联标的的 04:00-09:30 ET 盘前流动性。
@@ -108,6 +128,9 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     analysisTime,
     h1,
     m5,
+    // 1h 最近 ACTIVE swing 注入 engine：riskLine = 最近的失效线（1h swing > 4H MSS > 深层保护位），
+    // 让 planR 反映日内实际止损（深层保护位常距现价 10%+，用它算 planR 系统性偏低 →"永远空间不足"）。
+    internalSwing: { low: internalLow.length ? internalLow[0].price : null, high: internalHigh.length ? internalHigh[0].price : null },
   });
   // 用有效方向（结构失效 → NEUTRAL），避免显示"已过期的旧结构方向"误导；
   // 同时供扫损 Judas Swing 判定（方向与 bias 相反的 NY Open 扫损 = 开盘假动作）
@@ -126,24 +149,6 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow, state: extLowState }]
     : [];
   if (extLow.length && structure.externalSwingLowTime != null) extLow[0].time = structure.externalSwingLowTime;
-  // 内部摆动流动性（1H 层最近 swing 高低点）：完美链条里被扫的"前低/前高"常属此类，
-  // 此前不在扫损监控内（只有 PDH/PDL/EQH/盘前/外部位），普通前低被扫不报警，链条无法触发。
-  // 不用 4H 摆动点：4H swing 距现价通常数天，48 根 5m 扫损窗口（≈4 小时）根本够不着；
-  // 1H swing 距现价 2-12 小时，扫损窗口内可达，才是"扫下方流动性低点"里那个低点。
-  // 状态用与外部结构位一致的 liquidityStateForLevel（activeFrom = swing 所在 1H K 收盘后）：
-  // 只取 ACTIVE（未被刺破/未收盘破位），避免重复触发同一内部位。
-  // 数据源用 h1Swing（48 根、TTL 30min，见上），不能用成交量窗口的周 TTL 1h 缓存——
-  // 否则内部 swing 可能陈旧到已被更新高低点取消，导致扫过期的位。
-  const closed1h = h1Swing.filter((k) => k.closeTime <= now);
-  const swings1h = analyzeSwings(findSwings(closed1h, 1, 1));
-  const lastHigh1h = swings1h.filter((s) => s.type === "HIGH").pop();
-  const lastLow1h = swings1h.filter((s) => s.type === "LOW").pop();
-  const internalHigh = lastHigh1h && liquidityStateForLevel({ price: lastHigh1h.price }, true, closed1h, closed1h[lastHigh1h.index].closeTime).state === "ACTIVE"
-    ? [{ type: "INTERNAL_HIGH", price: lastHigh1h.price, state: "ACTIVE", ...(lastHigh1h.time != null ? { time: lastHigh1h.time } : {}) }]
-    : [];
-  const internalLow = lastLow1h && liquidityStateForLevel({ price: lastLow1h.price }, false, closed1h, closed1h[lastLow1h.index].closeTime).state === "ACTIVE"
-    ? [{ type: "INTERNAL_LOW", price: lastLow1h.price, state: "ACTIVE", ...(lastLow1h.time != null ? { time: lastLow1h.time } : {}) }]
-    : [];
   const buyLevels = (liquidity.buySide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extHigh.filter((x) => !x.state || x.state === "ACTIVE"), internalHigh);
   const sellLevels = (liquidity.sellSide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extLow.filter((x) => !x.state || x.state === "ACTIVE"), internalLow);
   const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48, effectiveBias);
@@ -168,7 +173,9 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
 
   const decision = bias.decision || {};
   const remotePlanR = decision.planR ?? null;
-  const targets = buildTargetSummary(bias.draw, effectiveBias, price, bias.structureProtection || bias.invalidation);
+  // planR 的 Risk 用 riskLine（最近的 ACTIVE 失效线：1h swing > 4H MSS > 深层保护位，engine 算好）。
+  // 不用深层保护位——它常距现价 10%+，planR 系统性偏低，产生"永远空间不足"的误读。
+  const targets = buildTargetSummary(bias.draw, effectiveBias, price, bias.riskLine ?? (bias.structureProtection || bias.invalidation));
   // 对外的机会质量优先看价格会先遇到的流动性，而不是只看远端 HTF Draw。
   // 否则 SNDK 一类标的会因远端 PWH 显示 4R，但眼前 PDH 可能不足 0.2R。
   const planR = targets.first?.planR ?? remotePlanR;
@@ -213,6 +220,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     mssInvalidation: bias.mssInvalidation || null,
     structureProtection: bias.structureProtection || bias.invalidation || null,
     invalidation: bias.structureProtection || bias.invalidation || null, // 兼容旧状态/报告：即深层结构保护位
+    riskLine: bias.riskLine ?? null, // planR 用的最近失效线（1h ACTIVE swing > 4H MSS > 深层保护位）
     mss: bias.mss
       ? { ...bias.mss, time: new Date(time).toISOString().slice(0, 16).replace("T", " ") } // MSS 事件：方向/保护位/触发时间
       : null,

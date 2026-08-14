@@ -94,6 +94,35 @@ test("buildChanged: Scenario 值 + 原因英译中（ETHUSDT 08-06 通知场景�
   assert.match(msg, /活跃成交量: 活跃窗口 20:00-24:00（占比 28.6%）/);
 });
 
+test("buildChanged: 等效回撤点 — planR<1 且 riskLine 已知时给出可执行回撤价", () => {
+  const msg = buildChanged({
+    symbol: "DRAMUSDT", price: 57.18, reason: "方向可接受但第一目标结构空间有限，等待更好位置",
+    changes: ["confidence"],
+    prev: { ...basePrev, bias: "BULLISH" },
+    cur: { bias: "BULLISH", confidence: "HIGH", decision: "WAIT", quality: "LOW", planR: 0.33, riskLine: 53.94, targets: { first: { type: "PDH", price: 58.25, planR: 0.33 }, remote: null }, scenario: "BULLISH_CONTINUATION" },
+    confidenceScore: 75, structureStatus: "VALID", invalidation: null, mss: null,
+  });
+  // 1R 等效回撤价 = (58.25 + 53.94) / 2 = 56.095；多头区间 (riskLine, 现价) 内 → 显示
+  assert.match(msg, /第一目标: 昨日高点 58.25（0\.33R）/, "planR 展示照旧");
+  assert.match(msg, /回撤到 56\.095 可达 1R/, "给出可执行回撤点，不再只报空间不足");
+});
+
+test("buildChanged: 止损参考 — riskLine 与 4H MSS/深层保护位不同时标注来源", () => {
+  const msg = buildChanged({
+    symbol: "SKHYUSDT", price: 164.91, reason: "Enough upside room with acceptable direction probability",
+    changes: ["confidence", "decision"],
+    prev: { ...basePrev, bias: "BULLISH" },
+    cur: { bias: "BULLISH", confidence: "HIGH", decision: "WATCH", quality: "HIGH", planR: 2.34, riskLine: 162.78, targets: { first: { type: "PDH", price: 168.65, planR: 2.34 }, remote: null }, scenario: "BULLISH_CONTINUATION" },
+    confidenceScore: 75, structureStatus: "VALID", invalidation: null,
+    mssInvalidation: { type: "BREAK_LAST_LOW", price: 151.16 },
+    structureProtection: { type: "BREAK_PROTECTED_LOW", price: 134.01 },
+  });
+  // riskLine 162.78 ≠ MSS 151.16 ≠ 深层保护 134.01 → 标注 1h 止损参考
+  assert.match(msg, /4H MSS确认位: 151\.16（收盘跌破才确认结构转移）/, "4H MSS 位照旧展示");
+  assert.match(msg, /止损参考: 最近1H摆动 162\.78（planR 风险基准）/);
+  assert.match(msg, /第一目标: 昨日高点 168\.65（2\.34R）/);
+});
+
 test("buildSweep: SSL 已收盘确认 — 侧/位/价/回收/背景字段齐全", () => {
   const msg = buildSweep({
     symbol: "SPCXUSDT", price: 111.56,
