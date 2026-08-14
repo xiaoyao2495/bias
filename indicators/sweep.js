@@ -106,13 +106,26 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
     const k = recent[i];
     const idx = h5m.indexOf(k);
     for (const lv of buySide || []) {
+      // 单根内完成：本根刺破且收盘收回下方
       if (k.high > lv.price && k.close < lv.price && !alreadyTaken(lv, true, idx)) {
         return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: k.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
       }
+      // V2.7 跨根收回：本根刺破但收盘未收回（仍在上方），次根（已收盘）收回下方也算 BSL。
+      // ICT 中"插针式扫损"常在 1-2 根内完成；跨根形态比突破回踩更接近扫损语义。
+      const next = h5m[idx + 1];
+      if (k.high > lv.price && k.close >= lv.price && next && next.closeTime <= now && next.close < lv.price && !alreadyTaken(lv, true, idx)) {
+        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: next.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: next.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
+      }
     }
     for (const lv of sellSide || []) {
+      // 单根内完成：本根刺破且收盘收回上方
       if (k.low < lv.price && k.close > lv.price && !alreadyTaken(lv, false, idx)) {
         return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: k.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
+      }
+      // V2.7 跨根收回：本根刺破但收盘未收回（仍在下方），次根（已收盘）收回上方也算 SSL。
+      const next = h5m[idx + 1];
+      if (k.low < lv.price && k.close <= lv.price && next && next.closeTime <= now && next.close > lv.price && !alreadyTaken(lv, false, idx)) {
+        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: next.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: next.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
       }
     }
   }
