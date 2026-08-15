@@ -50,7 +50,9 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     getHistory(symbol, "5m", 1000).catch(() => []),
     // 1h 用于数据驱动活跃成交量窗口：只取上周一~五的 1h 成交量分布；
     // 缓存 TTL 一周；拉取失败降级为 []，不影响 ICT Session 独立标注。
-    getKlines(symbol, "1h", 720).catch(() => []),
+    // fresh:false —— 周级缓存不追最近已收盘 K（binance.js 半成品剔除后不强制重拉），
+    // 否则每根 1h 收盘都会触发一次 720 根重拉，破坏周 TTL 的陈旧语义。
+    getKlines(symbol, "1h", 720, { fresh: false }).catch(() => []),
     // 1h 内部摆动流动性（internalHigh/Low）专用：48 根 ≈ 2 天，TTL 30 分钟。
     // 必须与成交量窗口的 1h（TTL 一周）分开——内部摆动是"最近 2-12 小时会被扫的位"，
     // 陈旧 1h 缓存会算出已被新高/新低取消的 swing（EDENUSDT 08/14 扫损消息根因：

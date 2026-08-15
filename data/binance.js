@@ -39,7 +39,7 @@ const PROXY = /^https?:\/\//i.test(PROXY_ENV) ? PROXY_ENV : "";
 const proxyAgent = PROXY ? new ProxyAgent(PROXY) : null;
 
 const DEFAULT_TTL_MS = (Number(process.env.BIAS_CACHE_TTL_HOURS) || 4) * 3600_000;
-const INTERVAL_MS = { "5m": 5 * 60_000, "4h": 4 * 3600_000, "1d": 24 * 3600_000, "1w": 7 * 24 * 3600_000 };
+const INTERVAL_MS = { "5m": 5 * 60_000, "1h": 3600_000, "4h": 4 * 3600_000, "1d": 24 * 3600_000, "1w": 7 * 24 * 3600_000 };
 
 /** 各周期缓存 TTL 覆盖（分钟）：
  *  4H 是监控主周期，TTL 必须小于周期本身——否则 4H 收盘后缓存仍未过期，
@@ -92,17 +92,52 @@ function ttlMs(interval, ttlMin) {
   return Math.min(cap, base);
 }
 
+/**
+ * 剔除缓存中"写盘时未收盘、读盘时已收盘"的陈旧半成品 K。
+ * 写盘时在 K 进行中，其 OHLC 只是中间值；等它收盘后读回缓存，closeTime<=now 会被
+ * 调用方当成已收盘使用 → 半成品被当最终值（08/15 审计：幽灵内部摆动位 XAG/DOGE/CL/ZEC、
+ * PDH 漂移 SNDK/BZ/XRP、5m 假收回 CL 09:40，统一根因）。
+ * 保留两类：写盘时已收盘的最终 K（closeTime<=mtime）；写盘时未收盘且读盘时仍进行中的 K
+ * （closeTime>now，实时扫损检测要用它判断"当前价已收回"）。
+ * 被剔除的若是最新一根已收盘 K，由 coversLastClosed 触发强制重拉拿最终值。
+ */
+export function filterStaleCandles(candles, mtimeMs, now = Date.now()) {
+  return candles.filter((k) => k.closeTime <= mtimeMs || k.closeTime > now);
+}
+
+/** 过滤后缓存是否已覆盖"最近一根已收盘 K"；未覆盖则缓存不完整（半成品 K 被剔除），应强制重拉。 */
+export function coversLastClosed(candles, interval, now = Date.now()) {
+  const intervalMs = INTERVAL_MS[interval];
+  if (!intervalMs) return true; // 未知周期保守放行
+  let newestClosedCloseTime = -1;
+  for (const k of candles) {
+    if (k.closeTime <= now && k.closeTime > newestClosedCloseTime) newestClosedCloseTime = k.closeTime;
+  }
+  // Binance closeTime = openTime + interval - 1ms（对齐边界 -1，实测 06:45:00 → 06:49:59.999），
+  // 最新一根已收盘 K 的 closeTime 应为 floor((now+1)/interval)*interval - 1（+1 防整点边界 1ms 误差）。
+  const latestCloseTime = Math.floor((now + 1) / intervalMs) * intervalMs - 1;
+  return newestClosedCloseTime >= latestCloseTime;
+}
+
 /** 获取 K 线：优先读本地缓存，未命中则经代理拉取并落盘。
  *  @param {Object} [opts.force] 跳过缓存强制拉取（4H 收盘报告用：边界轮必须拿到最新已收盘 K，见 M1）
- *  @param {number} [opts.ttlMin] 覆盖该次调用的缓存 TTL（分钟）；内部摆动流动性的 1h 用 30min，见 biasMonitor */
-export async function getKlines(symbol, interval, limit = 500, { force = false, ttlMin } = {}) {
+ *  @param {number} [opts.ttlMin] 覆盖该次调用的缓存 TTL（分钟）；内部摆动流动性的 1h 用 30min，见 biasMonitor
+ *  @param {boolean} [opts.fresh] 默认 true：缓存若缺最近一根已收盘 K（半成品被剔除）则强制重拉拿最终值；
+ *      周级 TTL 的活跃成交量窗口（biasMonitor 1h×720）传 false 保持既有陈旧语义 */
+export async function getKlines(symbol, interval, limit = 500, { force = false, ttlMin, fresh = true } = {}) {
   const file = cacheFile(symbol, interval, limit);
 
   if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval, ttlMin)) {
+    const mtimeMs = statSync(file).mtimeMs;
     const cached = readCache(file);
     if (cached) {
-      console.error(`[binance] 命中本地缓存: ${file}`);
-      return cached;
+      const good = filterStaleCandles(cached, mtimeMs);
+      if (fresh && !coversLastClosed(good, interval)) {
+        console.error(`[binance] 缓存缺最近已收盘 K（半成品剔除），强制重拉: ${file}`);
+      } else {
+        console.error(`[binance] 命中本地缓存: ${file}`);
+        return good;
+      }
     }
   }
 
@@ -115,7 +150,7 @@ export async function getKlines(symbol, interval, limit = 500, { force = false, 
     const cached = readCache(file);
     if (cached) {
       console.error(`[binance] 网络请求失败(${e.message})，回退本地缓存: ${file}`);
-      return cached;
+      return filterStaleCandles(cached, statSync(file).mtimeMs);
     }
     throw e;
   }
@@ -126,14 +161,20 @@ export async function getKlines(symbol, interval, limit = 500, { force = false, 
  * 用于回放（Case Replay）等需要长历史数据的场景。
  * 缓存文件：{SYMBOL}_{INTERVAL}_h{count}.json
  */
-export async function getHistory(symbol, interval, count, { force = false, ttlMin } = {}) {
+export async function getHistory(symbol, interval, count, { force = false, ttlMin, fresh = true } = {}) {
   const file = cacheFile(symbol, interval, `h${count}`);
 
   if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval, ttlMin)) {
+    const mtimeMs = statSync(file).mtimeMs;
     const cached = readCache(file);
     if (cached) {
-      console.error(`[binance] 命中本地缓存: ${file}`);
-      return cached;
+      const good = filterStaleCandles(cached, mtimeMs);
+      if (fresh && !coversLastClosed(good, interval)) {
+        console.error(`[binance] 缓存缺最近已收盘 K（半成品剔除），强制重拉: ${file}`);
+      } else {
+        console.error(`[binance] 命中本地缓存: ${file}`);
+        return good;
+      }
     }
   }
 
@@ -156,7 +197,7 @@ export async function getHistory(symbol, interval, count, { force = false, ttlMi
     const cached = readCache(file);
     if (cached) {
       console.error(`[binance] 网络请求失败(${e.message})，回退本地缓存: ${file}`);
-      return cached;
+      return filterStaleCandles(cached, statSync(file).mtimeMs);
     }
     throw e;
   }
