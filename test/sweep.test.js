@@ -236,6 +236,23 @@ test("三级事件：刺破未收回=L1，旧 detectSweeps 仍不把它当扫损
   assert.equal(detectSweeps(input, [{ type: "PDH", price: 105 }], [], 106), null);
 });
 
+test("L1：首根恰好收在流动性位时，后续继续刺破不得生成第二个事件", () => {
+  const bars = Array.from({ length: 48 }, (_, i) => closedK(i, 101, 102, 100.5, 101));
+  bars.push(closedK(48, 100.5, 101, 99.9, 100)); // 首次拿走 SSL，收盘恰好等于 level
+  bars.push(closedK(49, 100, 101, 99.8, 100));   // 仍未收回，不是新的流动性事件
+  const events = detectSweepEvents(
+    [...bars, liveK(100, 101, 99.8, 100)],
+    [],
+    [{ type: "INTERNAL_LOW", price: 100 }],
+    100,
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].tier, 1);
+  assert.equal(events[0].time, bars[48].time);
+  assert.equal(events[0].sweptPrice, 99.9);
+});
+
 test("三级事件：收回后有位移主导 MSS 与 FVG=L3，否则保持L2", () => {
   const raid = { key: "raid", baseKey: "raid", reclaimed: true, tier: 2, stage: "RECLAIMED_RAID" };
   assert.equal(classifyLiquidityEvent(raid).tier, 2);

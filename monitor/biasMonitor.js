@@ -198,9 +198,10 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
       const events = scanStructureEvents(m5, { lookback: 48, left: 1, right: 1 });
       const annotatedFvgs = annotatePDArray({ fvg: findFvgs(closed5m).slice(-80), ob: [] }, null, closed5m).fvg;
       const qualifiedFvgs = annotateFvgQuality(annotatedFvgs, closed5m, { displacements: dispList, structureEvents: events });
+      const structureLinks = linkStructureEventsToSweeps(events, sweeps);
       for (const sweep of sweeps) {
         if (sweep.tier < 2) continue;
-        const event = structureEventForSweep(events, sweep);
+        const event = structureLinks.get(sweep) || null;
         if (event) {
           sweep.mss5m = { direction: sweep.side === "SSL" ? "UP" : "DOWN", lastEvent: event };
           sweep.confirmationFvg = executableFvgForMss(qualifiedFvgs, event);
@@ -319,14 +320,66 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   };
 }
 
-/** 只把扫损之后、方向与预期反转一致的已确认 MSS 关联到扫损消息。 */
-export function structureEventForSweep(events, sweep) {
+/**
+ * Sweep → MSS 属于紧邻的因果链，不是“窗口内任意更晚 MSS”。
+ * 60 分钟已覆盖 12 根 5m K；更久以后出现的结构转移不再归因给旧 sweep。
+ */
+export const SWEEP_MSS_LINK_WINDOW_MS = 60 * 60_000;
+
+function sweepConfirmedAt(sweep) {
+  return sweep?.closedTime ?? sweep?.reclaimTime ?? sweep?.time;
+}
+
+/** 只取 sweep 后首个、方向一致且仍在因果窗口内的已确认 MSS。 */
+export function structureEventForSweep(events, sweep, maxDelayMs = SWEEP_MSS_LINK_WINDOW_MS) {
   if (!sweep) return null;
   const expectedDirection = sweep.side === "SSL" ? "UP" : "DOWN";
-  const sweepConfirmedAt = sweep.closedTime ?? sweep.time;
-  return [...(events || [])].reverse().find(
-    (e) => e.type === "MSS" && e.direction === expectedDirection && e.confirmed && e.time >= sweepConfirmedAt
-  ) || null;
+  const confirmedAt = sweepConfirmedAt(sweep);
+  return [...(events || [])]
+    .filter((e) => e.type === "MSS"
+      && e.direction === expectedDirection
+      && e.confirmed
+      && e.time >= confirmedAt
+      && e.time - confirmedAt <= maxDelayMs)
+    .sort((a, b) => a.time - b.time)[0] || null;
+}
+
+/**
+ * 一次 MSS 只能确认它之前最近的一组同向 sweep。
+ * 同一确认时刻的多个价位属于同一 raid leg，可共享该 MSS；相隔较远的旧 sweep 不得复用。
+ */
+export function linkStructureEventsToSweeps(events, sweeps, maxDelayMs = SWEEP_MSS_LINK_WINDOW_MS) {
+  const links = new Map();
+  const groups = [];
+  for (const sweep of sweeps || []) {
+    if ((sweep?.tier ?? 2) < 2) continue;
+    const confirmedAt = sweepConfirmedAt(sweep);
+    if (!Number.isFinite(Number(confirmedAt))) continue;
+    let group = groups.find((item) => item.side === sweep.side && item.confirmedAt === confirmedAt);
+    if (!group) {
+      group = { side: sweep.side, confirmedAt, sweeps: [], claimed: false };
+      groups.push(group);
+    }
+    group.sweeps.push(sweep);
+  }
+
+  const confirmedMss = [...(events || [])]
+    .filter((event) => event?.type === "MSS" && event.confirmed && Number.isFinite(Number(event.time)))
+    .sort((a, b) => a.time - b.time);
+  for (const event of confirmedMss) {
+    const expectedSide = event.direction === "UP" ? "SSL" : event.direction === "DOWN" ? "BSL" : null;
+    if (!expectedSide) continue;
+    const group = groups
+      .filter((item) => !item.claimed
+        && item.side === expectedSide
+        && item.confirmedAt <= event.time
+        && event.time - item.confirmedAt <= maxDelayMs)
+      .sort((a, b) => b.confirmedAt - a.confirmedAt)[0];
+    if (!group) continue;
+    group.claimed = true;
+    for (const sweep of group.sweeps) links.set(sweep, event);
+  }
+  return links;
 }
 
 /** L3 只绑定本次位移 MSS 真正产生、且当前仍可执行的同一个 FVG。 */

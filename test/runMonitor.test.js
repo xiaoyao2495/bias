@@ -10,8 +10,8 @@ import assert from "node:assert/strict";
 import { readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf, appendNotification, pendingSweepEvents, pruneSweepPushed, opportunityLastPushedAt } from "../scripts/runMonitor.js";
-import { displacementFor4h, buildTargetSummary, executableFvgForMss, isSweepCandidateAt, structureEventForSweep } from "../monitor/biasMonitor.js";
+import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf, appendNotification, pendingSweepEvents, pruneSweepPushed, opportunityLastPushedAt, groupSweepNotifications } from "../scripts/runMonitor.js";
+import { displacementFor4h, buildTargetSummary, executableFvgForMss, isSweepCandidateAt, structureEventForSweep, linkStructureEventsToSweeps } from "../monitor/biasMonitor.js";
 
 test("最终操作服从执行区，并在 1R 临界区保留旧状态", () => {
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "WAIT", planR: 4.3 }, { decision: "WATCH" }), "WAIT");
@@ -118,6 +118,21 @@ test("buildSweep: 同价位多来源合并展示", () => {
   assert.match(msg, /外部结构高点 \/ 昨日高点 \/ 内部摆动高点 0\.1025/);
 });
 
+test("同一波同方向扫过多个不同价位时只构建一条合并通知", () => {
+  const events = [
+    { key: "a", tier: 2, stage: "RECLAIMED_RAID", side: "BSL", type: "INTERNAL_HIGH", level: 0.31849, sweptPrice: 0.32253, close: 0.31575, time: 100, closedTime: 300, realtime: false },
+    { key: "b", tier: 2, stage: "RECLAIMED_RAID", side: "BSL", type: "INTERNAL_HIGH", level: 0.3161, sweptPrice: 0.31832, close: 0.31575, time: 0, reclaimTime: 100, closedTime: 300, realtime: false },
+  ];
+  const grouped = groupSweepNotifications(events);
+  assert.equal(grouped.length, 1);
+  assert.deepEqual(grouped[0].notificationKeys, ["a", "b"]);
+
+  const msg = buildSweep({ symbol: "BTWUSDT", price: 0.31232, cur: baseCur, confidenceScore: 0, sweep: grouped[0] });
+  assert.match(msg, /合并 2 个池/);
+  assert.match(msg, /0\.31849/);
+  assert.match(msg, /0\.3161/);
+});
+
 test("扫损消息只关联扫损后、反转方向一致的 MSS", () => {
   const sweep = { side: "SSL", closedTime: 200 };
   const events = [
@@ -127,6 +142,25 @@ test("扫损消息只关联扫损后、反转方向一致的 MSS", () => {
     { type: "MSS", direction: "UP", confirmed: true, time: 270 },
   ];
   assert.equal(structureEventForSweep(events, sweep)?.time, 270);
+});
+
+test("一次 MSS 只确认它之前最近的一组 sweep，不复用到更早的独立 raid", () => {
+  const oldSweep = { tier: 2, side: "BSL", closedTime: 100 };
+  const recentA = { tier: 2, side: "BSL", closedTime: 200 };
+  const recentB = { tier: 2, side: "BSL", closedTime: 200 };
+  const mss = { type: "MSS", direction: "DOWN", confirmed: true, time: 300 };
+  const links = linkStructureEventsToSweeps([mss], [oldSweep, recentA, recentB], 1000);
+
+  assert.equal(links.has(oldSweep), false);
+  assert.equal(links.get(recentA), mss);
+  assert.equal(links.get(recentB), mss);
+});
+
+test("超过 sweep→MSS 因果窗口的结构转移不得把旧 sweep 升级为 L3", () => {
+  const sweep = { tier: 2, side: "SSL", closedTime: 100 };
+  const late = { type: "MSS", direction: "UP", confirmed: true, time: 201 };
+  assert.equal(structureEventForSweep([late], sweep, 100), null);
+  assert.equal(linkStructureEventsToSweeps([late], [sweep], 100).size, 0);
 });
 
 test("L3只绑定本次MSS位移产生且仍可执行的FVG", () => {

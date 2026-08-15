@@ -80,8 +80,10 @@ function detectSingleSweep(h5m, buySide, sellSide, price, window = 48, bias = nu
     return activeFrom == null || k.time >= activeFrom;
   };
 
-  // 流动性位是否早已被消费（位形成之后任一根已收盘 K 收在 level 外侧）：
-  //   BSL 只要收在 level 上方 → 该位已破位/被扫，之后插针只是回测旧位，不算新扫损；SSL 对称。
+  // 流动性位是否早已被消费（位形成之后任一根已收盘 K 收在 level 外侧或恰好收于 level）：
+  //   BSL 只要收在 level 上方/等于 level → 该位已破位/被拿走，之后插针只是回测旧位，不算新事件；SSL 对称。
+  // 等号必须计入：L1 本身用 close >= / <= level 判定“拿走但未收回”，若这里仍用严格不等号，
+  // 首根恰好收在 level 的 L1 会在后续 K 再次生成新 time key，造成同一流动性池连续通报。
   // 只认位形成之后的收盘（wick 刺破不算消费，与扫损"收回"语义一致）。
   // 位形成之前的历史 K 收在 level 外侧不是对本位的消费——否则"低于历史高点"的内部摆动位/PDH
   // 会被永久判为已消费，扫损永不报（08/15 扫损骤减根因：42 个 ACTIVE 位被吞、DOGE/NBIS 漏报）。
@@ -91,7 +93,7 @@ function detectSingleSweep(h5m, buySide, sellSide, price, window = 48, bias = nu
       const k = h5m[i];
       if (k.closeTime > now) continue;
       if (k.time < from) continue; // 位形成前的 K 不构成对本位的消费
-      if (isBuy ? k.close > lv.price : k.close < lv.price) return true;
+      if (isBuy ? k.close >= lv.price : k.close <= lv.price) return true;
     }
     return false;
   };

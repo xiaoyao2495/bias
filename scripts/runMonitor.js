@@ -103,6 +103,33 @@ export function pendingSweepEvents(sweeps, pushed = {}, now = marketNow()) {
   });
 }
 
+/**
+ * 通知层按“同一确认时刻 + 同一方向”合并一波扫过的多个价位。
+ * 检测层仍保留独立事件，确保每个池可以分别 L1→L2→L3 升级并独立去重。
+ */
+export function groupSweepNotifications(sweeps) {
+  const groups = [];
+  for (const sweep of sweeps || []) {
+    const eventAt = sweep.closedTime ?? sweep.reclaimTime ?? sweep.time;
+    let group = groups.find((item) => item.side === sweep.side && item.eventAt === eventAt);
+    if (!group) {
+      group = { side: sweep.side, eventAt, events: [] };
+      groups.push(group);
+    }
+    group.events.push(sweep);
+  }
+  return groups.map((group) => {
+    if (group.events.length === 1) return group.events[0];
+    const ordered = [...group.events].sort((a, b) => (b.tier ?? 2) - (a.tier ?? 2));
+    const primary = ordered[0];
+    return {
+      ...primary,
+      notificationEvents: group.events,
+      notificationKeys: [...new Set(group.events.map((event) => event.key).filter(Boolean))],
+    };
+  });
+}
+
 /** 机会去重时间：优先新稳定 key；升级首轮兼容旧版“滚动 index + 确认时间”key。 */
 export function opportunityLastPushedAt(op, pushed = {}) {
   const direct = Number(pushed?.[op?.key]) || 0;
@@ -344,14 +371,20 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     }
     // 流动性扫损是独立事件：首轮及新进入 Top30 的标的也必须推；cur 已合并跨 Top30 的历史去重。
     for (const item of overview) {
-      for (const sweep of pendingSweepEvents(item.sweeps, item.cur.sweepPushed)) {
+      const pendingSweeps = pendingSweepEvents(item.sweeps, item.cur.sweepPushed);
+      for (const sweep of groupSweepNotifications(pendingSweeps)) {
         try {
           await sendNotification(
             buildSweep({ ...item, sweep, mss5m: sweep.mss5m || null }),
             `${item.symbol} 扫损`,
           );
-          nextState[item.symbol].sweepPushed[sweep.key] = marketNow();
-          log(`[runMonitor] 已推送 ${item.symbol} 扫损（${sweep.side} @ ${sweep.level}）`);
+          const pushedAt = marketNow();
+          const pushedKeys = sweep.notificationKeys?.length ? sweep.notificationKeys : [sweep.key];
+          for (const key of pushedKeys) nextState[item.symbol].sweepPushed[key] = pushedAt;
+          const levels = sweep.notificationEvents?.length
+            ? sweep.notificationEvents.map((event) => event.level).join(", ")
+            : sweep.level;
+          log(`[runMonitor] 已推送 ${item.symbol} 扫损（${sweep.side} @ ${levels}）`);
         } catch (e) {
           // 本轮 key 未写入 nextState.sweepPushed → 下一轮仍视为新扫损 → 重推（不漏报流动性事件）
           log(`[runMonitor] ${item.symbol} 扫损推送失败，保留旧记录下轮重试: ${e.message}`);
@@ -654,38 +687,58 @@ function bjHHMM(ms) {
 
 /** 扫损事件消息（⚡）：市场刚扫掉某流动性位后收回——带当前市场背景，帮助理解"在什么结构下发生" */
 export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m, newsLine }) {
-  const tier = sweep.tier ?? 2;
+  const notificationEvents = sweep.notificationEvents?.length > 1 ? sweep.notificationEvents : null;
+  const tier = notificationEvents
+    ? Math.max(...notificationEvents.map((event) => event.tier ?? 2))
+    : sweep.tier ?? 2;
   const stage = sweep.stage || "RECLAIMED_RAID";
   const sideText = sweep.side === "BSL" ? "上方买方流动性（BSL）" : "下方卖方流动性（SSL）";
-  const levelTypes = [...new Set(sweep.levelTypes?.length ? sweep.levelTypes : [sweep.type])];
-  const levelText = levelTypes.map(sweepTypeLabel).join(" / ");
-  const sweptText = tier === 1
-    ? sweep.side === "BSL"
-      ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}），尚未收回`
-      : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}），尚未收回`
-    : sweep.side === "BSL"
-      ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回`
-      : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
-  const tag = sweep.realtime ? "实时" : tier === 1 ? "已收盘" : "已确认";
-  const timeText = sweep.realtime
+  const levelTextOf = (event) => [...new Set(event.levelTypes?.length ? event.levelTypes : [event.type])]
+    .map(sweepTypeLabel).join(" / ");
+  const sweptTextOf = (event) => {
+    const eventTier = event.tier ?? 2;
+    const levelText = levelTextOf(event);
+    if (eventTier === 1) return event.side === "BSL"
+      ? `刺破 ${levelText} ${event.level}（高 ${event.sweptPrice}），尚未收回`
+      : `跌破 ${levelText} ${event.level}（低 ${event.sweptPrice}），尚未收回`;
+    return event.side === "BSL"
+      ? `刺破 ${levelText} ${event.level}（高 ${event.sweptPrice}）后收回`
+      : `跌破 ${levelText} ${event.level}（低 ${event.sweptPrice}）后收回`;
+  };
+  const timeTextOf = (event) => event.realtime
     ? `检测于 ${nowHHMM()}（本根 5m 进行中）`
-    : sweep.reclaimTime != null
-      ? `刺破 K: ${klineSpan(sweep.time)} → 收回 K: ${klineSpan(sweep.reclaimTime)}（跨根确认）`
-      : tier === 1
-        ? `拿流动性 K: ${klineSpan(sweep.time)}（已收盘）`
-        : `扫损 K: ${klineSpan(sweep.time)}（已收盘确认）`;
-  const formedText = levelFormedText(sweep); // 被扫流动性位是"哪根 K/哪天"形成的（用户对照图表定位用）
+    : event.reclaimTime != null
+      ? `刺破 K: ${klineSpan(event.time)} → 收回 K: ${klineSpan(event.reclaimTime)}（跨根确认）`
+      : (event.tier ?? 2) === 1
+        ? `拿流动性 K: ${klineSpan(event.time)}（已收盘）`
+        : `扫损 K: ${klineSpan(event.time)}（已收盘确认）`;
+  const tag = notificationEvents
+    ? notificationEvents.every((event) => event.realtime) ? "实时" : tier === 1 ? "已收盘" : "已确认"
+    : sweep.realtime ? "实时" : tier === 1 ? "已收盘" : "已确认";
   const explicitTier = sweep.tier != null;
   const lines = [
-    explicitTier
+    notificationEvents
+      ? `**⚡ ${symbol} 流动性事件（合并 ${notificationEvents.length} 个池 · 最高 L${tier} · ${tag}）**  🕐 ${nowHHMM()}`
+      : explicitTier
       ? `**⚡ ${symbol} 流动性事件 L${tier}（${tag}）**  🕐 ${nowHHMM()}`
       : `**⚡ ${symbol} 流动性扫损（${tag}）**  🕐 ${nowHHMM()}`,
     "",
-    ...(explicitTier ? [`级别: L${tier} · ${stage}`] : []),
-    `${sideText}${tier === 1 ? "已被拿走" : "被扫"}：${sweptText}，收 ${sweep.close}`,
-    `${[formedText, timeText, `现价 ${price}`].filter(Boolean).join(" · ")}`,
-    "",
   ];
+  if (notificationEvents) {
+    lines.push(`${sideText}本次波及 ${notificationEvents.length} 个独立流动性池：`);
+    for (const event of notificationEvents) {
+      lines.push(`L${event.tier ?? 2} · ${event.stage || "RECLAIMED_RAID"}：${sweptTextOf(event)}，收 ${event.close}`);
+      lines.push(`${[levelFormedText(event), timeTextOf(event)].filter(Boolean).join(" · ")}`);
+    }
+    lines.push(`现价 ${price}`, "");
+  } else {
+    lines.push(
+      ...(explicitTier ? [`级别: L${tier} · ${stage}`] : []),
+      `${sideText}${tier === 1 ? "已被拿走" : "被扫"}：${sweptTextOf(sweep)}，收 ${sweep.close}`,
+      `${[levelFormedText(sweep), timeTextOf(sweep), `现价 ${price}`].filter(Boolean).join(" · ")}`,
+      "",
+    );
+  }
   // Judas Swing（ICT 2022）：NY Open 窗口内、方向与 4H Bias 相反的扫损 = 开盘假动作，
   // 先插针扫流动性（止损），随后反转走真方向 → 提醒别把假动作当方向信号
   if (sweep.judas) {
