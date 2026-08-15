@@ -28,6 +28,8 @@
 
 import { marketNow } from "../utils/marketClock.js";
 
+const HTF_SWING_RIGHT = 2;
+
 const EQ_TOLERANCE = 0.002; // 0.2%
 const EQ_LOOKBACK_BARS = 150; // EQH/EQL 只统计最近 150 根 4H K 线的 swing（≈25 天）
 // V2.0：Draw on Liquidity 优先级（不含 external/internal swing，见 rankLiquidityTargets）
@@ -236,10 +238,10 @@ export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = 
   const recentSwings = swings.filter((s) => s.index >= maxIdx - eqLookbackBars + 1);
 
   const eqh = findEqualHighs(recentSwings, tolerance);
-  if (eqh) buySide.push({ type: "EQH", group: "HTF", ...eqh, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eqh.formedIndex) ?? eqh.formedTime } : {}) });
+  if (eqh) buySide.push({ type: "EQH", group: "HTF", ...eqh, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eqh.formedIndex + HTF_SWING_RIGHT) ?? candleCloseAt(referenceCandles, eqh.formedIndex) ?? eqh.formedTime } : {}) });
 
   const eql = findEqualLows(recentSwings, tolerance);
-  if (eql) sellSide.push({ type: "EQL", group: "HTF", ...eql, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eql.formedIndex) ?? eql.formedTime } : {}) });
+  if (eql) sellSide.push({ type: "EQL", group: "HTF", ...eql, ...(referenceCandles ? { activeFrom: candleCloseAt(referenceCandles, eql.formedIndex + HTF_SWING_RIGHT) ?? candleCloseAt(referenceCandles, eql.formedIndex) ?? eql.formedTime } : {}) });
 
   if (referenceCandles) {
     annotateLiquidityStates(buySide, true, referenceCandles);

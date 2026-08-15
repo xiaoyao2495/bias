@@ -21,18 +21,28 @@
  *   node monitor/biasMonitor.js BTCUSDT ETHUSDT SOLUSDT
  */
 import { getHistory, getKlines } from "../data/binance.js";
-import { detectSweeps } from "../indicators/sweep.js";
+import { classifyLiquidityEvent, detectSweepEvents } from "../indicators/sweep.js";
 import { findDisplacements } from "../indicators/displacement.js";
 import { scanStructureEvents } from "../indicators/mss.js";
 import { computeAmdStage } from "../indicators/amd.js";
 import { findSwings, analyzeSwings } from "../indicators/swing.js";
 import { liquidityStateForLevel } from "../indicators/liquidity.js";
+import { annotateFvgQuality, annotatePDArray, findFvgs, isExecutableFvg } from "../indicators/pdArray.js";
 import { analyzeBias } from "../engine/analyzeBias.js";
 import { pathToFileURL } from "node:url";
 import { marketNow } from "../utils/marketClock.js";
 
 // 与 scanner/replayCase 同款数据窗口：4H 5000 根 ≈ 830 天，1D/1W 供 HTF 方向
 const HISTORY = { "4h": 5000, "1d": 2000, "1w": 400 };
+const SWEEP_WINDOW_MS = 48 * 5 * 60_000;
+
+/** Draw 只认 ACTIVE；事件检测保留窗口内 SWEPT/BROKEN 位，以便轮询/重启后补报 L1/L2/L3。 */
+export function isSweepCandidateAt(level, now, windowMs = SWEEP_WINDOW_MS) {
+  return !level?.state
+    || level.state === "ACTIVE"
+    || (level.state === "SWEPT" && level.sweptAt >= now - windowMs)
+    || (level.state === "BROKEN" && level.brokenAt >= now - windowMs);
+}
 
 /**
  * 对单个 symbol 跑一次 Bias 分析，返回简洁摘要。
@@ -101,15 +111,16 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // 此前不在扫损监控内（只有 PDH/PDL/EQH/盘前/外部位），普通前低被扫不报警，链条无法触发。
   // 不用 4H 摆动点：4H swing 距现价通常数天，48 根 5m 扫损窗口（≈4 小时）根本够不着；
   // 1H swing 距现价 2-12 小时，扫损窗口内可达，才是"扫下方流动性低点"里那个低点。
-  // 取"最近 ACTIVE"（从近往远跳过 SWEPT/BROKEN）：SWEPT 的位已被消耗，既不该监控扫损，
-  // 也不该作为 riskLine 止损参考（MU/SOXL 08/14 最近 1h swing low 均被扫，需回退到次近 ACTIVE）。
+  // 取"最近 ACTIVE"（从近往远跳过 SWEPT/BROKEN）作为 Draw/riskLine；扫损检测会在下方另行
+  // 加回窗口内最近 SWEPT 的位，避免事件在轮询间隔、重启或 1H/4H 收线边界被提前过滤。
   // 数据源用 h1Swing（48 根、TTL 30min，见上），不能用成交量窗口的周 TTL 1h 缓存——
   // 否则内部 swing 可能陈旧到已被更新高低点取消，导致扫过期的位。
   const closed1h = h1Swing.filter((k) => k.closeTime <= now);
   const swings1h = analyzeSwings(findSwings(closed1h, 1, 1));
   // right=1 的 1H swing 只有右侧 K 收盘后才成立；此前的 5m 行情不能倒过来“扫”一个尚未确认的位。
   const activeFrom1h = (s) => closed1h[s.index + 1]?.closeTime ?? closed1h[s.index]?.closeTime;
-  const isActive1h = (s, isBuy) => liquidityStateForLevel({ price: s.price }, isBuy, closed1h, activeFrom1h(s)).state === "ACTIVE";
+  const state1h = (s, isBuy) => liquidityStateForLevel({ price: s.price }, isBuy, closed1h, activeFrom1h(s));
+  const isActive1h = (s, isBuy) => state1h(s, isBuy).state === "ACTIVE";
   // 位必须与现价同侧：BEARISH 的 internalHigh 须仍在价格上方（价格未突破它），BULLISH 的
   // internalLow 须仍在价格下方。价格已突破的位（如 BZUSDT 08/14 22:50 现价 85.84 > 1h swing high
   // 85.76）既不能当失效线（risk = 位-现价 变负 → 目标/planR 全失效 →"机会质量 -"），
@@ -122,6 +133,13 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const internalLow = lastActiveLow1h
     ? [{ type: "INTERNAL_LOW", price: lastActiveLow1h.price, state: "ACTIVE", activeFrom: activeFrom1h(lastActiveLow1h), ...(lastActiveLow1h.time != null ? { time: lastActiveLow1h.time } : {}) }]
     : [];
+  // Draw/riskLine 只使用 ACTIVE；扫损补报还需保留最近已 SWEPT 的位，否则 1H 收线后事件会先被过滤掉。
+  const recentConsumedInternalHigh = swings1h.filter((s) => s.type === "HIGH").map((s) => ({ swing: s, state: state1h(s, true) }))
+    .filter(({ state }) => (state.state === "SWEPT" ? state.sweptAt : state.brokenAt) >= now - SWEEP_WINDOW_MS)
+    .map(({ swing: s, state }) => ({ type: "INTERNAL_HIGH", price: s.price, activeFrom: activeFrom1h(s), time: s.time, ...state }));
+  const recentConsumedInternalLow = swings1h.filter((s) => s.type === "LOW").map((s) => ({ swing: s, state: state1h(s, false) }))
+    .filter(({ state }) => (state.state === "SWEPT" ? state.sweptAt : state.brokenAt) >= now - SWEEP_WINDOW_MS)
+    .map(({ swing: s, state }) => ({ type: "INTERNAL_LOW", price: s.price, activeFrom: activeFrom1h(s), time: s.time, ...state }));
 
   // 核心判定链路（与 Historical Scanner 共用 analyzeBias，见 engine/analyzeBias.js）
   // 活跃成交量窗口按 analysisTime 精确命中；ICT Session 独立标注，不再借整根进行中 4H
@@ -148,36 +166,54 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // P1-A：流动性扫损（5m K 线：进行中 5m 实时检测 + 最近 48 根已收盘 5m 确认，≈4 小时窗口）
   // 用 5m 粒度：扫损是分钟级价格行为（刺破流动性后收回），4H 单根 K 会把整个过程包住，粒度过粗
   // 外部结构位补形成时间（externalSwingHighTime/LowTime，4H swing 开盘时间），供扫损消息展示"被扫的流动性是什么时候形成的"
-  const extHighState = structure.externalSwingHighState?.state;
-  const extLowState = structure.externalSwingLowState?.state;
-  const extHigh = structure.externalSwingHigh != null && extHighState !== "BROKEN"
-    ? [{ type: "EXTERNAL_HIGH", price: structure.externalSwingHigh, state: extHighState }]
+  const extHighState = structure.externalSwingHighState || null;
+  const extLowState = structure.externalSwingLowState || null;
+  const activeFrom4h = (index, fallback) => closed4h[index + 2]?.closeTime ?? closed4h[index]?.closeTime ?? fallback;
+  const extHigh = structure.externalSwingHigh != null
+    ? [{ type: "EXTERNAL_HIGH", price: structure.externalSwingHigh, ...(extHighState || {}) }]
     : [];
-  if (extHigh.length && structure.externalSwingHighTime != null) extHigh[0].time = structure.externalSwingHighTime;
-  const extLow = structure.externalSwingLow != null && extLowState !== "BROKEN"
-    ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow, state: extLowState }]
+  if (extHigh.length) {
+    if (structure.externalSwingHighTime != null) extHigh[0].time = structure.externalSwingHighTime;
+    extHigh[0].activeFrom = activeFrom4h(structure.externalSwingHighIndex, structure.externalSwingHighTime);
+  }
+  const extLow = structure.externalSwingLow != null
+    ? [{ type: "EXTERNAL_LOW", price: structure.externalSwingLow, ...(extLowState || {}) }]
     : [];
-  if (extLow.length && structure.externalSwingLowTime != null) extLow[0].time = structure.externalSwingLowTime;
-  const buyLevels = (liquidity.buySide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extHigh.filter((x) => !x.state || x.state === "ACTIVE"), internalHigh);
-  const sellLevels = (liquidity.sellSide || []).filter((x) => !x.state || x.state === "ACTIVE").concat(extLow.filter((x) => !x.state || x.state === "ACTIVE"), internalLow);
-  const sweep = detectSweeps(m5, buyLevels, sellLevels, price5m, 48, effectiveBias);
+  if (extLow.length) {
+    if (structure.externalSwingLowTime != null) extLow[0].time = structure.externalSwingLowTime;
+    extLow[0].activeFrom = activeFrom4h(structure.externalSwingLowIndex, structure.externalSwingLowTime);
+  }
+  const sweepCandidate = (x) => isSweepCandidateAt(x, now);
+  const buyLevels = (liquidity.buySide || []).filter(sweepCandidate).concat(extHigh.filter(sweepCandidate), internalHigh, recentConsumedInternalHigh);
+  const sellLevels = (liquidity.sellSide || []).filter(sweepCandidate).concat(extLow.filter(sweepCandidate), internalLow, recentConsumedInternalLow);
+  const sweeps = detectSweepEvents(m5, buyLevels, sellLevels, price5m, 48, effectiveBias);
+  const closed5m = m5.filter((k) => k.closeTime <= now);
+  const dispList = findDisplacements(m5);
 
   // P1-B：5m 层 MSS/BOS（周期无关检测；5m 用 ICT 最小 swing 窗口每侧 1 根，收盘确认）
   // 仅检测不生成信号：在扫损消息中标注（扫损→收回→MSS 是 ICT 经典链条），供人工判断结构转向。
   // m5 拉取失败（[]）时跳过，不阻断主分析。
-  let mss5m = null;
-  if (sweep && m5.length >= 3) {
+  if (sweeps.length && m5.length >= 3) {
     try {
       const events = scanStructureEvents(m5, { lookback: 48, left: 1, right: 1 });
-      const event = structureEventForSweep(events, sweep);
-      const expectedDirection = sweep.side === "SSL" ? "UP" : "DOWN";
-      if (event) mss5m = { direction: expectedDirection, lastEvent: event };
+      const annotatedFvgs = annotatePDArray({ fvg: findFvgs(closed5m).slice(-80), ob: [] }, null, closed5m).fvg;
+      const qualifiedFvgs = annotateFvgQuality(annotatedFvgs, closed5m, { displacements: dispList, structureEvents: events });
+      for (const sweep of sweeps) {
+        if (sweep.tier < 2) continue;
+        const event = structureEventForSweep(events, sweep);
+        if (event) {
+          sweep.mss5m = { direction: sweep.side === "SSL" ? "UP" : "DOWN", lastEvent: event };
+          sweep.confirmationFvg = executableFvgForMss(qualifiedFvgs, event);
+        }
+        Object.assign(sweep, classifyLiquidityEvent(sweep));
+      }
     } catch {}
   }
+  const sweep = sweeps.filter((item) => item.tier >= 2).at(-1) || null;
+  const mss5m = sweep?.mss5m || null;
 
   // P1-C：位移 K（5m 粒度：最近 48 根 5m ≈ 4 小时内出现位移 K，用于收盘报告标注）
   // 门槛 = BODY + VOLUME（ICT 2022）；structureBreak/fvg 为标签（可空），供消息层展示证据
-  const dispList = findDisplacements(m5);
   // 收盘报告只能展示“刚收完的这根 4H”内部发生的 5m 位移，不能用滚动四小时窗口，
   // 否则边界附近会把上一根或新一根 4H 的位移拼到本根报告里。
   const displacement = displacementFor4h(dispList, lastClosed);
@@ -240,6 +276,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     confluenceScore: bias.confidence ? bias.confidence.confluenceScore : null,
     confidenceScore: bias.confidence ? bias.confidence.score : null, // 兼容旧 state/报告
     sweep, // { side, type, level, sweptPrice, close, time } | null（流动性扫损事件）
+    sweeps, // 全部独立流动性池事件（按确认时间升序）；通知层逐条去重推送
     mss5m, // { direction, lastEvent } | null（5m 层最近 MSS/BOS 事件，扫损消息标注）
     displacement, // { time, direction, ratio, structureBreak, fvg } | null（位移 K，最近 4 小时内，三条件证据齐备）
     ob: obSummary, // { type, kind, state, high, low, status, location } | null（最近 Order Block 细类）
@@ -290,6 +327,18 @@ export function structureEventForSweep(events, sweep) {
   return [...(events || [])].reverse().find(
     (e) => e.type === "MSS" && e.direction === expectedDirection && e.confirmed && e.time >= sweepConfirmedAt
   ) || null;
+}
+
+/** L3 只绑定本次位移 MSS 真正产生、且当前仍可执行的同一个 FVG。 */
+export function executableFvgForMss(fvgs, event) {
+  if (!event?.confirmedByDisplacement || !event.displacementFvg) return null;
+  const near = (a, b) => Math.abs(a - b) / Math.max(Math.abs(b), 1e-9) < 0.000001;
+  return (fvgs || []).find((fvg) =>
+    isExecutableFvg(fvg)
+    && fvg.quality === "STRUCTURE"
+    && fvg.index === event.displacementConfirmationIndex
+    && near(fvg.top, event.displacementFvg.top)
+    && near(fvg.bottom, event.displacementFvg.bottom)) || null;
 }
 
 /** 按价格行进顺序整理第一目标与远端 ICT Draw，并分别计算理论 R。 */

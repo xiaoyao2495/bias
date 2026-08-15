@@ -3,7 +3,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findFvgs, findOrderBlocks, annotatePDArray, rankPDArray } from "../indicators/pdArray.js";
+import { annotateFvgQuality, findFvgs, findOrderBlocks, annotatePDArray, inferTickSize, isExecutableFvg, rankPDArray } from "../indicators/pdArray.js";
 import { computeDealingRange } from "../indicators/dealingRange.js";
 
 function candle(o, h, l, c, i) {
@@ -34,6 +34,72 @@ test("FVG: Bearish（K1.low > K3.high）", () => {
   assert.equal(fvgs[0].type, "BEARISH_FVG");
   assert.equal(fvgs[0].top, 105); // K1.low
   assert.equal(fvgs[0].bottom, 100); // K3.high
+});
+
+test("5m FVG质量：ATR/tick动态门槛 + RAW/DISPLACEMENT/STRUCTURE 分级", () => {
+  const candles = [
+    candle(99, 100, 98, 99, 0),
+    candle(100, 109, 99, 108, 1),
+    candle(108, 111, 105, 110, 2),
+  ];
+  const annotated = annotatePDArray({ fvg: findFvgs(candles), ob: [] }, null, candles).fvg;
+  const raw = annotateFvgQuality(annotated, candles, { tickSize: 0.1 })[0];
+  assert.equal(raw.quality, "RAW");
+  assert.equal(raw.executable, true);
+  assert.ok(raw.widthAtr > 0);
+  assert.ok(raw.ticks >= 3);
+
+  const displacement = { index: 1, confirmationIndex: 2, fvg: { bottom: 100, top: 105 } };
+  const displaced = annotateFvgQuality(annotated, candles, { tickSize: 0.1, displacements: [displacement] })[0];
+  assert.equal(displaced.quality, "DISPLACEMENT");
+  const event = { type: "MSS", confirmed: true, confirmedByDisplacement: true, displacementIndex: 1, displacementConfirmationIndex: 2, displacementFvg: displacement.fvg };
+  const structured = annotateFvgQuality(annotated, candles, { tickSize: 0.1, displacements: [displacement], structureEvents: [event] })[0];
+  assert.equal(structured.quality, "STRUCTURE");
+  assert.equal(isExecutableFvg(structured), true);
+});
+
+test("5m FVG动态门槛：极窄缺口即使几何成立也不可执行", () => {
+  const candles = [
+    candle(99.5, 100, 99, 99.8, 0),
+    candle(99.8, 100.2, 99.6, 100.1, 1),
+    candle(100.1, 100.5, 100.01, 100.3, 2),
+  ];
+  const annotated = annotatePDArray({ fvg: findFvgs(candles), ob: [] }, null, candles).fvg;
+  const [fvg] = annotateFvgQuality(annotated, candles, { tickSize: 0.01 });
+  assert.equal(fvg.executable, false);
+  assert.equal(fvg.rejectionReason, "TOO_NARROW");
+});
+
+test("5m FVG消耗：wick填平与close填平分开记录", () => {
+  const base = [
+    candle(99, 100, 98, 99, 0),
+    candle(100, 110, 99, 109, 1),
+    candle(109, 112, 108, 111, 2),
+  ];
+  const wickRows = [...base, candle(108, 109, 99, 105, 3)];
+  const wick = annotatePDArray({ fvg: findFvgs(wickRows), ob: [] }, null, wickRows).fvg[0];
+  assert.equal(wick.status, "FILLED");
+  assert.equal(wick.closeStatus, "TOUCHED");
+  assert.equal(wick.executionStatus, "WICK_FILLED");
+  assert.equal(wick.fillType, "WICK");
+
+  const closeRows = [...base, candle(108, 109, 99, 99, 3)];
+  const close = annotatePDArray({ fvg: findFvgs(closeRows), ob: [] }, null, closeRows).fvg[0];
+  assert.equal(close.closeStatus, "FILLED");
+  assert.equal(close.executionStatus, "FILLED");
+  assert.equal(close.fillType, "CLOSE");
+});
+
+test("tick推断与低价FVG稳定id保留原始精度", () => {
+  const candles = [
+    candle(0.03981, 0.03982, 0.0398, 0.03981, 0),
+    candle(0.03983, 0.0401, 0.03983, 0.04005, 1),
+    candle(0.04008, 0.0402, 0.04001, 0.0401, 2),
+  ];
+  assert.equal(inferTickSize(candles), 0.00001);
+  const annotated = annotatePDArray({ fvg: findFvgs(candles), ob: [] }, null, candles).fvg;
+  const [fvg] = annotateFvgQuality(annotated, candles, { tickSize: 0.00001 });
+  assert.match(fvg.id, /0\.03982_0\.04001$/);
 });
 
 test("Order Block: Bullish（阴线后强阳突破）", () => {

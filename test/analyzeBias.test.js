@@ -10,13 +10,29 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { analyzeBias, findReversalEvidence } from "../engine/analyzeBias.js";
+import { analyzeBias, annotateStructureLiquidityStates, findReversalEvidence } from "../engine/analyzeBias.js";
 import { computeConfidence } from "../engine/confidence.js";
 
 const H4 = 4 * 3600_000;
 const D1 = 24 * 3600_000;
 const W1 = 7 * D1;
 const T0 = 1_700_000_000_000;
+
+test("4H External: pivot 右侧 2 根确认前的刺破不计为扫损", () => {
+  const candles = Array.from({ length: 5 }, (_, i) => k(98, 98, 99, 97, T0 + i * H4, H4));
+  candles[1].high = 100;
+  candles[2].high = 101; // 尚在右侧确认期
+  const structure = {
+    externalSwingHigh: 100,
+    externalSwingHighIndex: 1,
+    externalSwingHighTime: candles[1].time,
+    lastHigh: { price: 100, index: 1, time: candles[1].time },
+  };
+
+  annotateStructureLiquidityStates(structure, candles);
+  assert.equal(structure.externalSwingHighState.state, "ACTIVE");
+  assert.equal(structure.lastHighState.state, "ACTIVE");
+});
 
 /** 生成一根 K：time 为起点，closeTime = time + 周期 - 1 */
 function k(o, c, h, l, time, span) {

@@ -13,6 +13,8 @@
  *   用于把 PD Array 作为"执行区域"（不参与 bias 判定）：同向 + 在顺位一侧 → VALID Primary。
  */
 
+import { findDisplacements } from "./displacement.js";
+
 /** 找出所有 FVG */
 export function findFvgs(candles) {
   const fvgs = [];
@@ -29,6 +31,104 @@ export function findFvgs(candles) {
   return fvgs;
 }
 
+export const FVG_EXECUTION_DEFAULTS = Object.freeze({
+  atrRatio: 0.10,
+  minTicks: 3,
+  minWidthPct: 0.02,
+  atrPeriod: 14,
+});
+
+/** 从实际 OHLC 小数精度保守推断最小跳动；调用方有交易所 tickSize 时应显式传入。 */
+export function inferTickSize(candles) {
+  const values = (candles || []).slice(-200).flatMap((k) => [k.open, k.high, k.low, k.close]).filter(Number.isFinite);
+  if (!values.length) return null;
+  const decimals = (n) => {
+    const s = Math.abs(n).toFixed(10).replace(/0+$/, "");
+    return Math.max(0, s.length - s.indexOf(".") - 1);
+  };
+  const places = Math.min(8, Math.max(...values.map(decimals)));
+  const scale = 10 ** places;
+  return 1 / scale;
+}
+
+function atrAt(candles, index, period) {
+  const from = Math.max(0, index - period + 1);
+  let total = 0;
+  let count = 0;
+  for (let i = from; i <= index; i++) {
+    const k = candles[i];
+    if (!k) continue;
+    const prevClose = candles[i - 1]?.close;
+    const tr = prevClose == null
+      ? k.high - k.low
+      : Math.max(k.high - k.low, Math.abs(k.high - prevClose), Math.abs(k.low - prevClose));
+    if (Number.isFinite(tr) && tr >= 0) { total += tr; count++; }
+  }
+  return count ? total / count : null;
+}
+
+function sameFvg(a, b) {
+  if (!a || !b) return false;
+  const near = (x, y) => Math.abs(x - y) / Math.max(Math.abs(y), 1e-9) < 0.000001;
+  return near(a.top, b.top) && near(a.bottom, b.bottom);
+}
+
+/**
+ * 给 FVG 增加执行质量：动态宽度、位移/结构关联与稳定 id。
+ * quality = RAW | DISPLACEMENT | STRUCTURE；executable 由 ATR/tick/百分比共同约束。
+ */
+export function annotateFvgQuality(fvgs, candles, {
+  displacements = [],
+  structureEvents = [],
+  tickSize = inferTickSize(candles),
+  atrRatio = FVG_EXECUTION_DEFAULTS.atrRatio,
+  minTicks = FVG_EXECUTION_DEFAULTS.minTicks,
+  minWidthPct = FVG_EXECUTION_DEFAULTS.minWidthPct,
+  atrPeriod = FVG_EXECUTION_DEFAULTS.atrPeriod,
+} = {}) {
+  return (fvgs || []).map((fvg) => {
+    const width = fvg.top - fvg.bottom;
+    const midpoint = (fvg.top + fvg.bottom) / 2;
+    const atr = atrAt(candles || [], fvg.index, atrPeriod);
+    const widthPct = midpoint > 0 ? width / midpoint * 100 : null;
+    const widthAtr = atr > 0 ? width / atr : null;
+    const ticks = tickSize > 0 ? width / tickSize : null;
+    const minWidth = Math.max(
+      tickSize > 0 ? tickSize * minTicks : 0,
+      atr > 0 ? atr * atrRatio : 0,
+      midpoint > 0 ? midpoint * minWidthPct / 100 : 0,
+    );
+    const displacement = (displacements || []).find((d) => d.confirmationIndex === fvg.index && sameFvg(d.fvg, fvg));
+    const structureEvent = (structureEvents || []).find((e) =>
+      e.confirmed && e.confirmedByDisplacement
+      && e.displacementConfirmationIndex === fvg.index
+      && sameFvg(e.displacementFvg, fvg));
+    const quality = structureEvent ? "STRUCTURE" : displacement ? "DISPLACEMENT" : "RAW";
+    const executionStatus = fvg.executionStatus || fvg.status || "OPEN";
+    const executable = width > 0 && width >= minWidth && executionStatus !== "FILLED";
+    const id = `${fvg.type}_${fvg.index}_${String(fvg.bottom)}_${String(fvg.top)}`;
+    return {
+      ...fvg,
+      id,
+      quality,
+      displacementIndex: displacement?.index ?? structureEvent?.displacementIndex ?? null,
+      structureEventType: structureEvent?.type ?? null,
+      width,
+      widthPct,
+      widthAtr,
+      tickSize,
+      ticks,
+      minWidth,
+      executable,
+      rejectionReason: executable ? null : executionStatus === "FILLED" ? "CLOSE_FILLED" : "TOO_NARROW",
+    };
+  });
+}
+
+export function isExecutableFvg(fvg) {
+  return !!fvg && fvg.executable === true;
+}
+
 /**
  * 找出所有 Order Block，并按 ICT 2022（L4）细分：
  *   kind  = STANDARD | BREAKER | REJECTION
@@ -38,8 +138,6 @@ export function findFvgs(candles) {
  *   state = FRESH | USED
  *     后续任一根 K 回踩过 OB 区间 → USED（已消费），否则 FRESH（未访问，效力更强）
  */
-import { findDisplacements } from "./displacement.js";
-
 /**
  * 生成一个 OB（共用：位移驱动 / fallback 简化规则都走这里）。
  * @param {Array} candles 完整 K 线（用于后续 K 的穿透/回踩判定）
@@ -98,11 +196,11 @@ function buildOb(candles, prev, i, type, bullish, displacement) {
  *   - fallback：简化规则（阴线后强阳突破 / 阳线后强阴跌破），与位移 OB 区间重叠的跳过
  * kind = STANDARD | BREAKER | REJECTION；state = FRESH | USED（语义见 buildOb）
  */
-export function findOrderBlocks(candles) {
+export function findOrderBlocks(candles, { displacements } = {}) {
   const obs = [];
 
   // 1) 位移驱动 OB：UP 位移 → 前一根 BULLISH_OB；DOWN 位移 → 前一根 BEARISH_OB
-  const dispList = findDisplacements(candles);
+  const dispList = displacements ?? findDisplacements(candles);
   const timeToIndex = new Map();
   for (let i = 0; i < candles.length; i++) timeToIndex.set(candles[i].closeTime, i);
   for (const d of dispList) {
@@ -158,6 +256,7 @@ export function annotatePDArray(pdArray, range, candles) {
     const location = eq == null ? null : mid > eq ? "PREMIUM" : mid < eq ? "DISCOUNT" : "AT_EQ";
     const age = currentIndex - item.index;
     let status = "OPEN";
+    let closeStatus = "OPEN";
     if (item.type === "BULLISH_FVG") {
       // P1：消耗深度由整个形成后区间的最低 low 一次性决定（单向递增，OPEN < TOUCHED < CE_REACHED < FILLED）。
       // 逐根覆盖会让"先触及中点后浅回踩"的 FVG 从 CE_REACHED 降回 TOUCHED（扣分 −15 回升 −10）。
@@ -166,6 +265,11 @@ export function annotatePDArray(pdArray, range, candles) {
       if (deepest <= item.bottom) status = "FILLED"; // 触及远端 = 完全回补
       else if (deepest <= mid) status = "CE_REACHED"; // 触及中点
       else if (deepest <= item.top) status = "TOUCHED"; // 仅进入缺口（未到中点）
+      let deepestClose = Infinity;
+      for (let i = item.index + 1; i <= currentIndex; i++) deepestClose = Math.min(deepestClose, candles[i].close);
+      if (deepestClose <= item.bottom) closeStatus = "FILLED";
+      else if (deepestClose <= mid) closeStatus = "CE_REACHED";
+      else if (deepestClose <= item.top) closeStatus = "TOUCHED";
     } else if (item.type === "BEARISH_FVG") {
       // P1：对称——消耗深度由整个形成后区间的最高 high 一次性决定
       let deepest = -Infinity;
@@ -173,12 +277,20 @@ export function annotatePDArray(pdArray, range, candles) {
       if (deepest >= item.top) status = "FILLED"; // 触及远端 = 完全回补
       else if (deepest >= mid) status = "CE_REACHED"; // 触及中点
       else if (deepest >= item.bottom) status = "TOUCHED"; // 仅进入缺口（未到中点）
+      let deepestClose = -Infinity;
+      for (let i = item.index + 1; i <= currentIndex; i++) deepestClose = Math.max(deepestClose, candles[i].close);
+      if (deepestClose >= item.top) closeStatus = "FILLED";
+      else if (deepestClose >= mid) closeStatus = "CE_REACHED";
+      else if (deepestClose >= item.bottom) closeStatus = "TOUCHED";
     } else {
       for (let i = item.index + 1; i <= currentIndex; i++) {
         if (candles[i].low <= item.high && candles[i].high >= item.low) { status = "FILLED"; break; }
       }
     }
-    return { ...item, location, age, status };
+    const isFvg = item.type === "BULLISH_FVG" || item.type === "BEARISH_FVG";
+    const executionStatus = isFvg && closeStatus !== "FILLED" && status === "FILLED" ? "WICK_FILLED" : closeStatus === "FILLED" ? "FILLED" : status;
+    const fillType = !isFvg || status !== "FILLED" ? null : closeStatus === "FILLED" ? "CLOSE" : "WICK";
+    return { ...item, location, age, status, ...(isFvg ? { wickStatus: status, closeStatus, executionStatus, fillType } : {}) };
   };
 
   return {

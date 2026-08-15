@@ -256,6 +256,29 @@ test("V2.1 computeLiquidity: 美股关联 symbol 才注入 PRE_MARKET_HIGH/LOW",
   assert.equal(pml.time, T0);
 });
 
+test("EQH: 第二触点需等右侧 2 根 4H K 收盘后才生效", () => {
+  const candles = Array.from({ length: 8 }, (_, i) => ({
+    time: i * 1000,
+    closeTime: i * 1000 + 999,
+    open: 98,
+    high: 99,
+    low: 97,
+    close: 98,
+  }));
+  candles[1].high = 100;
+  candles[4].high = 100;
+  candles[5].high = 101; // 第二触点后的右侧确认期，不能倒算成已扫损
+  const swings = [
+    { type: "HIGH", price: 100, index: 1, time: candles[1].time },
+    { type: "HIGH", price: 100, index: 4, time: candles[4].time },
+  ];
+
+  const l = computeLiquidity([], [], swings, 0.002, now, 150, null, candles);
+  const eqh = l.buySide.find((item) => item.type === "EQH");
+  assert.equal(eqh.activeFrom, candles[6].closeTime);
+  assert.equal(eqh.state, "ACTIVE");
+});
+
 test("V2.1 盘前区间：冬夏令时都按纽约 04:00-09:30，且排除 09:30 后 K", () => {
   const candle = (time, high) => ({ time, closeTime: time + 5 * 60_000, open: 100, high, low: 90, close: 100 });
   const summer = [

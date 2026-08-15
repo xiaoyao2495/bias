@@ -60,7 +60,7 @@ function judasOf(side, bias) {
  *   levelTime/levelDate — 被扫流动性位的形成时间（透传自流动性项：levelTime=形成 K 开盘 ms，
  *     如 PDH 的昨日日 K；levelDate=盘前区间北京日期 "YYYY-MM-DD"），供消息层展示"这个流动性是什么时候形成的"
  */
-export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = null) {
+function detectSingleSweep(h5m, buySide, sellSide, price, window = 48, bias = null) {
   const now = marketNow();
   const cur = h5m[h5m.length - 1];
 
@@ -163,5 +163,86 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
       }
     }
   }
+
+  // 3) L1 LIQUIDITY_TAKEN：已经刺破流动性，但尚未满足同根/次根收回。
+  // 它只表示 stops 被触发，不等于反转，也不进入旧版 detectSweeps/AMD 语义。
+  if (cur && cur.closeTime > now && price != null) {
+    const lastIdx = h5m.length - 1;
+    for (const lv of buySide || []) {
+      if (cur.high > lv.price && price >= lv.price && formedAfter(lv, cur) && !unavailable(lv, true, lastIdx)) {
+        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: cur.high, close: price, time: cur.time, key: `${cur.time}_BSL`, realtime: true, reclaimed: false, judas: false, ...levelMeta(lv) };
+      }
+    }
+    for (const lv of sellSide || []) {
+      if (cur.low < lv.price && price <= lv.price && formedAfter(lv, cur) && !unavailable(lv, false, lastIdx)) {
+        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: cur.low, close: price, time: cur.time, key: `${cur.time}_SSL`, realtime: true, reclaimed: false, judas: false, ...levelMeta(lv) };
+      }
+    }
+  }
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const k = recent[i];
+    const idx = h5m.indexOf(k);
+    for (const lv of buySide || []) {
+      if (k.high > lv.price && k.close >= lv.price && formedAfter(lv, k) && !unavailable(lv, true, idx)) {
+        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: k.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: k.closeTime, reclaimed: false, judas: false, ...levelMeta(lv) };
+      }
+    }
+    for (const lv of sellSide || []) {
+      if (k.low < lv.price && k.close <= lv.price && formedAfter(lv, k) && !unavailable(lv, false, idx)) {
+        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: k.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime, reclaimed: false, judas: false, ...levelMeta(lv) };
+      }
+    }
+  }
   return null;
+}
+
+export const LIQUIDITY_EVENT_LEVELS = Object.freeze({
+  TAKEN: { tier: 1, stage: "LIQUIDITY_TAKEN" },
+  RAID: { tier: 2, stage: "RECLAIMED_RAID" },
+  CONFIRMED: { tier: 3, stage: "ICT_2022_CONFIRMED" },
+});
+
+/** 根据收回、位移与 MSS 证据给事件定级；返回新对象，不修改调用方输入。 */
+export function classifyLiquidityEvent(event) {
+  if (!event) return null;
+  const mss = event.mss5m?.lastEvent;
+  const level = event.reclaimed === false
+    ? LIQUIDITY_EVENT_LEVELS.TAKEN
+    : mss?.confirmedByDisplacement && event.confirmationFvg?.executable === true
+      ? LIQUIDITY_EVENT_LEVELS.CONFIRMED
+      : LIQUIDITY_EVENT_LEVELS.RAID;
+  const baseKey = event.baseKey || event.key;
+  return { ...event, ...level, baseKey, key: `${baseKey}_${level.stage}` };
+}
+
+/**
+ * 返回每个独立流动性池在窗口内的首次流动性事件（L1 taken / L2 raid），按时间升序。
+ * key 包含位类型与价格，避免同一根 K 同侧扫掉多个池时互相覆盖；legacyKey 用于兼容旧状态。
+ */
+export function detectSweepEvents(h5m, buySide, sellSide, price, window = 48, bias = null) {
+  const events = [];
+  const seenPools = new Set();
+  const collect = (lv, isBuy) => {
+    if (!lv || lv.price == null) return;
+    const side = isBuy ? "BSL" : "SSL";
+    const pool = `${side}_${lv.type || "LEVEL"}_${lv.price}`;
+    if (seenPools.has(pool)) return;
+    seenPools.add(pool);
+    const event = detectSingleSweep(h5m, isBuy ? [lv] : [], isBuy ? [] : [lv], price, window, bias);
+    if (!event) return;
+    const legacyKey = event.key;
+    const baseKey = `${legacyKey}_${lv.type || "LEVEL"}_${lv.price}`;
+    events.push(classifyLiquidityEvent({ ...event, legacyKey, baseKey, key: baseKey }));
+  };
+  for (const lv of buySide || []) collect(lv, true);
+  for (const lv of sellSide || []) collect(lv, false);
+  return events.sort((a, b) => (a.closedTime ?? a.time) - (b.closedTime ?? b.time));
+}
+
+/** 兼容旧调用：仍返回最近一个事件，并保留旧版 `${time}_${side}` key。 */
+export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = null) {
+  const event = detectSweepEvents(h5m, buySide, sellSide, price, window, bias).filter((item) => item.tier >= 2).at(-1);
+  if (!event) return null;
+  const { legacyKey, ...legacy } = event;
+  return { ...legacy, key: legacyKey };
 }

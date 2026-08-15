@@ -15,6 +15,7 @@ import {
   detectKeyPositionMss,
   isRecentKeyMss,
   assessKeyMssChase,
+  dedupeOverlappingFvgZones,
 } from "../monitor/opportunity.js";
 
 const NOW = Date.now();
@@ -304,6 +305,15 @@ test("环境过滤：4H bias NEUTRAL → 无机会", () => {
   ]);
   const opps = scanOpportunities({ symbol: "BTCUSDT", env: baseEnv({ bias: "NEUTRAL", price: 101 }), m5 });
   assert.deepEqual(opps, []);
+});
+
+test("重叠FVG去重：保留质量更高的结构级区域，独立区域不受影响", () => {
+  const zones = [
+    { type: "FVG", id: "raw", quality: "RAW", bottom: 100, top: 110, age: 1 },
+    { type: "FVG", id: "structure", quality: "STRUCTURE", bottom: 101, top: 109, age: 3 },
+    { type: "FVG", id: "separate", quality: "DISPLACEMENT", bottom: 120, top: 125, age: 2 },
+  ];
+  assert.deepEqual(dedupeOverlappingFvgZones(zones).map((z) => z.id).sort(), ["separate", "structure"]);
 });
 
 test("ICT 2022 时间门槛：Killzone 外即使高质量回踩也不出机会", () => {

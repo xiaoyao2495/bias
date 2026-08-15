@@ -23,7 +23,8 @@
  * 纯函数模块：不拉数据、不推送，数据与推送由 runMonitor.js 编排。
  */
 import { detectStructureEvents, scanStructureEvents } from "../indicators/mss.js";
-import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
+import { findDisplacements } from "../indicators/displacement.js";
+import { annotateFvgQuality, findFvgs, findOrderBlocks, annotatePDArray, isExecutableFvg } from "../indicators/pdArray.js";
 import { marketNow } from "../utils/marketClock.js";
 
 // ---- 常量 ----
@@ -55,13 +56,16 @@ export function computeM5Context(m5, price) {
   if (closed.length < 3) {
     return { direction: "NEUTRAL", lastHigh: null, lastLow: null, pd: { fvg: [], ob: [] }, events: [], candles: closed };
   }
-  const structure = detectStructureEvents(closed, { price, left: 1, right: 1 });
+  const displacements = findDisplacements(closed);
+  const structure = detectStructureEvents(closed, { price, left: 1, right: 1, displacements });
   const fvgs = findFvgs(closed);
-  const obs = findOrderBlocks(closed);
+  const obs = findOrderBlocks(closed, { displacements });
+  const events = scanStructureEvents(closed, { lookback: 50, left: 1, right: 1 });
   // annotatePDArray 需要 range（dealing range）做 PREMIUM/DISCOUNT 标注；
   // 机会扫描只用 age/status，传 null 即可（location 为 null，不影响）。
-  const pd = annotatePDArray({ fvg: fvgs.slice(-40), ob: obs.slice(-40) }, null, closed);
-  const events = scanStructureEvents(closed, { lookback: 50, left: 1, right: 1 });
+  // ZONE_AGE_MAX=60，至少保留 80 个最近区域；旧版只留40个会在高波动时提前截掉仍在年龄窗内的 FVG。
+  const pd = annotatePDArray({ fvg: fvgs.slice(-80), ob: obs.slice(-80) }, null, closed);
+  pd.fvg = annotateFvgQuality(pd.fvg, closed, { displacements, structureEvents: events });
   return {
     direction: structure.direction,
     lastHigh: structure.structureLayer ? structure.structureLayer.internal.lastHigh : null,
@@ -255,16 +259,17 @@ function collectZones(ctx, bias) {
   for (const it of items) {
     if (it.direction !== bias) continue; // 只做同向执行区（BULLISH → 多头 FVG/OB）
     if (it.age > ZONE_AGE_MAX) continue;
-    // P1：已填平（FILLED）的 FVG 彻底失效 → 无条件排除（此前 12 根以内仍可产生回踩机会）；
-    // CE_REACHED（触及中点）保留参考价值，仅过旧的区放弃
-    if (it.status === "FILLED") continue;
-    if (it.status === "CE_REACHED" && it.age > 12) continue;
+    const executionStatus = it.executionStatus || it.status;
+    // 5m FVG 必须由位移产生并通过 ATR/tick 动态宽度；收盘填平才彻底失效。
+    // 单纯 wick 填平保留为 WICK_FILLED，供强拒绝后的回收确认使用。
+    if (it.type.includes("FVG") && !isExecutableFvg(it)) continue;
+    if (!it.type.includes("FVG") && it.status === "FILLED") continue;
+    if (executionStatus === "CE_REACHED" && it.age > 12) continue;
     const top = it.top ?? it.high;
     const bottom = it.bottom ?? it.low;
     if (top == null || bottom == null || top <= bottom) continue;
-    // V2.7：窄区过滤——宽度不足 0.15% 的 FVG/OB 是噪声级 gap（如 NBIS 259.15-259.46 仅
-    // 0.12%），不构成 ICT 有效执行区，浅插上沿会被误当回踩。低价标的按比例同规则。
-    if (((top - bottom) / top) * 100 < 0.15) continue;
+    // OB 暂无 ATR 质量元数据，沿用旧的 0.15% 门槛；FVG 已走动态门槛。
+    if (!it.type.includes("FVG") && ((top - bottom) / top) * 100 < 0.15) continue;
     zones.push({
       type: it.type.includes("FVG") ? "FVG" : "OB",
       sourceType: it.type,
@@ -272,6 +277,11 @@ function collectZones(ctx, bias) {
       top,
       bottom,
       mid: (top + bottom) / 2,
+      id: it.id || `${it.type}_${it.index}_${String(bottom)}_${String(top)}`,
+      quality: it.quality || null,
+      executionStatus,
+      widthPct: it.widthPct ?? null,
+      widthAtr: it.widthAtr ?? null,
       // 来源字段（CHAIN 精确匹配 + 审计）：
       //   index — FVG：确认 K 索引（findFvgs 的 i）；OB：推动 OB 的位移 K 索引（位移驱动）或突破 K 索引（fallback）
       //   time — FVG：中间根开盘；OB：OB 所在 K 开盘
@@ -287,8 +297,26 @@ function collectZones(ctx, bias) {
   return zones.sort((a, b) => a.age - b.age);
 }
 
+/** RETRACE 合并高度重叠的同向 FVG；优先结构级、其次位移级，再取更新的区。CHAIN 保留原区精确匹配 MSS。 */
+export function dedupeOverlappingFvgZones(zones, overlapThreshold = 0.8) {
+  const rank = { STRUCTURE: 3, DISPLACEMENT: 2, RAW: 1 };
+  const fvg = (zones || []).filter((z) => z.type === "FVG").sort((a, b) =>
+    (rank[b.quality] || 0) - (rank[a.quality] || 0) || a.age - b.age);
+  const kept = [];
+  for (const zone of fvg) {
+    const width = zone.top - zone.bottom;
+    const duplicate = kept.some((other) => {
+      const overlap = Math.max(0, Math.min(zone.top, other.top) - Math.max(zone.bottom, other.bottom));
+      return overlap / Math.min(width, other.top - other.bottom) >= overlapThreshold;
+    });
+    if (!duplicate) kept.push(zone);
+  }
+  return [...(zones || []).filter((z) => z.type !== "FVG"), ...kept].sort((a, b) => a.age - b.age);
+}
+
 /** 信号 1 — 执行区回踩：价格正贴在/位于同向 FVG/OB 区间内（顺位端 = 入场参考） */
 function detectRetrace({ ctx, bias, price, zones }) {
+  zones = dedupeOverlappingFvgZones(zones);
   if (!zones.length) return null;
   let best = null;
   for (const z of zones) {
@@ -308,10 +336,10 @@ function detectRetrace({ ctx, bias, price, zones }) {
     type: "RETRACE",
     direction: bias,
     entry: bias === "BULLISH" ? z.bottom : z.top,
-    zone: { type: z.type, top: z.top, bottom: z.bottom },
+    zone: { type: z.type, top: z.top, bottom: z.bottom, id: z.id, quality: z.quality, executionStatus: z.executionStatus },
     confirmation,
     trigger: `价格回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}（${zoneState}）→ ${confirmation.text}`,
-    key: `RETRACE_${bias}_${z.bottom.toFixed(2)}_${z.top.toFixed(2)}_${confirmation.time}`,
+    key: `RETRACE_${bias}_${z.id}_${confirmation.time}`,
     time: confirmation.time,
   };
 }
@@ -385,11 +413,11 @@ function detectChain({ env, ctx, bias, price, zones }) {
     direction: bias,
     entry: bias === "BULLISH" ? z.bottom : z.top,
     // 保留来源便于审计：哪个执行区、由哪条位移腿产生
-    zone: { type: z.type, top: z.top, bottom: z.bottom, index: z.index, displacement: z.displacement },
+    zone: { type: z.type, top: z.top, bottom: z.bottom, index: z.index, displacement: z.displacement, id: z.id, quality: z.quality, executionStatus: z.executionStatus },
     confirmation,
     mssIndex: mss.atIndex,
     trigger: `扫损${sweep.side === "BSL" ? "BSL" : "SSL"} → 5m MSS（位移确认）${expectedMssDir === "UP" ? "向上" : "向下"} → 回踩 ${z.type} → ${confirmation.text}`,
-    key: `CHAIN_${bias}_${z.bottom.toFixed(2)}_${sweep.key || sweepTime}_${confirmation.time}`,
+    key: `CHAIN_${bias}_${z.id}_${sweep.key || sweepTime}_${confirmation.time}`,
     time: confirmation.time,
   };
 }
@@ -500,6 +528,9 @@ function scoreOpportunity(o, env) {
   else if (o.type === "KEY_MSS") s += o.displacementConfirmed ? 25 : 20;
   else s += 10; // RETRACE
   if (o.zone) s += 5; // 有明确执行区（可挂单）
+  if (o.zone?.quality === "STRUCTURE") s += 10;
+  else if (o.zone?.quality === "DISPLACEMENT") s += 5;
+  if (o.zone?.executionStatus === "WICK_FILLED") s -= 5;
   return Math.min(100, s);
 }
 

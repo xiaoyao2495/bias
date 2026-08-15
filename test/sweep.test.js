@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detectSweeps, isJudasWindow } from "../indicators/sweep.js";
+import { classifyLiquidityEvent, detectSweepEvents, detectSweeps, isJudasWindow } from "../indicators/sweep.js";
 
 const M5 = 300_000;
 const now = Date.now();
@@ -180,6 +180,55 @@ test("历史 wick 刺破且收回 → 流动性池已消费，保留首次 raid"
   assert.equal(s.type, "EQH");
   assert.equal(s.level, 105);
   assert.equal(s.sweptPrice, 106);
+});
+
+test("detectSweepEvents: 两轮轮询之间的多个独立扫损事件全部返回", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[45] = closedK(45, 104, 106, 103, 104); // 先扫 PDH 105
+  bars[48] = closedK(48, 109, 111, 108, 109); // 后扫 PWH 110
+
+  const events = detectSweepEvents(
+    [...bars, liveK(109, 110, 108, 109)],
+    [{ type: "PDH", price: 105 }, { type: "PWH", price: 110 }],
+    [],
+    109,
+  );
+
+  assert.deepEqual(events.map((event) => event.type), ["PDH", "PWH"]);
+  assert.deepEqual(events.map((event) => event.time), [bars[45].time, bars[48].time]);
+  assert.equal(events[0].legacyKey, `${bars[45].time}_BSL`);
+  assert.deepEqual(events.map((event) => event.stage), ["RECLAIMED_RAID", "RECLAIMED_RAID"]);
+  assert.notEqual(events[0].key, events[1].key);
+  // 旧 API 保持只返回最近事件与旧 key，避免破坏已有调用方。
+  assert.equal(detectSweeps([...bars, liveK(109, 110, 108, 109)], [{ type: "PDH", price: 105 }, { type: "PWH", price: 110 }], [], 109).key, `${bars[48].time}_BSL`);
+});
+
+test("三级事件：刺破未收回=L1，旧 detectSweeps 仍不把它当扫损", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[48] = closedK(48, 104, 107, 103, 106);
+  bars[49] = closedK(49, 106, 108, 105, 107); // 次根仍在位上方，尚未收回
+  const input = [...bars, liveK(106, 107, 105, 106)];
+  const events = detectSweepEvents(input, [{ type: "PDH", price: 105 }], [], 106);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].tier, 1);
+  assert.equal(events[0].stage, "LIQUIDITY_TAKEN");
+  assert.equal(detectSweeps(input, [{ type: "PDH", price: 105 }], [], 106), null);
+});
+
+test("三级事件：收回后有位移主导 MSS 与 FVG=L3，否则保持L2", () => {
+  const raid = { key: "raid", baseKey: "raid", reclaimed: true, tier: 2, stage: "RECLAIMED_RAID" };
+  assert.equal(classifyLiquidityEvent(raid).tier, 2);
+  const confirmed = classifyLiquidityEvent({
+    ...raid,
+    mss5m: { lastEvent: { type: "MSS", confirmedByDisplacement: true, displacementFvg: { bottom: 99, top: 100 } } },
+    confirmationFvg: { bottom: 99, top: 100, executable: true, quality: "STRUCTURE" },
+  });
+  assert.equal(confirmed.tier, 3);
+  assert.equal(confirmed.stage, "ICT_2022_CONFIRMED");
+  assert.match(confirmed.key, /ICT_2022_CONFIRMED$/);
+  const filled = classifyLiquidityEvent({ ...confirmed, confirmationFvg: { executable: false }, baseKey: "raid" });
+  assert.equal(filled.tier, 2, "FVG已收盘填平或未通过动态宽度时不得维持L3");
 });
 
 test("1H swing 在右侧确认 K 收盘前不可被扫", () => {

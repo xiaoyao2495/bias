@@ -88,6 +88,18 @@ function sweepPushedOf(prev, retained = {}) {
   return base;
 }
 
+/** 返回尚未推送的独立扫损事件；legacyKey 兼容升级前 `${time}_${side}` 去重记录。 */
+export function pendingSweepEvents(sweeps, pushed = {}) {
+  return (sweeps || []).filter((sweep) => {
+    if (pushed[sweep.key]) return false;
+    const stageRank = (key) => key.endsWith("_ICT_2022_CONFIRMED") ? 3 : key.endsWith("_RECLAIMED_RAID") ? 2 : key.endsWith("_LIQUIDITY_TAKEN") ? 1 : 0;
+    // 同一 baseKey 只允许向上升级；已经推过 L3 后，即使执行 FVG 后来失效，不能倒序补发 L2。
+    if (sweep.baseKey && Object.keys(pushed).some((key) => key.startsWith(`${sweep.baseKey}_`) && stageRank(key) >= (sweep.tier ?? 2))) return false;
+    // 旧 key 只代表旧版“已收回扫损”（现 L2），不能吞掉新增的 L1 或后续升级的 L3。
+    return !((sweep.tier ?? 2) === 2 && sweep.legacyKey && pushed[sweep.legacyKey]);
+  });
+}
+
 // 模块加载即打点：诊断 pm2 进程是否真正加载/进入了该脚本
 log(`[runMonitor] 模块加载（argv1=${process.argv[1] || "(无)"}，pm_exec_path=${process.env.pm_exec_path || "(无)"}，cwd=${process.cwd()}）`);
 
@@ -278,6 +290,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       mss5m: r.mss5m,
       last4h: r.last4h,
       sweep: r.sweep,
+      sweeps: r.sweeps || (r.sweep ? [r.sweep] : []),
       displacement: r.displacement,
       executionZones: r.executionZones,
       ...cmp,
@@ -313,11 +326,14 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     }
     // 流动性扫损是独立事件：首轮及新进入 Top30 的标的也必须推；cur 已合并跨 Top30 的历史去重。
     for (const item of overview) {
-      if (item.sweep && !item.cur.sweepPushed?.[item.sweep.key]) {
+      for (const sweep of pendingSweepEvents(item.sweeps, item.cur.sweepPushed)) {
         try {
-          await sendNotification(buildSweep(item), `${item.symbol} 扫损`);
-          nextState[item.symbol].sweepPushed[item.sweep.key] = marketNow();
-          log(`[runMonitor] 已推送 ${item.symbol} 扫损（${item.sweep.side} @ ${item.sweep.level}）`);
+          await sendNotification(
+            buildSweep({ ...item, sweep, mss5m: sweep.mss5m || null }),
+            `${item.symbol} 扫损`,
+          );
+          nextState[item.symbol].sweepPushed[sweep.key] = marketNow();
+          log(`[runMonitor] 已推送 ${item.symbol} 扫损（${sweep.side} @ ${sweep.level}）`);
         } catch (e) {
           // 本轮 key 未写入 nextState.sweepPushed → 下一轮仍视为新扫损 → 重推（不漏报流动性事件）
           log(`[runMonitor] ${item.symbol} 扫损推送失败，保留旧记录下轮重试: ${e.message}`);
@@ -620,20 +636,34 @@ function bjHHMM(ms) {
 
 /** 扫损事件消息（⚡）：市场刚扫掉某流动性位后收回——带当前市场背景，帮助理解"在什么结构下发生" */
 export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m, newsLine }) {
+  const tier = sweep.tier ?? 2;
+  const stage = sweep.stage || "RECLAIMED_RAID";
   const sideText = sweep.side === "BSL" ? "上方买方流动性（BSL）" : "下方卖方流动性（SSL）";
   const levelText = sweepTypeLabel(sweep.type);
-  const sweptText = sweep.side === "BSL" ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回` : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
+  const sweptText = tier === 1
+    ? sweep.side === "BSL"
+      ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}），尚未收回`
+      : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}），尚未收回`
+    : sweep.side === "BSL"
+      ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回`
+      : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
   const tag = sweep.realtime ? "实时" : "已确认";
   const timeText = sweep.realtime
     ? `检测于 ${nowHHMM()}（本根 5m 进行中）`
     : sweep.reclaimTime != null
       ? `刺破 K: ${klineSpan(sweep.time)} → 收回 K: ${klineSpan(sweep.reclaimTime)}（跨根确认）`
-      : `扫损 K: ${klineSpan(sweep.time)}（已收盘确认）`;
+      : tier === 1
+        ? `拿流动性 K: ${klineSpan(sweep.time)}（已收盘）`
+        : `扫损 K: ${klineSpan(sweep.time)}（已收盘确认）`;
   const formedText = levelFormedText(sweep); // 被扫流动性位是"哪根 K/哪天"形成的（用户对照图表定位用）
+  const explicitTier = sweep.tier != null;
   const lines = [
-    `**⚡ ${symbol} 流动性扫损（${tag}）**  🕐 ${nowHHMM()}`,
+    explicitTier
+      ? `**⚡ ${symbol} 流动性事件 L${tier}（${tag}）**  🕐 ${nowHHMM()}`
+      : `**⚡ ${symbol} 流动性扫损（${tag}）**  🕐 ${nowHHMM()}`,
     "",
-    `${sideText}被扫：${sweptText}，收 ${sweep.close}`,
+    ...(explicitTier ? [`级别: L${tier} · ${stage}`] : []),
+    `${sideText}${tier === 1 ? "已被拿走" : "被扫"}：${sweptText}，收 ${sweep.close}`,
     `${[formedText, timeText, `现价 ${price}`].filter(Boolean).join(" · ")}`,
     "",
   ];
@@ -660,6 +690,12 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m, 
     const ev = mss5m.lastEvent;
     const status = ev.confirmed ? "已确认" : ev.realtime ? "实时" : "";
     lines.push(`5m 结构: ${ev.type} ${ev.direction} @ ${ev.level}（${status}）`);
+    if (tier === 3 && sweep.confirmationFvg) {
+      const fvg = sweep.confirmationFvg;
+      const fvgStatus = fvg.executionStatus || fvg.status || "OPEN";
+      const quality = fvg.quality === "STRUCTURE" ? "结构级" : "位移级";
+      lines.push(`ICT 2022确认: 位移主导 MSS · FVG ${fmtPrice(fvg.bottom)}-${fmtPrice(fvg.top)}（${quality} · ${fvgStatus}）`);
+    }
   }
   lines.push(`模型信心: ${cur.confidence}${confidenceScore != null ? ` · 共振评分 ${confidenceScore}` : ""}`);
   lines.push(`操作: ${cur.decision}`);
@@ -866,7 +902,11 @@ export function buildOpportunity(op, env) {
     const side = op.localSweep.side === "BSL" ? "上方短线流动性" : "下方短线流动性";
     lines.push(`流动性行为: 扫${side} ${fmtPrice(op.localSweep.level)}（极值 ${fmtPrice(op.localSweep.sweptPrice)}）`);
   }
-  if (op.zone) lines.push(`执行区: ${op.zone.type} ${fmtPrice(op.zone.bottom)}-${fmtPrice(op.zone.top)}`);
+  if (op.zone) {
+    const quality = op.zone.quality === "STRUCTURE" ? " · 结构级" : op.zone.quality === "DISPLACEMENT" ? " · 位移级" : op.zone.quality === "RAW" ? " · 原始级" : "";
+    const status = op.zone.executionStatus ? ` · ${op.zone.executionStatus}` : "";
+    lines.push(`执行区: ${op.zone.type} ${fmtPrice(op.zone.bottom)}-${fmtPrice(op.zone.top)}${quality}${status}`);
+  }
   // P1-3 后进入这里的信号已经通过已收盘 5m 确认；观察位仍只是执行区参考，
   // 交易计划的确认价与失效位单独展示，避免把区域边界误读成市价入场点。
   lines.push(`观察位: ${fmtPrice(op.entry)} · 现价 ${fmtPrice(env.price)}`);

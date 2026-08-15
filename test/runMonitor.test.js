@@ -10,8 +10,8 @@ import assert from "node:assert/strict";
 import { readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf, appendNotification, pruneSweepPushed } from "../scripts/runMonitor.js";
-import { displacementFor4h, buildTargetSummary, structureEventForSweep } from "../monitor/biasMonitor.js";
+import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf, appendNotification, pendingSweepEvents, pruneSweepPushed } from "../scripts/runMonitor.js";
+import { displacementFor4h, buildTargetSummary, executableFvgForMss, isSweepCandidateAt, structureEventForSweep } from "../monitor/biasMonitor.js";
 
 test("最终操作服从执行区，并在 1R 临界区保留旧状态", () => {
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "WAIT", planR: 4.3 }, { decision: "WATCH" }), "WAIT");
@@ -32,6 +32,46 @@ test("扫损去重历史会裁掉过期 key，并可跨 Top30 成员变化保留
   assert.deepEqual(result, { recent: now - 1000 });
 });
 
+test("扫损通知逐事件消费，并兼容旧版去重 key", () => {
+  const events = [
+    { key: "1_BSL_PDH_105", legacyKey: "1_BSL" },
+    { key: "2_BSL_PWH_110", legacyKey: "2_BSL" },
+  ];
+  assert.deepEqual(pendingSweepEvents(events, {}).map((x) => x.key), events.map((x) => x.key));
+  assert.deepEqual(pendingSweepEvents(events, { "1_BSL": 1 }).map((x) => x.key), ["2_BSL_PWH_110"]);
+  const upgraded = { key: "1_BSL_PDH_105_ICT_2022_CONFIRMED", legacyKey: "1_BSL", tier: 3 };
+  assert.deepEqual(pendingSweepEvents([upgraded], { "1_BSL": 1 }), [upgraded]);
+  const downgraded = { key: "1_BSL_PDH_105_RECLAIMED_RAID", baseKey: "1_BSL_PDH_105", legacyKey: "1_BSL", tier: 2 };
+  assert.deepEqual(pendingSweepEvents([downgraded], { "1_BSL_PDH_105_ICT_2022_CONFIRMED": 1 }), []);
+});
+
+test("事件候选保留窗口内 SWEPT/BROKEN，供 L1/L2 补报", () => {
+  const now = 10_000;
+  assert.equal(isSweepCandidateAt({ state: "ACTIVE" }, now, 1000), true);
+  assert.equal(isSweepCandidateAt({ state: "SWEPT", sweptAt: 9500 }, now, 1000), true);
+  assert.equal(isSweepCandidateAt({ state: "SWEPT", sweptAt: 8000 }, now, 1000), false);
+  assert.equal(isSweepCandidateAt({ state: "BROKEN", brokenAt: 9500 }, now, 1000), true);
+  assert.equal(isSweepCandidateAt({ state: "BROKEN", brokenAt: 8000 }, now, 1000), false);
+});
+
+test("buildSweep: 三级通知分别显示拿流动性、收回与 ICT 2022 确认", () => {
+  const common = { symbol: "BTCUSDT", price: 106, cur: baseCur, confidenceScore: 0, newsLine: null };
+  const l1 = buildSweep({ ...common, sweep: { tier: 1, stage: "LIQUIDITY_TAKEN", side: "BSL", type: "PDH", level: 105, sweptPrice: 107, close: 106, time: 1, realtime: false } });
+  assert.match(l1, /流动性事件 L1/);
+  assert.match(l1, /LIQUIDITY_TAKEN/);
+  assert.match(l1, /尚未收回/);
+
+  const l2 = buildSweep({ ...common, sweep: { tier: 2, stage: "RECLAIMED_RAID", side: "BSL", type: "PDH", level: 105, sweptPrice: 107, close: 104, time: 1, realtime: false } });
+  assert.match(l2, /流动性事件 L2/);
+  assert.match(l2, /RECLAIMED_RAID/);
+
+  const event = { type: "MSS", direction: "DOWN", level: 104, confirmed: true, confirmedByDisplacement: true, displacementFvg: { bottom: 103, top: 104 } };
+  const l3 = buildSweep({ ...common, sweep: { tier: 3, stage: "ICT_2022_CONFIRMED", side: "BSL", type: "PDH", level: 105, sweptPrice: 107, close: 104, time: 1, realtime: false, confirmationFvg: { bottom: 103, top: 104, executable: true, quality: "STRUCTURE", executionStatus: "OPEN" } }, mss5m: { lastEvent: event } });
+  assert.match(l3, /流动性事件 L3/);
+  assert.match(l3, /ICT_2022_CONFIRMED/);
+  assert.match(l3, /位移主导 MSS · FVG 103-104（结构级 · OPEN）/);
+});
+
 test("扫损消息只关联扫损后、反转方向一致的 MSS", () => {
   const sweep = { side: "SSL", closedTime: 200 };
   const events = [
@@ -41,6 +81,14 @@ test("扫损消息只关联扫损后、反转方向一致的 MSS", () => {
     { type: "MSS", direction: "UP", confirmed: true, time: 270 },
   ];
   assert.equal(structureEventForSweep(events, sweep)?.time, 270);
+});
+
+test("L3只绑定本次MSS位移产生且仍可执行的FVG", () => {
+  const event = { confirmedByDisplacement: true, displacementConfirmationIndex: 7, displacementFvg: { bottom: 0.03982, top: 0.04001 } };
+  const valid = { index: 7, bottom: 0.03982, top: 0.04001, executable: true, quality: "STRUCTURE" };
+  const filled = { ...valid, executable: false, executionStatus: "FILLED" };
+  assert.equal(executableFvgForMss([filled, valid], event), valid);
+  assert.equal(executableFvgForMss([filled], event), null);
 });
 
 test("P0: overview 嵌套状态展开为 5m 机会扫描所需环境", () => {

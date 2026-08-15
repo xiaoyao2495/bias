@@ -86,17 +86,19 @@ export function analyzeBias({ candles, daily, weekly, price, structurePrice, tim
   return { structure, liquidity, location, pdArray, htfDirection, htfContext, activeVolumeWindow, ictSession, session, bias };
 }
 
-function annotateStructureLiquidityStates(structure, candles) {
+export function annotateStructureLiquidityStates(structure, candles) {
   const closeAt = (index, time) => {
     const k = index != null ? candles[index] : null;
     return k ? k.closeTime ?? k.time : time;
   };
+  // findSwings 的 4H pivot 需要右侧 2 根 K 确认；确认前的价格行为不能反过来“扫掉”尚未成立的流动性。
+  const confirmedCloseAt = (index, time) => closeAt(index != null ? index + 2 : index, time);
   if (structure.externalSwingHigh != null) {
     structure.externalSwingHighState = liquidityStateForLevel(
       { price: structure.externalSwingHigh },
       true,
       candles,
-      closeAt(structure.externalSwingHighIndex, structure.externalSwingHighTime)
+      confirmedCloseAt(structure.externalSwingHighIndex, structure.externalSwingHighTime)
     );
   }
   if (structure.externalSwingLow != null) {
@@ -104,7 +106,7 @@ function annotateStructureLiquidityStates(structure, candles) {
       { price: structure.externalSwingLow },
       false,
       candles,
-      closeAt(structure.externalSwingLowIndex, structure.externalSwingLowTime)
+      confirmedCloseAt(structure.externalSwingLowIndex, structure.externalSwingLowTime)
     );
   }
   if (structure.lastHigh) {
@@ -112,7 +114,7 @@ function annotateStructureLiquidityStates(structure, candles) {
       { price: structure.lastHigh.price },
       true,
       candles,
-      closeAt(structure.lastHigh.index, structure.lastHigh.time)
+      confirmedCloseAt(structure.lastHigh.index, structure.lastHigh.time)
     );
   }
   if (structure.lastLow) {
@@ -120,7 +122,7 @@ function annotateStructureLiquidityStates(structure, candles) {
       { price: structure.lastLow.price },
       false,
       candles,
-      closeAt(structure.lastLow.index, structure.lastLow.time)
+      confirmedCloseAt(structure.lastLow.index, structure.lastLow.time)
     );
   }
 }
