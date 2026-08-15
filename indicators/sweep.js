@@ -19,6 +19,7 @@
  *   先插针扫掉流动性（止损），随后反转走真方向（多头 Bias 扫 SSL / 空头 Bias 扫 BSL）。
  *   sweep 结果带 judas: true 标记，供消息层提示"留意反转"。
  */
+import { marketNow } from "../utils/marketClock.js";
 
 /**
  * Judas Swing 窗口：美股开盘后 90 分钟（用北京时间）。
@@ -60,7 +61,7 @@ function judasOf(side, bias) {
  *     如 PDH 的昨日日 K；levelDate=盘前区间北京日期 "YYYY-MM-DD"），供消息层展示"这个流动性是什么时候形成的"
  */
 export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = null) {
-  const now = Date.now();
+  const now = marketNow();
   const cur = h5m[h5m.length - 1];
 
   /** 透传流动性位的形成时间（lv 无 time/date 时省略，不产生 undefined 字段） */
@@ -74,7 +75,10 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
   /** 扫损事件必须在位形成之后：lv.time 为位形成 K 的开盘时间，扫损 K 若早于它，
    *  不可能"扫这个位"（CYSUSDT 08/15 02:03 误报：00:00 形成的内部摆动低点被 08/14 22:15
    *  的刺破匹配成扫损，时间倒挂）。无 time 的位（如 EQH）不做约束。 */
-  const formedAfter = (lv, k) => lv.time == null || k.time >= lv.time;
+  const formedAfter = (lv, k) => {
+    const activeFrom = lv.activeFrom ?? lv.time;
+    return activeFrom == null || k.time >= activeFrom;
+  };
 
   // 流动性位是否早已被消费（位形成之后任一根已收盘 K 收在 level 外侧）：
   //   BSL 只要收在 level 上方 → 该位已破位/被扫，之后插针只是回测旧位，不算新扫损；SSL 对称。
@@ -82,7 +86,7 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
   // 位形成之前的历史 K 收在 level 外侧不是对本位的消费——否则"低于历史高点"的内部摆动位/PDH
   // 会被永久判为已消费，扫损永不报（08/15 扫损骤减根因：42 个 ACTIVE 位被吞、DOGE/NBIS 漏报）。
   const alreadyTaken = (lv, isBuy, upToIndex) => {
-    const from = lv.time != null ? lv.time : 0; // 位形成 K 的开盘时间；无 time（如 EQH）退化为全历史
+    const from = lv.activeFrom ?? lv.time ?? 0; // swing 用右侧确认 K 收盘；其他位沿用形成时间
     for (let i = 0; i < upToIndex; i++) {
       const k = h5m[i];
       if (k.closeTime > now) continue;
@@ -92,16 +96,38 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
     return false;
   };
 
+  // 同一流动性池首次完成“刺破并收回”后即视为已 raid；后续 K 再刺同一价格不是新池。
+  // 跨根收回的第二根仍属于第一次 raid，因此仅检查在当前候选 K 之前已经完整结束的事件。
+  const alreadySwept = (lv, isBuy, upToIndex) => {
+    const from = lv.activeFrom ?? lv.time ?? 0;
+    for (let i = 0; i < upToIndex; i++) {
+      const k = h5m[i];
+      if (!k || k.closeTime > now || k.time < from) continue;
+      const pierced = isBuy ? k.high > lv.price : k.low < lv.price;
+      const reclaimed = isBuy ? k.close < lv.price : k.close > lv.price;
+      if (pierced && reclaimed) return true;
+      const next = h5m[i + 1];
+      if (pierced && next && i + 1 < upToIndex && next.closeTime <= now) {
+        const nextReclaimed = isBuy ? next.close < lv.price : next.close > lv.price;
+        if (nextReclaimed) return true;
+      }
+    }
+    return false;
+  };
+
+  const unavailable = (lv, isBuy, upToIndex) =>
+    alreadyTaken(lv, isBuy, upToIndex) || alreadySwept(lv, isBuy, upToIndex);
+
   // 1) 实时：进行中的 K 已刺破流动性位，且当前最新价已收回（BSL：price 跌回 level 下；SSL：price 升回 level 上）
   if (cur && cur.closeTime > now && price != null) {
     const lastIdx = h5m.length - 1;
     for (const lv of buySide || []) {
-      if (cur.high > lv.price && price < lv.price && formedAfter(lv, cur) && !alreadyTaken(lv, true, lastIdx)) {
+      if (cur.high > lv.price && price < lv.price && formedAfter(lv, cur) && !unavailable(lv, true, lastIdx)) {
         return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: cur.high, close: price, time: cur.time, key: `${cur.time}_BSL`, realtime: true, judas: judasOf("BSL", bias) && isJudasWindow(new Date(cur.time)), ...levelMeta(lv) };
       }
     }
     for (const lv of sellSide || []) {
-      if (cur.low < lv.price && price > lv.price && formedAfter(lv, cur) && !alreadyTaken(lv, false, lastIdx)) {
+      if (cur.low < lv.price && price > lv.price && formedAfter(lv, cur) && !unavailable(lv, false, lastIdx)) {
         return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: cur.low, close: price, time: cur.time, key: `${cur.time}_SSL`, realtime: true, judas: judasOf("SSL", bias) && isJudasWindow(new Date(cur.time)), ...levelMeta(lv) };
       }
     }
@@ -115,25 +141,25 @@ export function detectSweeps(h5m, buySide, sellSide, price, window = 48, bias = 
     const idx = h5m.indexOf(k);
     for (const lv of buySide || []) {
       // 单根内完成：本根刺破且收盘收回下方
-      if (k.high > lv.price && k.close < lv.price && formedAfter(lv, k) && !alreadyTaken(lv, true, idx)) {
+      if (k.high > lv.price && k.close < lv.price && formedAfter(lv, k) && !unavailable(lv, true, idx)) {
         return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: k.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
       }
       // V2.7 跨根收回：本根刺破但收盘未收回（仍在上方），次根（已收盘）收回下方也算 BSL。
       // ICT 中"插针式扫损"常在 1-2 根内完成；跨根形态比突破回踩更接近扫损语义。
       const next = h5m[idx + 1];
-      if (k.high > lv.price && k.close >= lv.price && next && next.closeTime <= now && next.close < lv.price && formedAfter(lv, k) && !alreadyTaken(lv, true, idx)) {
-        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: next.close, time: k.time, key: `${k.time}_BSL`, realtime: false, closedTime: next.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
+      if (k.high > lv.price && k.close >= lv.price && next && next.closeTime <= now && next.close < lv.price && formedAfter(lv, k) && !unavailable(lv, true, idx)) {
+        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: next.close, time: k.time, reclaimTime: next.time, key: `${k.time}_BSL`, realtime: false, closedTime: next.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
       }
     }
     for (const lv of sellSide || []) {
       // 单根内完成：本根刺破且收盘收回上方
-      if (k.low < lv.price && k.close > lv.price && formedAfter(lv, k) && !alreadyTaken(lv, false, idx)) {
+      if (k.low < lv.price && k.close > lv.price && formedAfter(lv, k) && !unavailable(lv, false, idx)) {
         return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: k.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
       }
       // V2.7 跨根收回：本根刺破但收盘未收回（仍在下方），次根（已收盘）收回上方也算 SSL。
       const next = h5m[idx + 1];
-      if (k.low < lv.price && k.close <= lv.price && next && next.closeTime <= now && next.close > lv.price && formedAfter(lv, k) && !alreadyTaken(lv, false, idx)) {
-        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: next.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: next.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
+      if (k.low < lv.price && k.close <= lv.price && next && next.closeTime <= now && next.close > lv.price && formedAfter(lv, k) && !unavailable(lv, false, idx)) {
+        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: next.close, time: k.time, reclaimTime: next.time, key: `${k.time}_SSL`, realtime: false, closedTime: next.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv) };
       }
     }
   }

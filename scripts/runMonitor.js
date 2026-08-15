@@ -30,7 +30,8 @@ import { scanOpportunities, OPP_MIN_SCORE } from "../monitor/opportunity.js";
 import { loadState, saveState, compareState, cleanupState } from "../monitor/state.js";
 import { sendMarkdown } from "../monitor/dingTalk.js";
 import { loadCalendarEvents, loadExchangeInfo, newsLineFor } from "../monitor/newsCalendar.js";
-import { getHistory } from "../data/binance.js";
+import { getHistory, syncBinanceClock } from "../data/binance.js";
+import { marketNow } from "../utils/marketClock.js";
 import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +45,7 @@ const NOTIFY_RETENTION_MS = 24 * 3600_000; // 存档保留时长：超过 24h �
 
 /** 文件日志：Windows 上 pm2 的 out/err 日志空白，写文件便于在服务器上排查 */
 function log(...args) {
-  const ts = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+  const ts = new Date(marketNow()).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
   const line = `[${ts}] ${args.join(" ")}`;
   try {
     appendFileSync(LOG_FILE, line + "\n");
@@ -58,15 +59,16 @@ function log(...args) {
  *  @param {string} [filePath] 测试注入用；默认 NOTIFY_FILE */
 export function appendNotification(text, title = "", filePath = NOTIFY_FILE) {
   try {
-    const now = Date.now();
+    const localNow = Date.now();
+    const now = marketNow();
     const entry = {
-      ts: new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }),
+      ts: new Date(now).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }),
       tsMs: now,
       title,
       text,
     };
     try {
-      if (now - statSync(filePath).mtimeMs > NOTIFY_RETENTION_MS) writeFileSync(filePath, "");
+      if (localNow - statSync(filePath).mtimeMs > NOTIFY_RETENTION_MS) writeFileSync(filePath, "");
     } catch {}
     appendFileSync(filePath, JSON.stringify(entry) + "\n");
   } catch {}
@@ -80,8 +82,8 @@ async function sendNotification(text, title) {
 }
 
 /** 扫损去重集合（兼容迁移）：继承上一轮已推送的 key；旧版单值 sweepTime 并入（视为已推送，不重推） */
-function sweepPushedOf(prev) {
-  const base = { ...((prev && prev.sweepPushed) || {}) };
+function sweepPushedOf(prev, retained = {}) {
+  const base = { ...retained, ...((prev && prev.sweepPushed) || {}) };
   if (prev && prev.sweepTime && !base[prev.sweepTime]) base[prev.sweepTime] = 1;
   return base;
 }
@@ -100,6 +102,19 @@ const BJ_OFFSET_MS = 8 * 3600_000;
 const OPP_M5_LIMIT = 1000;
 /** 同一机会 key 推送冷却（避免同一执行区/同一链条每 10 分钟重复推） */
 const OPP_COOLDOWN_MS = 60 * 60_000;
+const STATE_META_KEY = "__meta";
+const SWEEP_HISTORY_TTL_MS = 24 * 3600_000;
+const SWEEP_HISTORY_MAX_PER_SYMBOL = 500;
+
+/** 去重历史独立于 Top30 当前成员保存，避免标的跌出后再进入导致旧事件重推。 */
+export function pruneSweepPushed(pushed, now = marketNow()) {
+  return Object.fromEntries(
+    Object.entries(pushed || {})
+      .filter(([, ts]) => ts === 1 || (Number.isFinite(Number(ts)) && now - Number(ts) <= SWEEP_HISTORY_TTL_MS))
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, SWEEP_HISTORY_MAX_PER_SYMBOL)
+  );
+}
 
 /** 数据驱动活跃成交量窗口展示；它不是 ICT 固定 Killzone。 */
 function sessionText(s) {
@@ -139,8 +154,20 @@ const reasonCN = (r) => (r ? REASON_CN[r] || r : "-");
 /** 最终操作：方向评分只能说明“值得关注”，执行区未就绪或第一目标结构空间不足时仍必须等待。 */
 export function resolveFinalAction(r, prev = null) {
   const directionDecision = r.decisionLabel;
+  // planR 0.5 临界区保留旧动作，避免 NO TRADE/WAIT 每轮来回跳。
+  if (r.reason === "Direction correct but reward insufficient (planR < 0.5)" && r.planR >= 0.45 && prev?.decision === "WAIT") return "WAIT";
+  if (directionDecision === "WAIT" && r.planR <= 0.55 && prev?.decision === "NO TRADE") return "NO TRADE";
   if (directionDecision !== "WATCH") return directionDecision;
-  if (r.execution !== "READY") return "WAIT";
+
+  let execution = r.execution;
+  // LATE_IMPULSE 0.6 阈值对应多头 position=0.4、空头 position=0.6；±0.03 内沿用旧动作。
+  const position = Number(r.rangePosition);
+  const boundary = r.bias === "BULLISH" ? 0.4 : r.bias === "BEARISH" ? 0.6 : null;
+  if (boundary != null && Number.isFinite(position) && Math.abs(position - boundary) <= 0.03) {
+    if (prev?.decision === "WATCH") execution = "READY";
+    else if (prev?.decision === "WAIT") execution = "WAIT";
+  }
+  if (execution !== "READY") return "WAIT";
   if (r.planR == null || r.planR < 0.95) return "WAIT";
   // 1R 临界区使用旧状态，避免价格轻微波动造成 WATCH/WAIT 每十分钟翻转。
   if (r.planR < 1.05) return prev?.decision === "WATCH" ? "WATCH" : "WAIT";
@@ -155,10 +182,12 @@ export function resolveFinalAction(r, prev = null) {
  * @param {boolean} [p.dryRun] 只计算不推送
  */
 export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {}) {
+  await syncBinanceClock();
   const list = symbols && symbols.length ? symbols : (await getTopVolumeSymbols(topN, { exclude: EXCLUDE_SYMBOLS })).map((t) => t.symbol);
   log(`[runMonitor] 开始，合约数=${list.length}: ${list.join(",")}`);
   const prevState = loadState();
-  const isFirstRun = Object.keys(prevState).length === 0;
+  const isFirstRun = Object.keys(prevState).filter((k) => k !== STATE_META_KEY).length === 0;
+  const retainedSweepHistory = prevState[STATE_META_KEY]?.sweepPushedBySymbol || {};
   // 消息面窗口（范围：股票代币 + BTCUSDT/ETHUSDT；每周拉一次缓存一周，exchangeInfo 进程内缓存）
   // 每轮只加载一次，扫损 / Bias 变化消息复用同一份窗口数据
   let newsEvents = [];
@@ -205,6 +234,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       execution: r.execution,
       location: r.location,
       context: r.context,
+      rangePosition: r.rangePosition,
       scenario: r.scenario,
       activeVolumeWindow: r.activeVolumeWindow || r.session,
       ictSession: r.ictSession || null,
@@ -219,7 +249,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       // 扫损事件去重：已推送的扫损 key 集合（key = 5m K 开盘时间_方向）。
       // 原为单值 sweepTime，位列表漂移（INTERNAL_HIGH→PDH 或新事件插入）导致检测事件在
       // 新旧 key 间切换时旧事件被重复推（08/15 SNDK/BZ/ZEC/BNB 5 处重复）；集合保证同 key 永不重推。
-      sweepPushed: sweepPushedOf(prev), // 兼容迁移：旧版单值 sweepTime 并入集合
+      sweepPushed: sweepPushedOf(prev, retainedSweepHistory[r.symbol]), // 兼容迁移 + Top30 进出保留
       ob: r.ob, // { type, kind, state, ... } | null（最近 Order Block 细类）
       structureAlert: r.provisionalStructureBreak
         ? `${r.provisionalStructureBreak.direction}_${r.provisionalStructureBreak.level}`
@@ -280,17 +310,17 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
         }
       }
       log(`[runMonitor] 本轮完成: ${changed.length} 变化 / ${overview.length} 合约`);
-      // P1-A：流动性扫损事件（独立推送；同 key 已推送过则不重复推）
-      for (const item of overview) {
-        if (item.sweep && item.prev && item.prev.sweepTime !== item.sweep.key && !item.prev.sweepPushed?.[item.sweep.key]) {
-          try {
-            await sendNotification(buildSweep(item), `${item.symbol} 扫损`);
-            nextState[item.symbol].sweepPushed[item.sweep.key] = Date.now();
-            log(`[runMonitor] 已推送 ${item.symbol} 扫损（${item.sweep.side} @ ${item.sweep.level}）`);
-          } catch (e) {
-            // 本轮 key 未写入 nextState.sweepPushed → 下一轮仍视为新扫损 → 重推（不漏报流动性事件）
-            log(`[runMonitor] ${item.symbol} 扫损推送失败，保留旧记录下轮重试: ${e.message}`);
-          }
+    }
+    // 流动性扫损是独立事件：首轮及新进入 Top30 的标的也必须推；cur 已合并跨 Top30 的历史去重。
+    for (const item of overview) {
+      if (item.sweep && !item.cur.sweepPushed?.[item.sweep.key]) {
+        try {
+          await sendNotification(buildSweep(item), `${item.symbol} 扫损`);
+          nextState[item.symbol].sweepPushed[item.sweep.key] = marketNow();
+          log(`[runMonitor] 已推送 ${item.symbol} 扫损（${item.sweep.side} @ ${item.sweep.level}）`);
+        } catch (e) {
+          // 本轮 key 未写入 nextState.sweepPushed → 下一轮仍视为新扫损 → 重推（不漏报流动性事件）
+          log(`[runMonitor] ${item.symbol} 扫损推送失败，保留旧记录下轮重试: ${e.message}`);
         }
       }
     }
@@ -314,8 +344,17 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
         log(`[runMonitor] 4H 收盘报告推送失败: ${e.message}`);
       }
     }
-    // 白名单清理：只保留本轮监控 list 内的合约，剔除跌出 Top10 的残留状态
-    saveState(cleanupState(nextState, list));
+    // 当前状态仍只保留 Top30；扫损 key 另存 meta（24h/每标的 500 条），避免跌出再进入时重复推。
+    const sweepPushedBySymbol = { ...retainedSweepHistory };
+    for (const [symbol, state] of Object.entries(nextState)) {
+      sweepPushedBySymbol[symbol] = pruneSweepPushed(state.sweepPushed);
+    }
+    for (const [symbol, pushed] of Object.entries(sweepPushedBySymbol)) {
+      const pruned = pruneSweepPushed(pushed);
+      if (Object.keys(pruned).length) sweepPushedBySymbol[symbol] = pruned;
+      else delete sweepPushedBySymbol[symbol];
+    }
+    saveState({ ...cleanupState(nextState, list), [STATE_META_KEY]: { sweepPushedBySymbol } });
     log(`[runMonitor] 状态已保存（${Object.keys(nextState).length} 合约）`);
   }
 
@@ -328,7 +367,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
  * 用 UTC 字段 + 8h 偏移模拟北京时间，与服务器时区无关。
  * @param {Date} [now] 测试可注入
  */
-export function nextDelayMs(now = new Date()) {
+export function nextDelayMs(now = new Date(marketNow())) {
   const bj = new Date(now.getTime() + BJ_OFFSET_MS);
   const mins = bj.getUTCHours() * 60 + bj.getUTCMinutes() + bj.getUTCSeconds() / 60 + bj.getUTCMilliseconds() / 60000;
   const step = 10; // 全天统一每 10 分钟对齐
@@ -347,8 +386,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export async function startMonitorLoop({ symbols, intervalMs } = {}) {
   await runMonitor({ symbols });
   for (;;) {
-    const delay = intervalMs ?? nextDelayMs();
-    const next = new Date(Date.now() + delay);
+    const delay = intervalMs ?? nextDelayMs(new Date(marketNow()));
+    const next = new Date(marketNow() + delay);
     log(`[monitor] 下次检测: ${next.toISOString()}（${Math.round(delay / 60000)} 分钟后）`);
     await sleep(delay);
     try {
@@ -364,7 +403,7 @@ export async function startMonitorLoop({ symbols, intervalMs } = {}) {
  * 用 UTC 字段 + 8h 偏移模拟北京时间，与服务器时区无关。
  * @param {Date} [now]
  */
-export function latestBjBoundaryMs(now = new Date()) {
+export function latestBjBoundaryMs(now = new Date(marketNow())) {
   const bj = new Date(now.getTime() + BJ_OFFSET_MS);
   const startOfBjDay = Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate());
   const mins = bj.getUTCHours() * 60 + bj.getUTCMinutes();
@@ -587,7 +626,9 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m, 
   const tag = sweep.realtime ? "实时" : "已确认";
   const timeText = sweep.realtime
     ? `检测于 ${nowHHMM()}（本根 5m 进行中）`
-    : `扫损 K: ${klineSpan(sweep.time)}（已收盘确认）`;
+    : sweep.reclaimTime != null
+      ? `刺破 K: ${klineSpan(sweep.time)} → 收回 K: ${klineSpan(sweep.reclaimTime)}（跨根确认）`
+      : `扫损 K: ${klineSpan(sweep.time)}（已收盘确认）`;
   const formedText = levelFormedText(sweep); // 被扫流动性位是"哪根 K/哪天"形成的（用户对照图表定位用）
   const lines = [
     `**⚡ ${symbol} 流动性扫损（${tag}）**  🕐 ${nowHHMM()}`,
@@ -763,14 +804,14 @@ async function scanAndPushOpportunities({ overview, prevState, nextState, dryRun
     // 审计修复：旧版 state.json 合约条目无 oppPushed 字段（升级兼容），可选链避免
     // 首轮升级后整个机会扫描段抛 TypeError 中断（见审计重要 #4）
     const lastTs = prevState[op.symbol]?.oppPushed?.[op.key] || 0;
-    if (Date.now() - lastTs < OPP_COOLDOWN_MS) continue;
+    if (marketNow() - lastTs < OPP_COOLDOWN_MS) continue;
     if (dryRun) {
       log(`[runMonitor][dry] 机会候选 ${op.symbol} ${op.type} ${op.direction} score=${op.score}`);
       continue;
     }
     try {
       await sendNotification(buildOpportunity(op, itemOf(op, overview)), `${op.symbol} 5m机会`);
-      pushed[op.key] = Date.now();
+      pushed[op.key] = marketNow();
       log(`[runMonitor] 已推送 ${op.symbol} 5m 机会（${op.type} score=${op.score}）`);
     } catch (e) {
       log(`[runMonitor] ${op.symbol} 机会推送失败，下轮重试: ${e.message}`);
@@ -778,16 +819,16 @@ async function scanAndPushOpportunities({ overview, prevState, nextState, dryRun
   }
 
   // 📊 机会榜：每 30 分钟整点轮（北京时间 0/30 分），距上次推送 ≥25 分钟去重
-  const bjMin = new Date(Date.now() + BJ_OFFSET_MS).getUTCMinutes();
+  const bjMin = new Date(marketNow() + BJ_OFFSET_MS).getUTCMinutes();
   const top = all.filter((o) => o.score >= OPP_MIN_SCORE).sort((a, b) => b.score - a.score).slice(0, 5);
-  if (bjMin % 30 === 0 && top.length && Date.now() - loadDigestTs() >= 25 * 60_000) {
+  if (bjMin % 30 === 0 && top.length && marketNow() - loadDigestTs() >= 25 * 60_000) {
     if (dryRun) {
       log(`[runMonitor][dry] 机会榜 ${top.map((o) => `${o.symbol} ${o.type}(${o.score})`).join(", ")}`);
       return;
     }
     try {
       await sendNotification(buildOpportunityDigest(top), "5m 机会榜");
-      saveDigestTs(Date.now());
+      saveDigestTs(marketNow());
       log(`[runMonitor] 5m 机会榜已推送（${top.length} 条）`);
     } catch (e) {
       log(`[runMonitor] 机会榜推送失败: ${e.message}`);
@@ -999,7 +1040,7 @@ function now() {
 
 /** 北京时间 hh:mm */
 function nowHHMM() {
-  return new Date().toLocaleString("zh-CN", {
+  return new Date(marketNow()).toLocaleString("zh-CN", {
     timeZone: "Asia/Shanghai",
     hour: "2-digit",
     minute: "2-digit",

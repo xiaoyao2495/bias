@@ -22,6 +22,8 @@
  * 兼容性：旧缓存 K 线无 quoteVol 字段（视为 0）→ 无数据时返回 []。
  */
 
+import { marketNow } from "../utils/marketClock.js";
+
 const BJ_OFFSET_MS = 8 * 3600_000;
 const DAY_MS = 24 * 3600_000;
 /** 碎片窗口过滤：窗口成交量占比 < 10%（不足全天 1/10）视为噪声丢弃（见 computeActiveWindows） */
@@ -76,7 +78,7 @@ export function ictSessionAt(time) {
  * @param {number} [now=Date.now()] 测试可注入
  * @returns {Array} 落在上周一 00:00（北京）~ 上周五 24:00（北京）的 K
  */
-export function lastTradingWeek(h1, now = Date.now()) {
+export function lastTradingWeek(h1, now = marketNow()) {
   if (!h1 || !h1.length) return [];
   const bjNow = new Date(now + BJ_OFFSET_MS);
   const dow = bjNow.getUTCDay(); // 0=周日

@@ -27,7 +27,9 @@
  * @param {number} [args.now]              当前时间戳
  * @returns {{ stage: "ACCUMULATION"|"MANIPULATION"|"DISTRIBUTION"|"UNSET", direction: string, reason: string, evidenceTime: number|null }}
  */
-export function computeAmdStage({ displacement, sweep, structure, range, mssEvents, m5, price, windowMs = AMD_WINDOW_MS, now = Date.now() }) {
+import { marketNow } from "../utils/marketClock.js";
+
+export function computeAmdStage({ displacement, sweep, structure, range, mssEvents, m5, price, windowMs = AMD_WINDOW_MS, now = marketNow() }) {
   const candidates = [];
 
   if (displacement && displacement.time != null && displacement.time >= now - windowMs) {

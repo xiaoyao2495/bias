@@ -24,6 +24,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProxyAgent, request } from "undici";
+import { marketNow } from "../utils/marketClock.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = join(__dirname, "..", "data", "cache");
@@ -173,7 +174,7 @@ export async function loadExchangeInfo({ force = false } = {}) {
  * @param {number} hours 消息面窗口小时数
  * @returns {Array<{title,country,impact,ts,raw}>} 按时间升序
  */
-export function filterUpcomingEvents(events, now = Date.now(), hours = NEWS_HOURS) {
+export function filterUpcomingEvents(events, now = marketNow(), hours = NEWS_HOURS) {
   const end = now + hours * 3600_000;
   return (events || [])
     .map((e) => ({ ...e, ts: new Date(e.date).getTime() }))
@@ -197,7 +198,7 @@ export function isNewsRelevantSymbol(symbol, exchInfo = {}) {
  * @param {number} [opts.hours] 消息面窗口小时数
  * @returns {string|null} 例："未来 8h 有 CPI（20:30）—— 数据前波动多为操纵，勿当方向信号"
  */
-export function newsLineFor(symbol, events, exchInfo = {}, { now = Date.now(), hours = NEWS_HOURS } = {}) {
+export function newsLineFor(symbol, events, exchInfo = {}, { now = marketNow(), hours = NEWS_HOURS } = {}) {
   if (!isNewsRelevantSymbol(symbol, exchInfo)) return null;
   const upcoming = filterUpcomingEvents(events, now, hours);
   if (!upcoming.length) return null;

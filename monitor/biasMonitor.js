@@ -23,12 +23,13 @@
 import { getHistory, getKlines } from "../data/binance.js";
 import { detectSweeps } from "../indicators/sweep.js";
 import { findDisplacements } from "../indicators/displacement.js";
-import { detectStructureEvents } from "../indicators/mss.js";
+import { scanStructureEvents } from "../indicators/mss.js";
 import { computeAmdStage } from "../indicators/amd.js";
 import { findSwings, analyzeSwings } from "../indicators/swing.js";
 import { liquidityStateForLevel } from "../indicators/liquidity.js";
 import { analyzeBias } from "../engine/analyzeBias.js";
 import { pathToFileURL } from "node:url";
+import { marketNow } from "../utils/marketClock.js";
 
 // 与 scanner/replayCase 同款数据窗口：4H 5000 根 ≈ 830 天，1D/1W 供 HTF 方向
 const HISTORY = { "4h": 5000, "1d": 2000, "1w": 400 };
@@ -65,7 +66,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // 进行中的 Binance 4H K：未收盘 K 可改变倒数 swing 的右侧确认、提前生成/撤销 FVG/OB，
   // 且其 closeTime 是未来时间——实盘结果会在 4H 内重绘，而 Historical Scanner 只用已收盘 K，
   // 造成"实时与回放不一致"。实时 5m 价格仍作为独立 provisional 事件（price）输入，不参与 4H 结构定型。
-  const now = Date.now();
+  const now = marketNow();
   const closed4h = h4.filter((k) => k.closeTime <= now);
   const lastK = closed4h[closed4h.length - 1] || h4[h4.length - 1]; // 兜底：理论上总有已收盘 K
   const lastClosed = lastK; // 最后已收盘 4H（收盘报告用：收于开盘上方/下方）
@@ -83,7 +84,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   let analysisTime = time;
   if (m5.length) {
     const last5m = m5[m5.length - 1];
-    if (last5m.closeTime <= Date.now()) {
+    if (last5m.closeTime <= now) {
       price = last5m.close;
       analysisTime = last5m.closeTime;
     } else if (m5[m5.length - 2]) {
@@ -106,7 +107,9 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // 否则内部 swing 可能陈旧到已被更新高低点取消，导致扫过期的位。
   const closed1h = h1Swing.filter((k) => k.closeTime <= now);
   const swings1h = analyzeSwings(findSwings(closed1h, 1, 1));
-  const isActive1h = (s, isBuy) => liquidityStateForLevel({ price: s.price }, isBuy, closed1h, closed1h[s.index].closeTime).state === "ACTIVE";
+  // right=1 的 1H swing 只有右侧 K 收盘后才成立；此前的 5m 行情不能倒过来“扫”一个尚未确认的位。
+  const activeFrom1h = (s) => closed1h[s.index + 1]?.closeTime ?? closed1h[s.index]?.closeTime;
+  const isActive1h = (s, isBuy) => liquidityStateForLevel({ price: s.price }, isBuy, closed1h, activeFrom1h(s)).state === "ACTIVE";
   // 位必须与现价同侧：BEARISH 的 internalHigh 须仍在价格上方（价格未突破它），BULLISH 的
   // internalLow 须仍在价格下方。价格已突破的位（如 BZUSDT 08/14 22:50 现价 85.84 > 1h swing high
   // 85.76）既不能当失效线（risk = 位-现价 变负 → 目标/planR 全失效 →"机会质量 -"），
@@ -114,10 +117,10 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   const lastActiveHigh1h = swings1h.filter((s) => s.type === "HIGH").reverse().find((s) => isActive1h(s, true) && (price == null || s.price > price));
   const lastActiveLow1h = swings1h.filter((s) => s.type === "LOW").reverse().find((s) => isActive1h(s, false) && (price == null || s.price < price));
   const internalHigh = lastActiveHigh1h
-    ? [{ type: "INTERNAL_HIGH", price: lastActiveHigh1h.price, state: "ACTIVE", ...(lastActiveHigh1h.time != null ? { time: lastActiveHigh1h.time } : {}) }]
+    ? [{ type: "INTERNAL_HIGH", price: lastActiveHigh1h.price, state: "ACTIVE", activeFrom: activeFrom1h(lastActiveHigh1h), ...(lastActiveHigh1h.time != null ? { time: lastActiveHigh1h.time } : {}) }]
     : [];
   const internalLow = lastActiveLow1h
-    ? [{ type: "INTERNAL_LOW", price: lastActiveLow1h.price, state: "ACTIVE", ...(lastActiveLow1h.time != null ? { time: lastActiveLow1h.time } : {}) }]
+    ? [{ type: "INTERNAL_LOW", price: lastActiveLow1h.price, state: "ACTIVE", activeFrom: activeFrom1h(lastActiveLow1h), ...(lastActiveLow1h.time != null ? { time: lastActiveLow1h.time } : {}) }]
     : [];
 
   // 核心判定链路（与 Historical Scanner 共用 analyzeBias，见 engine/analyzeBias.js）
@@ -163,10 +166,12 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
   // 仅检测不生成信号：在扫损消息中标注（扫损→收回→MSS 是 ICT 经典链条），供人工判断结构转向。
   // m5 拉取失败（[]）时跳过，不阻断主分析。
   let mss5m = null;
-  if (m5.length >= 3) {
+  if (sweep && m5.length >= 3) {
     try {
-      const cur5m = detectStructureEvents(m5, { price, left: 1, right: 1 });
-      if (cur5m.lastEvent) mss5m = { direction: cur5m.direction, lastEvent: cur5m.lastEvent };
+      const events = scanStructureEvents(m5, { lookback: 48, left: 1, right: 1 });
+      const event = structureEventForSweep(events, sweep);
+      const expectedDirection = sweep.side === "SSL" ? "UP" : "DOWN";
+      if (event) mss5m = { direction: expectedDirection, lastEvent: event };
     } catch {}
   }
 
@@ -251,6 +256,7 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
     execution: bias.executionState || "-",
     location: location.location,
     context: location.context || "-",
+    rangePosition: location.position,
     // 推动区间（审计）：区间高低 + 起点/终点 swing 语义（ICT Impulse = Liquidity → Displacement → Expansion）
     range: location && location.rangeType && location.rangeType !== "NONE"
       ? { high: location.high, low: location.low, rangeType: location.rangeType, startReason: location.startReason || null, endReason: location.endReason || null }
@@ -274,6 +280,16 @@ export async function analyzeSymbol(symbol, { force4h = false } = {}) {
       return amdStage.stage === "UNSET" ? null : amdStage;
     })(),
   };
+}
+
+/** 只把扫损之后、方向与预期反转一致的已确认 MSS 关联到扫损消息。 */
+export function structureEventForSweep(events, sweep) {
+  if (!sweep) return null;
+  const expectedDirection = sweep.side === "SSL" ? "UP" : "DOWN";
+  const sweepConfirmedAt = sweep.closedTime ?? sweep.time;
+  return [...(events || [])].reverse().find(
+    (e) => e.type === "MSS" && e.direction === expectedDirection && e.confirmed && e.time >= sweepConfirmedAt
+  ) || null;
 }
 
 /** 按价格行进顺序整理第一目标与远端 ICT Draw，并分别计算理论 R。 */

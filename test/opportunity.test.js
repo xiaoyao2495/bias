@@ -306,6 +306,19 @@ test("环境过滤：4H bias NEUTRAL → 无机会", () => {
   assert.deepEqual(opps, []);
 });
 
+test("ICT 2022 时间门槛：Killzone 外即使高质量回踩也不出机会", () => {
+  const m5 = mkCandles([
+    [100, 100, 100, 100], [101, 101, 101, 101], [102, 102, 102, 102],
+    [101.5, 103, 101, 102], [101, 101.5, 100.8, 101], [101, 102.2, 100.9, 102.1],
+  ]);
+  const opps = scanOpportunities({
+    symbol: "BTCUSDT",
+    env: baseEnv({ price: 102.1, confidence: "HIGH", quality: "HIGH", ictSession: null }),
+    m5,
+  });
+  assert.deepEqual(opps, []);
+});
+
 test("环境过滤：confidence LOW 且无 ICT Session → 评分不足不出机会（避免噪声）", () => {
   const m5 = mkCandles([
     [100, 100, 100, 100],

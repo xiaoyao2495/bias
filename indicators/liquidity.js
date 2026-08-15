@@ -26,6 +26,8 @@
  *   它是美股盘前流动性，不再称为 ICT Asian Range。
  */
 
+import { marketNow } from "../utils/marketClock.js";
+
 const EQ_TOLERANCE = 0.002; // 0.2%
 const EQ_LOOKBACK_BARS = 150; // EQH/EQL 只统计最近 150 根 4H K 线的 swing（≈25 天）
 // V2.0：Draw on Liquidity 优先级（不含 external/internal swing，见 rankLiquidityTargets）
@@ -115,7 +117,7 @@ export function rankLiquidityTargets(structure, liquidity, direction, price) {
 }
 
 /** 最近已收盘的一根 K（closeTime <= now）；now 默认当前时间，回放时可注入历史时间 */
-function lastCompleted(candles, now = Date.now()) {
+function lastCompleted(candles, now = marketNow()) {
   if (!candles || candles.length === 0) return null;
   for (let i = candles.length - 1; i >= 0; i--) {
     if (candles[i].closeTime && candles[i].closeTime <= now) return candles[i];
@@ -135,7 +137,7 @@ function lastCompleted(candles, now = Date.now()) {
  *   highTime/lowTime：盘前区间内形成最高/最低的那根日内 K 的开盘时间，
  *   供扫损消息精确展示"这个盘前位是几点形成的"（仅日期用户在图上找不到）
  */
-export function findPremarketRange(intraday, now = Date.now()) {
+export function findPremarketRange(intraday, now = marketNow()) {
   if (!intraday || !intraday.length) return null;
   const etParts = (ms) => {
     const parts = new Intl.DateTimeFormat("en-CA", {
@@ -205,7 +207,7 @@ export function isEquityLinkedSymbol(symbol) {
  * @param {Array} [referenceCandles] 已收盘 4H K，用于标记流动性 ACTIVE/SWEPT/BROKEN
  * @param {Object} [options] { symbol, equityLinked }；默认按 symbol 白名单判断
  */
-export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = EQ_TOLERANCE, now = Date.now(), eqLookbackBars = EQ_LOOKBACK_BARS, intradayKlines = null, referenceCandles = null, options = {}) {
+export function computeLiquidity(dailyKlines, weeklyKlines, swings, tolerance = EQ_TOLERANCE, now = marketNow(), eqLookbackBars = EQ_LOOKBACK_BARS, intradayKlines = null, referenceCandles = null, options = {}) {
   const buySide = [];
   const sellSide = [];
 

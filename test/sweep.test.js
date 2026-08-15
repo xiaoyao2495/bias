@@ -55,14 +55,14 @@ test("已收盘确认：SSL — 最近 48 根内跌破 EQL 后收盘收回", () 
   assert.equal(s.levelTime, 5555);
 });
 
-test("已收盘确认：BSL — 从近到远取最近一次事件", () => {
+test("已收盘确认：同一流动性池只认首次 raid", () => {
   const bars = Array.from({ length: 50 }, (_, i) => normal(i));
   bars[47] = closedK(47, 100, 107, 99, 98); // 更早的扫损 K
   bars[48] = closedK(48, 100, 109, 99, 97); // 更近的扫损 K
   const s = detectSweeps([...bars, liveK(98, 99, 97, 98)], [{ type: "EQH", price: 106 }], [], 98);
   assert.equal(s.type, "EQH");
-  assert.equal(s.sweptPrice, 109); // 取最近一根（48）而非更早的（47）
-  assert.equal(s.time, bars[48].time);
+  assert.equal(s.sweptPrice, 107);
+  assert.equal(s.time, bars[47].time);
 });
 
 test("无事件 → null（价格未刺破流动性位）", () => {
@@ -86,6 +86,7 @@ test("V2.7 跨根收回：第一根刺破未收回，次根收回 → 报 SSL", 
   assert.equal(s.level, 111);
   assert.equal(s.sweptPrice, 108); // 刺破 K 的极值
   assert.equal(s.close, 115); // 次根收回价
+  assert.equal(s.reclaimTime, bars[49].time);
 });
 
 test("无 price → 跳过实时检测，只做已收盘确认", () => {
@@ -170,7 +171,7 @@ test("已收盘确认：SSL 已被历史收盘消费 → 不再报扫损", () =>
   assert.equal(detectSweeps([...bars, liveK(112, 113, 111, 112)], [], [{ type: "PDL", price: 95 }], 112), null);
 });
 
-test("历史 wick 刺破但收盘未越过 → 不算消费，扫损仍上报", () => {
+test("历史 wick 刺破且收回 → 流动性池已消费，保留首次 raid", () => {
   const bars = Array.from({ length: 50 }, (_, i) => normal(i));
   bars[10] = closedK(10, 100, 106, 99, 100); // wick 到 106 但收 100（未消费）
   bars[48] = closedK(48, 100, 107, 99, 97); // 插针后收回 → 有效扫损
@@ -178,7 +179,22 @@ test("历史 wick 刺破但收盘未越过 → 不算消费，扫损仍上报", 
   assert.equal(s.side, "BSL");
   assert.equal(s.type, "EQH");
   assert.equal(s.level, 105);
-  assert.equal(s.sweptPrice, 107);
+  assert.equal(s.sweptPrice, 106);
+});
+
+test("1H swing 在右侧确认 K 收盘前不可被扫", () => {
+  const base = now - 4 * 3600_000;
+  const activeFrom = base + 2 * 3600_000;
+  const premature = {
+    time: base + 105 * 60_000,
+    open: 99, high: 101, low: 98, close: 99,
+    closeTime: base + 110 * 60_000 - 1,
+  };
+  const level = { type: "INTERNAL_HIGH", price: 100, time: base, activeFrom };
+  assert.equal(detectSweeps([premature], [level], [], undefined, 48), null);
+
+  const confirmed = { ...premature, time: activeFrom + 1, closeTime: activeFrom + M5 };
+  assert.equal(detectSweeps([confirmed], [level], [], undefined, 48)?.side, "BSL");
 });
 
 test("detectSweeps: 透传盘前流动性位的形成日期（levelDate）", () => {

@@ -26,12 +26,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from "no
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProxyAgent, request } from "undici";
+import { marketNow, marketTimeFromLocal, marketClockNeedsSync, updateMarketClock } from "../utils/marketClock.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = join(__dirname, "cache");
 
 const PERP_BASES = ["https://fapi.binance.com", "https://fapi.binance.vision"]; // 公开永续合约行情端点
 const TIMEOUT_MS = 10_000;
+const CLOCK_SYNC_TTL_MS = 5 * 60_000;
 
 // 代理仅由环境变量显式开启（只认 http/https 代理，避免 socks 冲突）；未设置则直连
 const PROXY_ENV = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
@@ -40,6 +42,48 @@ const proxyAgent = PROXY ? new ProxyAgent(PROXY) : null;
 
 const DEFAULT_TTL_MS = (Number(process.env.BIAS_CACHE_TTL_HOURS) || 4) * 3600_000;
 const INTERVAL_MS = { "5m": 5 * 60_000, "1h": 3600_000, "4h": 4 * 3600_000, "1d": 24 * 3600_000, "1w": 7 * 24 * 3600_000 };
+const WEEK_ANCHOR_MS = 4 * 24 * 3600_000; // 1970-01-05 00:00 UTC（Binance 周 K 周一开盘）
+
+let clockSyncPromise = null;
+let lastClockAttemptLocalMs = 0;
+
+/** 同步 Binance 服务器时钟；失败时降级使用系统时间，不阻断行情拉取。 */
+export async function syncBinanceClock({ force = false } = {}) {
+  const localNow = Date.now();
+  if (!force && (!marketClockNeedsSync(CLOCK_SYNC_TTL_MS) || localNow - lastClockAttemptLocalMs < CLOCK_SYNC_TTL_MS)) return marketNow();
+  if (clockSyncPromise) return clockSyncPromise;
+  lastClockAttemptLocalMs = localNow;
+  clockSyncPromise = (async () => {
+    const modes = PROXY
+      ? [{ opts: { dispatcher: proxyAgent } }, { opts: {} }]
+      : [{ opts: {} }];
+    let lastErr;
+    for (const base of PERP_BASES) {
+      for (const mode of modes) {
+        const before = Date.now();
+        try {
+          const { statusCode, body } = await request(`${base}/fapi/v1/time`, {
+            ...mode.opts,
+            headersTimeout: TIMEOUT_MS,
+            bodyTimeout: TIMEOUT_MS,
+          });
+          if (statusCode !== 200) throw new Error(`HTTP ${statusCode}`);
+          const payload = JSON.parse(await body.text());
+          const after = Date.now();
+          if (!updateMarketClock(payload.serverTime, before, after)) throw new Error("serverTime 无效");
+          return marketNow();
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+    }
+    console.error(`[binance] 服务器时间同步失败，暂用系统时间: ${lastErr?.message || "未知错误"}`);
+    return marketNow();
+  })().finally(() => {
+    clockSyncPromise = null;
+  });
+  return clockSyncPromise;
+}
 
 /** 各周期缓存 TTL 覆盖（分钟）：
  *  4H 是监控主周期，TTL 必须小于周期本身——否则 4H 收盘后缓存仍未过期，
@@ -101,12 +145,12 @@ function ttlMs(interval, ttlMin) {
  * （closeTime>now，实时扫损检测要用它判断"当前价已收回"）。
  * 被剔除的若是最新一根已收盘 K，由 coversLastClosed 触发强制重拉拿最终值。
  */
-export function filterStaleCandles(candles, mtimeMs, now = Date.now()) {
+export function filterStaleCandles(candles, mtimeMs, now = marketNow()) {
   return candles.filter((k) => k.closeTime <= mtimeMs || k.closeTime > now);
 }
 
 /** 过滤后缓存是否已覆盖"最近一根已收盘 K"；未覆盖则缓存不完整（半成品 K 被剔除），应强制重拉。 */
-export function coversLastClosed(candles, interval, now = Date.now()) {
+export function coversLastClosed(candles, interval, now = marketNow()) {
   const intervalMs = INTERVAL_MS[interval];
   if (!intervalMs) return true; // 未知周期保守放行
   let newestClosedCloseTime = -1;
@@ -115,7 +159,8 @@ export function coversLastClosed(candles, interval, now = Date.now()) {
   }
   // Binance closeTime = openTime + interval - 1ms（对齐边界 -1，实测 06:45:00 → 06:49:59.999），
   // 最新一根已收盘 K 的 closeTime 应为 floor((now+1)/interval)*interval - 1（+1 防整点边界 1ms 误差）。
-  const latestCloseTime = Math.floor((now + 1) / intervalMs) * intervalMs - 1;
+  const anchor = interval === "1w" ? WEEK_ANCHOR_MS : 0;
+  const latestCloseTime = Math.floor((now + 1 - anchor) / intervalMs) * intervalMs + anchor - 1;
   return newestClosedCloseTime >= latestCloseTime;
 }
 
@@ -125,10 +170,11 @@ export function coversLastClosed(candles, interval, now = Date.now()) {
  *  @param {boolean} [opts.fresh] 默认 true：缓存若缺最近一根已收盘 K（半成品被剔除）则强制重拉拿最终值；
  *      周级 TTL 的活跃成交量窗口（biasMonitor 1h×720）传 false 保持既有陈旧语义 */
 export async function getKlines(symbol, interval, limit = 500, { force = false, ttlMin, fresh = true } = {}) {
+  await syncBinanceClock();
   const file = cacheFile(symbol, interval, limit);
 
   if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval, ttlMin)) {
-    const mtimeMs = statSync(file).mtimeMs;
+    const mtimeMs = marketTimeFromLocal(statSync(file).mtimeMs);
     const cached = readCache(file);
     if (cached) {
       const good = filterStaleCandles(cached, mtimeMs);
@@ -150,7 +196,7 @@ export async function getKlines(symbol, interval, limit = 500, { force = false, 
     const cached = readCache(file);
     if (cached) {
       console.error(`[binance] 网络请求失败(${e.message})，回退本地缓存: ${file}`);
-      return filterStaleCandles(cached, statSync(file).mtimeMs);
+      return filterStaleCandles(cached, marketTimeFromLocal(statSync(file).mtimeMs));
     }
     throw e;
   }
@@ -162,10 +208,11 @@ export async function getKlines(symbol, interval, limit = 500, { force = false, 
  * 缓存文件：{SYMBOL}_{INTERVAL}_h{count}.json
  */
 export async function getHistory(symbol, interval, count, { force = false, ttlMin, fresh = true } = {}) {
+  await syncBinanceClock();
   const file = cacheFile(symbol, interval, `h${count}`);
 
   if (!force && existsSync(file) && Date.now() - statSync(file).mtimeMs < ttlMs(interval, ttlMin)) {
-    const mtimeMs = statSync(file).mtimeMs;
+    const mtimeMs = marketTimeFromLocal(statSync(file).mtimeMs);
     const cached = readCache(file);
     if (cached) {
       const good = filterStaleCandles(cached, mtimeMs);
@@ -197,7 +244,7 @@ export async function getHistory(symbol, interval, count, { force = false, ttlMi
     const cached = readCache(file);
     if (cached) {
       console.error(`[binance] 网络请求失败(${e.message})，回退本地缓存: ${file}`);
-      return filterStaleCandles(cached, statSync(file).mtimeMs);
+      return filterStaleCandles(cached, marketTimeFromLocal(statSync(file).mtimeMs));
     }
     throw e;
   }

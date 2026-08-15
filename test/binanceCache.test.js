@@ -57,3 +57,9 @@ test("coversLastClosed：边界整点（now=08:30:00.000）时 08:25 K 已收盘
 test("coversLastClosed：未知周期保守放行", () => {
   assert.equal(coversLastClosed([], "1min", Date.now()), true);
 });
+
+test("coversLastClosed：周线按 Binance 周一 UTC 开盘对齐", () => {
+  const lastClosedWeek = { closeTime: Date.UTC(2026, 7, 9, 23, 59, 59, 999) };
+  const friday = Date.UTC(2026, 7, 14, 12);
+  assert.equal(coversLastClosed([lastClosedWeek], "1w", friday), true);
+});

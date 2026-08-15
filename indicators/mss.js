@@ -37,6 +37,7 @@
 import { findSwings, analyzeSwings } from "./swing.js";
 import { buildStructure } from "./structure.js";
 import { findDisplacements } from "./displacement.js";
+import { marketNow } from "../utils/marketClock.js";
 
 function mkEvent(type, direction, level, price, swingIndex, reason, confirmed, realtime, confirmedByDisplacement) {
   // 事件基准均为最近 swing（lastHigh/lastLow）→ INTERNAL；external 位只存在于 structureLayer 审计
@@ -62,7 +63,7 @@ function mkEvent(type, direction, level, price, swingIndex, reason, confirmed, r
  * }}
  */
 export function detectStructureEvents(candles, { price, left = 2, right = 2, displacements } = {}) {
-  const now = Date.now();
+  const now = marketNow();
   // 修复（等待 K 收盘）：swing 判定只用已收盘 K。
   // 进行中 K 的 high/low/close 会随实时成交变动，若参与 Pivot 右侧确认，
   // 会使倒数第 2 根的 swing 状态随实时价漂移（同一根 K 时而确认时而否决），
@@ -207,7 +208,7 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
  * @returns {Array<{type,direction,level,price,swingIndex,atIndex,time,reason,confirmed}>}
  */
 export function scanStructureEvents(candles, { lookback = 50, left = 2, right = 2 } = {}) {
-  const now = Date.now();
+  const now = marketNow();
   const closed = candles.filter((k) => k.closeTime <= now);
   if (closed.length < left + right + 1) return [];
 

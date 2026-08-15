@@ -10,14 +10,37 @@ import assert from "node:assert/strict";
 import { readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf, appendNotification } from "../scripts/runMonitor.js";
-import { displacementFor4h, buildTargetSummary } from "../monitor/biasMonitor.js";
+import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf, appendNotification, pruneSweepPushed } from "../scripts/runMonitor.js";
+import { displacementFor4h, buildTargetSummary, structureEventForSweep } from "../monitor/biasMonitor.js";
 
 test("最终操作服从执行区，并在 1R 临界区保留旧状态", () => {
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "WAIT", planR: 4.3 }, { decision: "WATCH" }), "WAIT");
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 0.996 }, { decision: "WAIT" }), "WAIT");
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 1.01 }, { decision: "WATCH" }), "WATCH");
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 1.06 }, { decision: "WAIT" }), "WATCH");
+});
+
+test("最终操作在 planR 0.5 与 LATE_IMPULSE 边界保留旧状态", () => {
+  assert.equal(resolveFinalAction({ decisionLabel: "NO TRADE", reason: "Direction correct but reward insufficient (planR < 0.5)", planR: 0.49 }, { decision: "WAIT" }), "WAIT");
+  assert.equal(resolveFinalAction({ decisionLabel: "WAIT", planR: 0.51 }, { decision: "NO TRADE" }), "NO TRADE");
+  assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "WAIT", planR: 1.2, bias: "BULLISH", rangePosition: 0.41 }, { decision: "WATCH" }), "WATCH");
+});
+
+test("扫损去重历史会裁掉过期 key，并可跨 Top30 成员变化保留", () => {
+  const now = 10 * 24 * 3600_000;
+  const result = pruneSweepPushed({ recent: now - 1000, expired: now - 25 * 3600_000 }, now);
+  assert.deepEqual(result, { recent: now - 1000 });
+});
+
+test("扫损消息只关联扫损后、反转方向一致的 MSS", () => {
+  const sweep = { side: "SSL", closedTime: 200 };
+  const events = [
+    { type: "MSS", direction: "UP", confirmed: true, time: 100 },
+    { type: "MSS", direction: "DOWN", confirmed: true, time: 250 },
+    { type: "BOS", direction: "UP", confirmed: true, time: 260 },
+    { type: "MSS", direction: "UP", confirmed: true, time: 270 },
+  ];
+  assert.equal(structureEventForSweep(events, sweep)?.time, 270);
 });
 
 test("P0: overview 嵌套状态展开为 5m 机会扫描所需环境", () => {
@@ -225,6 +248,16 @@ test("buildSweep: 内部摆动位（INTERNAL_HIGH，1H swing 高点）— BSL �
   });
   assert.match(msg, /刺破 内部摆动高点 65500/);
   assert.match(msg, /\*\*⚡ BTCUSDT 流动性扫损（实时）\*\*/);
+});
+
+test("buildSweep: 跨根收回分别展示刺破 K 与收回 K", () => {
+  const raid = Date.parse("2026-08-15T01:00:00Z");
+  const msg = buildSweep({
+    symbol: "BTCUSDT", price: 100,
+    sweep: { side: "BSL", type: "EQH", level: 101, sweptPrice: 102, close: 100, time: raid, reclaimTime: raid + 300_000, key: "k", realtime: false },
+    cur: baseCur, confidenceScore: 0, mss5m: null,
+  });
+  assert.match(msg, /刺破 K: .* → 收回 K: .*（跨根确认）/);
 });
 
 test("buildCloseReport: 收上/收下幅度 + 位移标注（含 BOS/FVG 证据）+ 推动区间审计行", () => {

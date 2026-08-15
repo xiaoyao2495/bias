@@ -24,6 +24,7 @@
  */
 import { detectStructureEvents, scanStructureEvents } from "../indicators/mss.js";
 import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
+import { marketNow } from "../utils/marketClock.js";
 
 // ---- 常量 ----
 const ZONE_AGE_MAX = 60; // 执行区最大年龄（根 5m = 5 小时，太旧价值低）
@@ -50,7 +51,7 @@ export function computeM5Context(m5, price) {
   // 且 FVG/OB（findFvgs/findOrderBlocks 直接扫传入数组）与 MSS 事件（mss.js 内部
   // filter 已收盘子集）若用不同数组，同一根 K 的 index 会错位（差 1），
   // CHAIN 的 linkedToMss 按 index 精确匹配会永远失败。
-  const closed = m5.filter((k) => !k.closeTime || k.closeTime <= Date.now());
+  const closed = m5.filter((k) => !k.closeTime || k.closeTime <= marketNow());
   if (closed.length < 3) {
     return { direction: "NEUTRAL", lastHigh: null, lastLow: null, pd: { fvg: [], ob: [] }, events: [], candles: closed };
   }
@@ -85,6 +86,9 @@ export function scanOpportunities({ symbol, env, m5 }) {
   env = env?.cur ? { ...env, ...env.cur } : env;
   const bias = env?.bias;
   if (bias !== "BULLISH" && bias !== "BEARISH") return [];
+  // ICT 2022 时间与价格并重：5m 入场机会只在固定 Killzone 内产生。
+  // 扫损是独立市场事件，仍由 sweep 通道全天通报，不受此门槛影响。
+  if (!env.ictSession) return [];
   if (!m5 || m5.length < 20) return [];
 
   const price = env.price;
@@ -174,7 +178,7 @@ export function detectKeyPositionMss({ env, ctx, bias }) {
 }
 
 /** KEY_MSS 只在确认后 45 分钟内有效（约 9 根已收盘 5m）；同时校验真实时间，防止陈旧行情补发。 */
-export function isRecentKeyMss(event, candles, now = Date.now()) {
+export function isRecentKeyMss(event, candles, now = marketNow()) {
   const age = now - Number(event?.time);
   if (!Number.isFinite(age) || age < 0 || age > KEY_MSS_MAX_AGE_MS) return false;
   const eventIndex = candles.findIndex((k) => (k.closeTime ?? k.time) === event.time);
@@ -354,7 +358,7 @@ function detectChain({ env, ctx, bias, price, zones }) {
   const sweep = env.sweep;
   if (!sweep) return null;
   const sweepTime = sweep.time;
-  if (!sweepTime || Date.now() - sweepTime > SWEEP_WINDOW_MS) return null;
+  if (!sweepTime || marketNow() - sweepTime > SWEEP_WINDOW_MS) return null;
   const expectedMssDir = sweep.side === "BSL" ? "DOWN" : "UP"; // 扫 BSL → 预期向下跌破；扫 SSL → 预期向上突破
   const dirOk = bias === "BULLISH" ? expectedMssDir === "UP" : expectedMssDir === "DOWN";
   if (!dirOk) return null; // 扫损方向与 4H bias 相反 → 反势链，环境不顺 → 不报

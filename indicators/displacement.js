@@ -1,3 +1,5 @@
+import { marketNow } from "../utils/marketClock.js";
+
 /**
  * displacement.js — 位移 K 检测（ICT 2022：BODY + VOLUME）
  *
@@ -31,7 +33,7 @@
  *   volumeRatio: 位移 K 量 / 前 volumeLookback 根均量（无成交量数据时为 null）
  */
 export function findDisplacements(h5m, { lookback = 20, threshold = 1.5, volumeLookback = 20, volumeThreshold = 1.5 } = {}) {
-  const closed = h5m.filter((k) => k.closeTime <= Date.now());
+  const closed = h5m.filter((k) => k.closeTime <= marketNow());
   if (closed.length <= lookback) return [];
 
   // 成交量数据是否存在（真实 kline 恒有 quoteVol；测试 fixture 无量 → 跳过量门槛）
