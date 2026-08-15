@@ -277,7 +277,8 @@ function collectZones(ctx, bias) {
       top,
       bottom,
       mid: (top + bottom) / 2,
-      id: it.id || `${it.type}_${it.index}_${String(bottom)}_${String(top)}`,
+      // 固定长度历史窗口每轮会丢掉旧 K，数组 index 会漂移；时间才可用于跨轮询去重。
+      id: it.id || `${it.type}_${it.time ?? it.index}_${String(bottom)}_${String(top)}`,
       quality: it.quality || null,
       executionStatus,
       widthPct: it.widthPct ?? null,
@@ -330,8 +331,16 @@ function detectRetrace({ ctx, bias, price, zones }) {
   if (!best) return null;
   const z = best.z;
   const confirmation = best.confirmation;
-  // P1：状态文案分层（OPEN 未消耗 / TOUCHED 刚被触碰 / CE_REACHED 已回补 / FILLED 已填平）
-  const zoneState = z.status === "FILLED" ? "已填平" : z.status === "CE_REACHED" ? "已回补" : z.status === "TOUCHED" ? "刚被触碰" : "未消耗";
+  // executionStatus 区分 wick 穿越与收盘填平；不能把仍允许拒绝确认的 WICK_FILLED 写成“已填平”。
+  const zoneState = z.executionStatus === "WICK_FILLED"
+    ? "影线填平、收盘未填平"
+    : z.executionStatus === "FILLED"
+      ? "收盘填平"
+      : z.executionStatus === "CE_REACHED"
+        ? "已回补至中点"
+        : z.executionStatus === "TOUCHED"
+          ? "刚被触碰"
+          : "未消耗";
   return {
     type: "RETRACE",
     direction: bias,
@@ -339,7 +348,8 @@ function detectRetrace({ ctx, bias, price, zones }) {
     zone: { type: z.type, top: z.top, bottom: z.bottom, id: z.id, quality: z.quality, executionStatus: z.executionStatus },
     confirmation,
     trigger: `价格回踩 ${z.type} ${fmtNum(z.bottom)}-${fmtNum(z.top)}（${zoneState}）→ ${confirmation.text}`,
-    key: `RETRACE_${bias}_${z.id}_${confirmation.time}`,
+    // 同一执行区即同一机会；确认 K 每轮变化不应绕过 runMonitor 的 1h 冷却。
+    key: `RETRACE_${bias}_${z.id}`,
     time: confirmation.time,
   };
 }
@@ -417,7 +427,7 @@ function detectChain({ env, ctx, bias, price, zones }) {
     confirmation,
     mssIndex: mss.atIndex,
     trigger: `扫损${sweep.side === "BSL" ? "BSL" : "SSL"} → 5m MSS（位移确认）${expectedMssDir === "UP" ? "向上" : "向下"} → 回踩 ${z.type} → ${confirmation.text}`,
-    key: `CHAIN_${bias}_${z.id}_${sweep.key || sweepTime}_${confirmation.time}`,
+    key: `CHAIN_${bias}_${z.id}_${sweep.key || sweepTime}`,
     time: confirmation.time,
   };
 }
@@ -456,6 +466,7 @@ function confirmExecutionZone({ ctx, zone, bias, afterTime = 0 }) {
         type: "RECLAIM_CLOSE",
         time: k.closeTime ?? k.time,
         price: k.close,
+        rejectionExtreme: bias === "BULLISH" ? touch.candle.low : touch.candle.high,
         text: `5m ${bias === "BULLISH" ? "收阳站回" : "收阴跌回"}执行区中点确认`,
       };
     }
@@ -472,6 +483,7 @@ function confirmExecutionZone({ ctx, zone, bias, afterTime = 0 }) {
     eventType: event.type,
     time: event.time,
     price: event.price,
+    rejectionExtreme: bias === "BULLISH" ? touch.candle.low : touch.candle.high,
     text: `5m ${event.type} ${expected} 结构确认`,
   };
 }
@@ -489,13 +501,18 @@ function buildTradePlan(op, env) {
   const localSwept = localSweptRaw == null ? NaN : Number(localSweptRaw);
   const useLocalSweep = op.type === "KEY_MSS" && Number.isFinite(localSwept);
   const useSweep = op.type === "CHAIN" && Number.isFinite(swept);
+  const rejectionRaw = op.confirmation?.rejectionExtreme;
+  const rejection = rejectionRaw == null ? NaN : Number(rejectionRaw);
+  const useRejection = op.zone?.executionStatus === "WICK_FILLED" && Number.isFinite(rejection);
   const stop = useSweep
     ? swept
     : useLocalSweep
       ? localSwept
-    : op.direction === "BULLISH"
-      ? Number(op.zone?.bottom)
-      : Number(op.zone?.top);
+      : useRejection
+        ? rejection
+        : op.direction === "BULLISH"
+          ? Number(op.zone?.bottom)
+          : Number(op.zone?.top);
   if (!Number.isFinite(entry) || !Number.isFinite(stop)) return null;
   const risk = op.direction === "BULLISH" ? entry - stop : stop - entry;
   if (!(risk > 0)) return null;
@@ -507,7 +524,13 @@ function buildTradePlan(op, env) {
   return {
     entry,
     stop,
-    stopSource: useSweep ? "SWEEP_EXTREME" : useLocalSweep ? "LOCAL_SWEEP_EXTREME" : "EXECUTION_ZONE",
+    stopSource: useSweep
+      ? "SWEEP_EXTREME"
+      : useLocalSweep
+        ? "LOCAL_SWEEP_EXTREME"
+        : useRejection
+          ? "REJECTION_EXTREME"
+          : "EXECUTION_ZONE",
     target: targetValid ? target : null,
     planR: targetValid ? Math.abs(target - entry) / risk : null,
   };
@@ -534,10 +557,14 @@ function scoreOpportunity(o, env) {
   return Math.min(100, s);
 }
 
-/** 数字显示：整数原样，小数保留 2 位去尾零 */
+/** 数字显示：按价格量级自适应，低价合约不能被压成 0.01-0.01。 */
 function fmtNum(n) {
   if (n == null) return "-";
-  return String(Number(Number(n).toFixed(2)));
+  const value = Number(n);
+  if (!Number.isFinite(value)) return "-";
+  const abs = Math.abs(value);
+  const digits = abs >= 1000 ? 1 : abs >= 100 ? 2 : abs >= 1 ? 3 : abs >= 0.1 ? 4 : abs >= 0.01 ? 5 : 7;
+  return String(Number(value.toFixed(digits)));
 }
 
 /** CLI：node monitor/opportunity.js SYMBOL（本地验证机会扫描输出） */

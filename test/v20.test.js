@@ -176,6 +176,13 @@ test("HTF 分层：日线收盘确认仍空，盘中突破只作为 1D 临时转
   assert.deepEqual(ctx.provisionalBreak, { direction: "BULLISH", timeframe: "1D", level: 106 });
 });
 
+test("HTF 临时突破预警保留0.1%缓冲，过滤贴线抖动", () => {
+  const insideBuffer = computeHtfContext(DAY_CANDLES_BREAK_LH.slice(0, -1), [], 106.05);
+  const outsideBuffer = computeHtfContext(DAY_CANDLES_BREAK_LH.slice(0, -1), [], 106.2);
+  assert.equal(insideBuffer.provisionalBreak, null);
+  assert.deepEqual(outsideBuffer.provisionalBreak, { direction: "BULLISH", timeframe: "1D", level: 106 });
+});
+
 test("HTF 分层：日线收盘站上关键位后，临时突破升级为已确认方向", () => {
   const ctx = computeHtfContext(DAY_CANDLES_BREAK_LH, [], 119);
   assert.equal(ctx.confirmedDirection, "BULLISH");

@@ -72,6 +72,72 @@ test("P1-3 RETRACE：回踩 5m FVG 后收阳站回中点 → 出现确认机会"
   assert.ok(retrace.score >= 60, `score ${retrace.score} 应达推送门槛`);
 });
 
+test("RETRACE稳定key不随滚动窗口与新确认K变化", () => {
+  const rows = [
+    [100, 100, 100, 100],
+    [101, 101, 101, 101],
+    [102, 102, 102, 102],
+    [101.5, 103, 101, 102],
+    [101, 101.5, 100.8, 101],
+    [101, 102.2, 100.9, 102.1],
+  ];
+  const firstWindow = mkCandles(rows);
+  const first = scanOpportunities({ symbol: "BTCUSDT", env: baseEnv({ price: 102.1 }), m5: firstWindow })
+    .find((o) => o.type === "RETRACE");
+  const last = firstWindow.at(-1);
+  const secondWindow = [
+    ...firstWindow.slice(1),
+    { time: last.time + 300_000, open: 101, high: 102.3, low: 100.9, close: 102.2, closeTime: last.closeTime + 300_000 },
+  ];
+  const second = scanOpportunities({ symbol: "BTCUSDT", env: baseEnv({ price: 102.2 }), m5: secondWindow })
+    .find((o) => o.type === "RETRACE");
+
+  assert.ok(first && second);
+  assert.equal(first.zone.bottom, second.zone.bottom);
+  assert.notEqual(first.confirmation.time, second.confirmation.time);
+  assert.equal(first.key, second.key);
+});
+
+test("WICK_FILLED回踩以拒绝极值止损，且文案不再称已填平", () => {
+  const m5 = mkCandles([
+    [100, 100, 100, 100],
+    [99, 100, 98, 99],
+    [100, 110, 99, 109],
+    [109, 112, 108, 111],
+    [103, 109, 99, 105],
+  ]);
+  const [op] = scanOpportunities({
+    symbol: "MUUSDT",
+    env: baseEnv({ price: 105, targets: { first: { price: 120 } } }),
+    m5,
+  });
+
+  assert.ok(op);
+  assert.equal(op.zone.executionStatus, "WICK_FILLED");
+  assert.equal(op.trade.stop, 99);
+  assert.equal(op.trade.stopSource, "REJECTION_EXTREME");
+  assert.match(op.trigger, /影线填平、收盘未填平/);
+});
+
+test("低价FVG触发文案保留可区分精度", () => {
+  const padded = [
+    ...Array.from({ length: PADS + 1 }, () => [0.01, 0.01, 0.01, 0.01]),
+    [0.01012, 0.01013, 0.0101, 0.01012],
+    [0.01014, 0.0103, 0.01014, 0.01028],
+    [0.01025, 0.0103, 0.01024, 0.01027],
+    [0.0102, 0.01027, 0.01018, 0.01025],
+  ];
+  const m5 = padded.map(([open, high, low, close], i) => ({
+    time: T0 + i * 300_000, open, high, low, close, closeTime: T0 + (i + 1) * 300_000,
+  }));
+  const retrace = scanOpportunities({ symbol: "AKEUSDT", env: baseEnv({ price: 0.01025 }), m5 })
+    .find((o) => o.type === "RETRACE" && o.zone.bottom === 0.01013);
+
+  assert.ok(retrace);
+  assert.match(retrace.trigger, /0\.01013-0\.01024/);
+  assert.doesNotMatch(retrace.trigger, /0\.01-0\.01/);
+});
+
 test("CHAIN：SSL 扫损 → 5m MSS 向上 → 回踩位移腿 FVG（完整 ICT 链条）", () => {
   // 先 BEARISH 结构（HH→LL→LH→LL），idx6 收盘 103 突破 lastHigh 102 → MSS UP（位移腿）
   // 位移腿自身形成 FVG [102,103]（idx6 low 103 > idx4 high 102，位移 K 自身确认）；

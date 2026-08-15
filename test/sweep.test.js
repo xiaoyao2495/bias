@@ -203,6 +203,26 @@ test("detectSweepEvents: 两轮轮询之间的多个独立扫损事件全部返�
   assert.equal(detectSweeps([...bars, liveK(109, 110, 108, 109)], [{ type: "PDH", price: 105 }, { type: "PWH", price: 110 }], [], 109).key, `${bars[48].time}_BSL`);
 });
 
+test("detectSweepEvents: 同价位不同来源合并为一个流动性池", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[48] = closedK(48, 104, 107, 103, 104);
+  const events = detectSweepEvents(
+    [...bars, liveK(104, 105, 103, 104)],
+    [
+      { type: "PDH", price: 105 },
+      { type: "EXTERNAL_HIGH", price: 105 },
+      { type: "INTERNAL_HIGH", price: 105 },
+    ],
+    [],
+    104,
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "EXTERNAL_HIGH");
+  assert.deepEqual(events[0].levelTypes, ["EXTERNAL_HIGH", "PDH", "INTERNAL_HIGH"]);
+  assert.equal(events[0].sourceBaseKeys.length, 3);
+});
+
 test("三级事件：刺破未收回=L1，旧 detectSweeps 仍不把它当扫损", () => {
   const bars = Array.from({ length: 50 }, (_, i) => normal(i));
   bars[48] = closedK(48, 104, 107, 103, 106);

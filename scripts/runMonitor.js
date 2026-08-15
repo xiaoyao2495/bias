@@ -89,15 +89,31 @@ function sweepPushedOf(prev, retained = {}) {
 }
 
 /** 返回尚未推送的独立扫损事件；legacyKey 兼容升级前 `${time}_${side}` 去重记录。 */
-export function pendingSweepEvents(sweeps, pushed = {}) {
+export function pendingSweepEvents(sweeps, pushed = {}, now = marketNow()) {
   return (sweeps || []).filter((sweep) => {
+    const eventAt = sweep.closedTime ?? sweep.reclaimTime ?? sweep.time;
+    if ((sweep.tier ?? 2) === 1 && Number.isFinite(Number(eventAt)) && now - Number(eventAt) > L1_NOTIFY_MAX_AGE_MS) return false;
     if (pushed[sweep.key]) return false;
     const stageRank = (key) => key.endsWith("_ICT_2022_CONFIRMED") ? 3 : key.endsWith("_RECLAIMED_RAID") ? 2 : key.endsWith("_LIQUIDITY_TAKEN") ? 1 : 0;
-    // 同一 baseKey 只允许向上升级；已经推过 L3 后，即使执行 FVG 后来失效，不能倒序补发 L2。
-    if (sweep.baseKey && Object.keys(pushed).some((key) => key.startsWith(`${sweep.baseKey}_`) && stageRank(key) >= (sweep.tier ?? 2))) return false;
+    // 同一 baseKey 只允许向上升级；合并同价来源后也兼容任一旧来源 key，避免部署迁移重推。
+    const baseKeys = [...new Set([sweep.baseKey, ...(sweep.sourceBaseKeys || [])].filter(Boolean))];
+    if (baseKeys.some((baseKey) => Object.keys(pushed).some((key) => key.startsWith(`${baseKey}_`) && stageRank(key) >= (sweep.tier ?? 2)))) return false;
     // 旧 key 只代表旧版“已收回扫损”（现 L2），不能吞掉新增的 L1 或后续升级的 L3。
     return !((sweep.tier ?? 2) === 2 && sweep.legacyKey && pushed[sweep.legacyKey]);
   });
+}
+
+/** 机会去重时间：优先新稳定 key；升级首轮兼容旧版“滚动 index + 确认时间”key。 */
+export function opportunityLastPushedAt(op, pushed = {}) {
+  const direct = Number(pushed?.[op?.key]) || 0;
+  if (direct || op?.type !== "RETRACE" || !op.zone) return direct;
+  const bottom = String(op.zone.bottom);
+  const top = String(op.zone.top);
+  const prefix = `RETRACE_${op.direction}_`;
+  const bounds = `_${bottom}_${top}`;
+  return Math.max(0, ...Object.entries(pushed || {})
+    .filter(([key]) => key.startsWith(prefix) && (key.endsWith(bounds) || key.includes(`${bounds}_`)))
+    .map(([, ts]) => Number(ts) || 0));
 }
 
 // 模块加载即打点：诊断 pm2 进程是否真正加载/进入了该脚本
@@ -117,6 +133,8 @@ const OPP_COOLDOWN_MS = 60 * 60_000;
 const STATE_META_KEY = "__meta";
 const SWEEP_HISTORY_TTL_MS = 24 * 3600_000;
 const SWEEP_HISTORY_MAX_PER_SYMBOL = 500;
+/** L1 只是“拿走但未收回”，只保留两个轮询周期的即时价值；L2/L3 仍可在 4h 事件窗内补报。 */
+const L1_NOTIFY_MAX_AGE_MS = 20 * 60_000;
 
 /** 去重历史独立于 Top30 当前成员保存，避免标的跌出后再进入导致旧事件重推。 */
 export function pruneSweepPushed(pushed, now = marketNow()) {
@@ -639,7 +657,8 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m, 
   const tier = sweep.tier ?? 2;
   const stage = sweep.stage || "RECLAIMED_RAID";
   const sideText = sweep.side === "BSL" ? "上方买方流动性（BSL）" : "下方卖方流动性（SSL）";
-  const levelText = sweepTypeLabel(sweep.type);
+  const levelTypes = [...new Set(sweep.levelTypes?.length ? sweep.levelTypes : [sweep.type])];
+  const levelText = levelTypes.map(sweepTypeLabel).join(" / ");
   const sweptText = tier === 1
     ? sweep.side === "BSL"
       ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}），尚未收回`
@@ -647,7 +666,7 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m, 
     : sweep.side === "BSL"
       ? `刺破 ${levelText} ${sweep.level}（高 ${sweep.sweptPrice}）后收回`
       : `跌破 ${levelText} ${sweep.level}（低 ${sweep.sweptPrice}）后收回`;
-  const tag = sweep.realtime ? "实时" : "已确认";
+  const tag = sweep.realtime ? "实时" : tier === 1 ? "已收盘" : "已确认";
   const timeText = sweep.realtime
     ? `检测于 ${nowHHMM()}（本根 5m 进行中）`
     : sweep.reclaimTime != null
@@ -839,7 +858,7 @@ async function scanAndPushOpportunities({ overview, prevState, nextState, dryRun
     const pushed = nextState[op.symbol].oppPushed;
     // 审计修复：旧版 state.json 合约条目无 oppPushed 字段（升级兼容），可选链避免
     // 首轮升级后整个机会扫描段抛 TypeError 中断（见审计重要 #4）
-    const lastTs = prevState[op.symbol]?.oppPushed?.[op.key] || 0;
+    const lastTs = opportunityLastPushedAt(op, pushed);
     if (marketNow() - lastTs < OPP_COOLDOWN_MS) continue;
     if (dryRun) {
       log(`[runMonitor][dry] 机会候选 ${op.symbol} ${op.type} ${op.direction} score=${op.score}`);
@@ -914,7 +933,11 @@ export function buildOpportunity(op, env) {
     lines.push(`入场确认: ${op.confirmation.text} · 确认价 ${fmtPrice(op.confirmation.price)} · ${bjHHMM(op.confirmation.time)}`);
   }
   if (op.trade) {
-    const stopSource = ["SWEEP_EXTREME", "LOCAL_SWEEP_EXTREME"].includes(op.trade.stopSource) ? "扫损极值" : "5m执行区远端";
+    const stopSource = ["SWEEP_EXTREME", "LOCAL_SWEEP_EXTREME"].includes(op.trade.stopSource)
+      ? "扫损极值"
+      : op.trade.stopSource === "REJECTION_EXTREME"
+        ? "回踩拒绝极值"
+        : "5m执行区远端";
     lines.push(`${keyMss ? "5m参考计划" : "5m交易计划"}: 确认价 ${fmtPrice(op.trade.entry)} · 失效位 ${fmtPrice(op.trade.stop)}（${stopSource}）`);
     if (op.trade.target != null) {
       const planR = op.trade.planR;

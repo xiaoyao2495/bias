@@ -106,7 +106,10 @@ export function annotateFvgQuality(fvgs, candles, {
     const quality = structureEvent ? "STRUCTURE" : displacement ? "DISPLACEMENT" : "RAW";
     const executionStatus = fvg.executionStatus || fvg.status || "OPEN";
     const executable = width > 0 && width >= minWidth && executionStatus !== "FILLED";
-    const id = `${fvg.type}_${fvg.index}_${String(fvg.bottom)}_${String(fvg.top)}`;
+    // index 会随着固定长度 K 线窗口向前滚动而变化，不能用于跨轮询去重。
+    // FVG 的中间根开盘时间 + 原始价格边界在不同窗口中保持不变，才是真正稳定的身份。
+    const identityTime = fvg.time ?? candles?.[fvg.index - 1]?.time ?? fvg.index;
+    const id = `${fvg.type}_${identityTime}_${String(fvg.bottom)}_${String(fvg.top)}`;
     return {
       ...fvg,
       id,

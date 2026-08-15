@@ -11,6 +11,9 @@
 import { findSwings, analyzeSwings } from "./swing.js";
 import { buildStructure } from "./structure.js";
 
+/** 盘中 HTF 突破仅作预警；留 0.1% 缓冲，避免价格贴线一个 tick 每10分钟反复触发/解除。 */
+export const HTF_PROVISIONAL_BREAK_BUFFER = 0.001;
+
 /**
  * 计算 HTF 方向：按 日线 → 周线 → 月线（周线聚合）逐级兜底。
  * 日线结构在拐点区域常因单个 LL/LH 判为 NEUTRAL（如 2025-10 顶部深回调），
@@ -89,10 +92,10 @@ function analyzeFrame(candles, timeframe) {
 
 function provisionalBreak(frame, price) {
   if (!frame || price == null) return null;
-  if (frame.lastHigh != null && price > frame.lastHigh && (frame.direction === "BEARISH" || frame.direction === "NEUTRAL")) {
+  if (frame.lastHigh != null && price > frame.lastHigh * (1 + HTF_PROVISIONAL_BREAK_BUFFER) && (frame.direction === "BEARISH" || frame.direction === "NEUTRAL")) {
     return { timeframe: frame.timeframe, direction: "BULLISH", level: frame.lastHigh };
   }
-  if (frame.lastLow != null && price < frame.lastLow && (frame.direction === "BULLISH" || frame.direction === "NEUTRAL")) {
+  if (frame.lastLow != null && price < frame.lastLow * (1 - HTF_PROVISIONAL_BREAK_BUFFER) && (frame.direction === "BULLISH" || frame.direction === "NEUTRAL")) {
     return { timeframe: frame.timeframe, direction: "BEARISH", level: frame.lastLow };
   }
   return null;

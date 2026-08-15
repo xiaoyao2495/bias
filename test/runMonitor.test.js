@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf, appendNotification, pendingSweepEvents, pruneSweepPushed } from "../scripts/runMonitor.js";
+import { buildChanged, buildSweep, buildCloseReport, buildOverview, buildOpportunity, buildOpportunityDigest, resolveFinalAction, opportunityEnvOf, appendNotification, pendingSweepEvents, pruneSweepPushed, opportunityLastPushedAt } from "../scripts/runMonitor.js";
 import { displacementFor4h, buildTargetSummary, executableFvgForMss, isSweepCandidateAt, structureEventForSweep } from "../monitor/biasMonitor.js";
 
 test("最终操作服从执行区，并在 1R 临界区保留旧状态", () => {
@@ -43,6 +43,36 @@ test("扫损通知逐事件消费，并兼容旧版去重 key", () => {
   assert.deepEqual(pendingSweepEvents([upgraded], { "1_BSL": 1 }), [upgraded]);
   const downgraded = { key: "1_BSL_PDH_105_RECLAIMED_RAID", baseKey: "1_BSL_PDH_105", legacyKey: "1_BSL", tier: 2 };
   assert.deepEqual(pendingSweepEvents([downgraded], { "1_BSL_PDH_105_ICT_2022_CONFIRMED": 1 }), []);
+  const merged = {
+    key: "1_BSL_EXTERNAL_HIGH_105_LIQUIDITY_TAKEN",
+    baseKey: "1_BSL_EXTERNAL_HIGH_105",
+    sourceBaseKeys: ["1_BSL_EXTERNAL_HIGH_105", "1_BSL_PDH_105"],
+    tier: 1,
+  };
+  assert.deepEqual(pendingSweepEvents([merged], { "1_BSL_PDH_105_LIQUIDITY_TAKEN": 1 }, 1), []);
+});
+
+test("L1 只补报最近20分钟，L2/L3仍允许历史升级通知", () => {
+  const now = 10_000_000;
+  const oldTime = now - 21 * 60_000;
+  const l1 = { key: "old_l1", tier: 1, time: oldTime };
+  const l2 = { key: "old_l2", tier: 2, time: oldTime };
+  assert.deepEqual(pendingSweepEvents([l1, l2], {}, now), [l2]);
+});
+
+test("机会冷却兼容旧版滚动index key，部署后不重推同一FVG", () => {
+  const op = {
+    key: "RETRACE_BULLISH_BULLISH_FVG_2000_973.57_974",
+    type: "RETRACE",
+    direction: "BULLISH",
+    zone: { bottom: 973.57, top: 974 },
+  };
+  const pushed = {
+    "RETRACE_BULLISH_BULLISH_FVG_982_973.57_974_1786785600000": 12345,
+    "RETRACE_BULLISH_BULLISH_FVG_700_970_971_1786780000000": 99999,
+  };
+  assert.equal(opportunityLastPushedAt(op, pushed), 12345);
+  assert.equal(opportunityLastPushedAt({ ...op, key: "direct" }, { direct: 456 }), 456);
 });
 
 test("事件候选保留窗口内 SWEPT/BROKEN，供 L1/L2 补报", () => {
@@ -58,6 +88,7 @@ test("buildSweep: 三级通知分别显示拿流动性、收回与 ICT 2022 确�
   const common = { symbol: "BTCUSDT", price: 106, cur: baseCur, confidenceScore: 0, newsLine: null };
   const l1 = buildSweep({ ...common, sweep: { tier: 1, stage: "LIQUIDITY_TAKEN", side: "BSL", type: "PDH", level: 105, sweptPrice: 107, close: 106, time: 1, realtime: false } });
   assert.match(l1, /流动性事件 L1/);
+  assert.match(l1, /流动性事件 L1（已收盘）/);
   assert.match(l1, /LIQUIDITY_TAKEN/);
   assert.match(l1, /尚未收回/);
 
@@ -70,6 +101,21 @@ test("buildSweep: 三级通知分别显示拿流动性、收回与 ICT 2022 确�
   assert.match(l3, /流动性事件 L3/);
   assert.match(l3, /ICT_2022_CONFIRMED/);
   assert.match(l3, /位移主导 MSS · FVG 103-104（结构级 · OPEN）/);
+});
+
+test("buildSweep: 同价位多来源合并展示", () => {
+  const msg = buildSweep({
+    symbol: "COWUSDT",
+    price: 0.1532,
+    cur: baseCur,
+    confidenceScore: 0,
+    sweep: {
+      tier: 1, stage: "LIQUIDITY_TAKEN", side: "BSL",
+      type: "EXTERNAL_HIGH", levelTypes: ["EXTERNAL_HIGH", "PDH", "INTERNAL_HIGH"],
+      level: 0.1025, sweptPrice: 0.1026, close: 0.1026, time: 1, realtime: false,
+    },
+  });
+  assert.match(msg, /外部结构高点 \/ 昨日高点 \/ 内部摆动高点 0\.1025/);
 });
 
 test("扫损消息只关联扫损后、反转方向一致的 MSS", () => {
@@ -541,6 +587,20 @@ test("buildOpportunity: 🎯 5m 机会单条消息（环境 + 观察位 + 触发
   assert.match(msg, /触发: 价格回踩 FVG 880.5-882.5/);
   // 现价只出现在"观察位"行，不再有独立的尾部价格行（避免重复）
   assert.ok(!/价格: 884\.1/.test(msg), "机会消息不应再重复推送价格行");
+});
+
+test("buildOpportunity: WICK_FILLED 使用回踩拒绝极值文案", () => {
+  const op = {
+    symbol: "MUUSDT", type: "RETRACE", direction: "BULLISH", entry: 973.57,
+    zone: { type: "FVG", top: 974, bottom: 973.57, executionStatus: "WICK_FILLED" },
+    confirmation: { time: Date.parse("2026-08-15T11:20:00Z"), price: 973.89, text: "5m 收阳站回执行区中点确认" },
+    trade: { entry: 973.89, stop: 973.2, stopSource: "REJECTION_EXTREME", target: 988.27, planR: 20.84 },
+    trigger: "价格回踩 FVG 973.57-974（影线填平、收盘未填平）", score: 70,
+  };
+  const env = { price: 973.89, cur: { bias: "BULLISH", confidence: "HIGH", decision: "WAIT" } };
+  const msg = buildOpportunity(op, env);
+  assert.match(msg, /失效位 973\.2（回踩拒绝极值）/);
+  assert.match(msg, /影线填平、收盘未填平/);
 });
 
 test("buildOpportunity: 带执行区（CHAIN 链）— 显示执行区行与 4H 操作", () => {

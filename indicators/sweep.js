@@ -202,6 +202,45 @@ export const LIQUIDITY_EVENT_LEVELS = Object.freeze({
   CONFIRMED: { tier: 3, stage: "ICT_2022_CONFIRMED" },
 });
 
+const LIQUIDITY_SOURCE_PRIORITY = [
+  "EXTERNAL_HIGH", "EXTERNAL_LOW",
+  "PWH", "PWL", "PDH", "PDL",
+  "EQH", "EQL", "PRE_MARKET_HIGH", "PRE_MARKET_LOW",
+  "INTERNAL_HIGH", "INTERNAL_LOW",
+];
+
+function sourceRank(type) {
+  const rank = LIQUIDITY_SOURCE_PRIORITY.indexOf(type);
+  return rank < 0 ? LIQUIDITY_SOURCE_PRIORITY.length : rank;
+}
+
+/** 同一根 K 对同一价位的多个来源只是一个流动性池，合并来源后只通报一次。 */
+function mergeCoincidentLiquidityEvents(events) {
+  const groups = [];
+  const samePrice = (a, b) => Math.abs(a - b) <= Math.max(Math.abs(a), Math.abs(b), 1) * 1e-9;
+  for (const event of events || []) {
+    let group = groups.find((items) => {
+      const first = items[0];
+      return first.side === event.side
+        && first.time === event.time
+        && (first.reclaimTime ?? null) === (event.reclaimTime ?? null)
+        && samePrice(first.level, event.level);
+    });
+    if (!group) {
+      group = [];
+      groups.push(group);
+    }
+    group.push(event);
+  }
+
+  return groups.map((items) => {
+    const primary = [...items].sort((a, b) => sourceRank(a.type) - sourceRank(b.type))[0];
+    const levelTypes = [...new Set(items.map((item) => item.type))].sort((a, b) => sourceRank(a) - sourceRank(b));
+    const sourceBaseKeys = [...new Set(items.map((item) => item.baseKey).filter(Boolean))];
+    return classifyLiquidityEvent({ ...primary, levelTypes, sourceBaseKeys });
+  });
+}
+
 /** 根据收回、位移与 MSS 证据给事件定级；返回新对象，不修改调用方输入。 */
 export function classifyLiquidityEvent(event) {
   if (!event) return null;
@@ -217,7 +256,8 @@ export function classifyLiquidityEvent(event) {
 
 /**
  * 返回每个独立流动性池在窗口内的首次流动性事件（L1 taken / L2 raid），按时间升序。
- * key 包含位类型与价格，避免同一根 K 同侧扫掉多个池时互相覆盖；legacyKey 用于兼容旧状态。
+ * 不同价位分别返回；同一根 K 扫到的同价来源会合并为一个池并保留 levelTypes。
+ * legacyKey / sourceBaseKeys 用于兼容旧状态与合并前的来源 key。
  */
 export function detectSweepEvents(h5m, buySide, sellSide, price, window = 48, bias = null) {
   const events = [];
@@ -236,7 +276,7 @@ export function detectSweepEvents(h5m, buySide, sellSide, price, window = 48, bi
   };
   for (const lv of buySide || []) collect(lv, true);
   for (const lv of sellSide || []) collect(lv, false);
-  return events.sort((a, b) => (a.closedTime ?? a.time) - (b.closedTime ?? b.time));
+  return mergeCoincidentLiquidityEvents(events).sort((a, b) => (a.closedTime ?? a.time) - (b.closedTime ?? b.time));
 }
 
 /** 兼容旧调用：仍返回最近一个事件，并保留旧版 `${time}_${side}` key。 */

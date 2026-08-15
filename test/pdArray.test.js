@@ -102,6 +102,22 @@ test("tick推断与低价FVG稳定id保留原始精度", () => {
   assert.match(fvg.id, /0\.03982_0\.04001$/);
 });
 
+test("FVG稳定id不依赖滚动窗口index", () => {
+  const k1 = candle(99, 100, 98, 99, 1000);
+  const k2 = candle(100, 109, 99, 108, 2000);
+  const k3 = candle(108, 111, 105, 110, 3000);
+  const before = [candle(99, 99, 98, 99, 0), k1, k2, k3];
+  const after = [k1, k2, k3, candle(110, 112, 109, 111, 4000)];
+  const idOf = (candles) => annotateFvgQuality(
+    annotatePDArray({ fvg: findFvgs(candles), ob: [] }, null, candles).fvg,
+    candles,
+    { tickSize: 0.1 },
+  ).find((fvg) => fvg.bottom === 100 && fvg.top === 105).id;
+
+  assert.equal(idOf(before), idOf(after));
+  assert.match(idOf(before), /_2000_100_105$/);
+});
+
 test("Order Block: Bullish（阴线后强阳突破）", () => {
   const candles = [
     candle(102, 103, 98, 99, 0), // 阴线
