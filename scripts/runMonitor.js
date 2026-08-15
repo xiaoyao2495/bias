@@ -79,6 +79,13 @@ async function sendNotification(text, title) {
   return data;
 }
 
+/** 扫损去重集合（兼容迁移）：继承上一轮已推送的 key；旧版单值 sweepTime 并入（视为已推送，不重推） */
+function sweepPushedOf(prev) {
+  const base = { ...((prev && prev.sweepPushed) || {}) };
+  if (prev && prev.sweepTime && !base[prev.sweepTime]) base[prev.sweepTime] = 1;
+  return base;
+}
+
 // 模块加载即打点：诊断 pm2 进程是否真正加载/进入了该脚本
 log(`[runMonitor] 模块加载（argv1=${process.argv[1] || "(无)"}，pm_exec_path=${process.env.pm_exec_path || "(无)"}，cwd=${process.cwd()}）`);
 
@@ -209,7 +216,10 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       structureSpaceRatio: r.structureSpaceRatio,
       remoteStructureSpaceRatio: r.remoteStructureSpaceRatio,
       targets: r.targets,
-      sweepTime: r.sweep ? r.sweep.key : null, // 扫损事件去重（key = 5m K 开盘时间_方向，同一根 5m 内同一侧只推一次）
+      // 扫损事件去重：已推送的扫损 key 集合（key = 5m K 开盘时间_方向）。
+      // 原为单值 sweepTime，位列表漂移（INTERNAL_HIGH→PDH 或新事件插入）导致检测事件在
+      // 新旧 key 间切换时旧事件被重复推（08/15 SNDK/BZ/ZEC/BNB 5 处重复）；集合保证同 key 永不重推。
+      sweepPushed: sweepPushedOf(prev), // 兼容迁移：旧版单值 sweepTime 并入集合
       ob: r.ob, // { type, kind, state, ... } | null（最近 Order Block 细类）
       structureAlert: r.provisionalStructureBreak
         ? `${r.provisionalStructureBreak.direction}_${r.provisionalStructureBreak.level}`
@@ -270,16 +280,16 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
         }
       }
       log(`[runMonitor] 本轮完成: ${changed.length} 变化 / ${overview.length} 合约`);
-      // P1-A：流动性扫损事件（独立推送；state 无该事件记录 → 新扫损才推）
+      // P1-A：流动性扫损事件（独立推送；同 key 已推送过则不重复推）
       for (const item of overview) {
-        if (item.sweep && item.prev && item.prev.sweepTime !== item.sweep.key) {
+        if (item.sweep && item.prev && item.prev.sweepTime !== item.sweep.key && !item.prev.sweepPushed?.[item.sweep.key]) {
           try {
             await sendNotification(buildSweep(item), `${item.symbol} 扫损`);
+            nextState[item.symbol].sweepPushed[item.sweep.key] = Date.now();
             log(`[runMonitor] 已推送 ${item.symbol} 扫损（${item.sweep.side} @ ${item.sweep.level}）`);
           } catch (e) {
-            // 保留旧 sweepTime → 下一轮仍视为新扫损 → 重推（不漏报流动性事件）
+            // 本轮 key 未写入 nextState.sweepPushed → 下一轮仍视为新扫损 → 重推（不漏报流动性事件）
             log(`[runMonitor] ${item.symbol} 扫损推送失败，保留旧记录下轮重试: ${e.message}`);
-            nextState[item.symbol].sweepTime = item.prev.sweepTime;
           }
         }
       }
