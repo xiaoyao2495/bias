@@ -247,8 +247,9 @@ function mergeCoincidentLiquidityEvents(events) {
   for (const event of events || []) {
     let group = groups.find((items) => {
       const first = items[0];
+      // 合并只看 侧+扫损 K+收回 K+价位：同一根 K 扫到同一价位的多个来源（如 PDH/外部高点/内部摆动
+      // 同价）无论归属哪个因果区间，都是同一个流动性池，只通报一次（COWUSDT 08/15 同价三连报回归）。
       return first.side === event.side
-        && causalRangeId(first) === causalRangeId(event)
         && first.time === event.time
         && (first.reclaimTime ?? null) === (event.reclaimTime ?? null)
         && samePrice(first.level, event.level);

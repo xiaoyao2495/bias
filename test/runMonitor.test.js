@@ -41,7 +41,7 @@ test("扫损通知逐事件消费，并兼容旧版去重 key", () => {
   assert.deepEqual(pendingSweepEvents(events, {}, now).map((x) => x.key), events.map((x) => x.key));
   assert.deepEqual(pendingSweepEvents(events, { "1_BSL": 1 }, now).map((x) => x.key), ["2_BSL_PWH_110"]);
   const upgraded = { key: "1_BSL_PDH_105_ICT_2022_CONFIRMED", legacyKey: "1_BSL", tier: 3, time: 100 };
-  assert.deepEqual(pendingSweepEvents([upgraded], { "1_BSL": 1 }, now), [upgraded]);
+  assert.deepEqual(pendingSweepEvents([upgraded], { "1_BSL": 1 }, now), [], "旧版已收回（L2）后同池 L3 不再单独推（差异化升级）");
   const downgraded = { key: "1_BSL_PDH_105_RECLAIMED_RAID", baseKey: "1_BSL_PDH_105", legacyKey: "1_BSL", tier: 2, time: 100 };
   assert.deepEqual(pendingSweepEvents([downgraded], { "1_BSL_PDH_105_ICT_2022_CONFIRMED": 1 }, now), []);
   const merged = {
@@ -53,6 +53,22 @@ test("扫损通知逐事件消费，并兼容旧版去重 key", () => {
   };
   assert.deepEqual(pendingSweepEvents([merged], { "1_BSL_PDH_105_LIQUIDITY_TAKEN": 1 }, 1), []);
   assert.deepEqual(pendingSweepEvents([{ key: "missing_time", tier: 2 }], {}, now), []);
+});
+
+test("差异化升级（方案4）：L2 已推后同池 L3 不再单独推，L1→L2 仍允许", () => {
+  const now = 10_000;
+  const base = { baseKey: "1_BSL_PDH_105", time: 1 };
+  const l1 = { key: "1_BSL_PDH_105_LIQUIDITY_TAKEN", tier: 1, ...base };
+  const l2 = { key: "1_BSL_PDH_105_RECLAIMED_RAID", tier: 2, ...base };
+  const l3 = { key: "1_BSL_PDH_105_ICT_2022_CONFIRMED", tier: 3, ...base };
+  // L2 已推 → 同池 L3 被抑制（不再重复推送）
+  assert.deepEqual(pendingSweepEvents([l3], { "1_BSL_PDH_105_RECLAIMED_RAID": 123 }, now), []);
+  // L1 已推但 L2 未推 → L3 仍允许（未推过收回信息，确认升级有价值）
+  assert.deepEqual(pendingSweepEvents([l3], { "1_BSL_PDH_105_LIQUIDITY_TAKEN": 123 }, now), [l3]);
+  // L1 已推 → L2 仍允许（拿走→收回语义变化，必须提醒）
+  assert.deepEqual(pendingSweepEvents([l2], { "1_BSL_PDH_105_LIQUIDITY_TAKEN": 123 }, now), [l2]);
+  // 未推任何级别 → L3 正常推送
+  assert.deepEqual(pendingSweepEvents([l3], {}, now), [l3]);
 });
 
 test("rangeId key 上线迁移：既有旧 L3 baseKey 可抑制同一历史事件重推", () => {

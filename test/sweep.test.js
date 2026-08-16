@@ -238,6 +238,25 @@ test("detectSweepEvents: 同价位不同来源合并为一个流动性池", () =
   assert.equal(events[0].sourceBaseKeys.length, 3);
 });
 
+test("detectSweepEvents: 同价位同 K 但归属不同因果区间 → 仍合并为一个池（COWUSDT 08/15 同价三连报回归）", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[48] = closedK(48, 104, 107, 103, 104);
+  const events = detectSweepEvents(
+    [...bars, liveK(104, 105, 103, 104)],
+    [
+      { type: "PDH", price: 105, originRangeId: "R_DAILY" },
+      { type: "EXTERNAL_HIGH", price: 105, originRangeId: "R_EXTERNAL" },
+      { type: "INTERNAL_HIGH", price: 105, originRangeId: "R_SWING_1H" },
+    ],
+    [],
+    104,
+  );
+
+  assert.equal(events.length, 1, "同一根 K 扫到同一价位的多个来源应合并为一个流动性池");
+  assert.deepEqual(events[0].levelTypes, ["EXTERNAL_HIGH", "PDH", "INTERNAL_HIGH"]);
+  assert.equal(events[0].sourceBaseKeys.length, 3, "合并后保留全部来源 baseKey，任一来源已推都抑制重推");
+});
+
 test("三级事件：刺破未收回=L1，旧 detectSweeps 仍不把它当扫损", () => {
   const bars = Array.from({ length: 50 }, (_, i) => normal(i));
   bars[48] = closedK(48, 104, 107, 103, 106);

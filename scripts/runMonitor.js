@@ -100,6 +100,10 @@ export function pendingSweepEvents(sweeps, pushed = {}, now = marketNow()) {
     if ((sweep.tier ?? 2) === 1 && age > L1_NOTIFY_MAX_AGE_MS) return false;
     if (pushed[sweep.key]) return false;
     const stageRank = (key) => key.endsWith("_ICT_2022_CONFIRMED") ? 3 : key.endsWith("_RECLAIMED_RAID") ? 2 : key.endsWith("_LIQUIDITY_TAKEN") ? 1 : 0;
+    // 差异化升级门槛（方案4）：L1→L2 保留（拿走→收回语义变化值得提醒）；
+    // L2 推过后同池 L3 只是质量升级（同扫损同 level 重复度高），不再单独推，只记 sweepPushed 防重。
+    // 因此 L2/L3 都以“已推 ≥L2”为阻断；L1 仅被同级/更高级阻断（L1→L2、L1→L3 仍放行）。
+    const minStage = (sweep.tier ?? 2) === 3 ? 2 : (sweep.tier ?? 2);
     // 同一 baseKey 只允许向上升级；合并同价来源后也兼容任一旧来源 key，避免部署迁移重推。
     const baseKeys = [...new Set([
       sweep.baseKey,
@@ -107,9 +111,10 @@ export function pendingSweepEvents(sweeps, pushed = {}, now = marketNow()) {
       ...(sweep.sourceBaseKeys || []),
       ...(sweep.sourcePreviousBaseKeys || []),
     ].filter(Boolean))];
-    if (baseKeys.some((baseKey) => Object.keys(pushed).some((key) => key.startsWith(`${baseKey}_`) && stageRank(key) >= (sweep.tier ?? 2)))) return false;
-    // 旧 key 只代表旧版“已收回扫损”（现 L2），不能吞掉新增的 L1 或后续升级的 L3。
-    return !((sweep.tier ?? 2) === 2 && sweep.legacyKey && pushed[sweep.legacyKey]);
+    if (baseKeys.some((baseKey) => Object.keys(pushed).some((key) => key.startsWith(`${baseKey}_`) && stageRank(key) >= minStage))) return false;
+    // 旧 key 只代表旧版“已收回扫损”（现 L2）：按差异化升级策略，legacyKey 命中同样抑制后续 L2/L3；
+    // L1 是新事件类型（旧版从不推送），不受 legacyKey 影响。
+    return !((sweep.tier ?? 2) >= 2 && sweep.legacyKey && pushed[sweep.legacyKey]);
   });
 }
 
@@ -486,15 +491,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * @param {string[]} [p.symbols]
  * @param {number} [p.intervalMs] 覆盖调度间隔（测试用）
  */
-export async function startMonitorLoop({ symbols, intervalMs } = {}) {
-  await runMonitor({ symbols });
+export async function startMonitorLoop({ symbols, intervalMs, dryRun = false } = {}) {
+  await runMonitor({ symbols, dryRun });
   for (;;) {
     const delay = intervalMs ?? nextDelayMs(new Date(marketNow()));
     const next = new Date(marketNow() + delay);
     log(`[monitor] 下次检测: ${next.toISOString()}（${Math.round(delay / 60000)} 分钟后）`);
     await sleep(delay);
     try {
-      await runMonitor({ symbols });
+      await runMonitor({ symbols, dryRun });
     } catch (e) {
       log(`[monitor] 本轮失败: ${e.message}，继续下一轮`);
     }
@@ -1253,7 +1258,7 @@ if (/runMonitor\.js$/i.test(entry)) {
   const dryRun = process.argv.includes("--dry");
   const once = process.argv.includes("--once");
   const opts = { symbols: args.length ? args : undefined };
-  const task = once ? runMonitor({ ...opts, dryRun }) : startMonitorLoop(opts);
+  const task = once ? runMonitor({ ...opts, dryRun }) : startMonitorLoop({ ...opts, dryRun });
   task
     .then((r) => {
       if (once && dryRun) {
