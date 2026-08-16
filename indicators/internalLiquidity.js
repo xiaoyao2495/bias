@@ -8,8 +8,8 @@ import { liquidityStateForLevel } from "./liquidity.js";
 
 export function buildInternalLiquidityContext(h1, price, now, windowMs = 48 * 5 * 60_000) {
   const closed = (h1 || []).filter((k) => k?.closeTime != null && k.closeTime <= now);
-  const swings = analyzeSwings(findSwings(closed, 1, 1));
-  const activeFrom = (s) => closed[s.index + 1]?.closeTime ?? closed[s.index]?.closeTime;
+  const swings = analyzeSwings(findSwings(closed, 2, 1)); // 左侧 2 根确认（抑制单根噪音）+ 右侧 1 根（位最快 1 小时 ACTIVE，扫损窗口更宽）
+  const activeFrom = (s) => closed[s.index + 1]?.closeTime ?? closed[s.index]?.closeTime; // 确认 K = 右侧第 1 根（与 right=1 对齐）
   const stateFor = (s, isBuy) => liquidityStateForLevel({ price: s.price }, isBuy, closed, activeFrom(s));
   const activeHigh = swings.filter((s) => s.type === "HIGH").reverse()
     .find((s) => stateFor(s, true).state === "ACTIVE" && (price == null || s.price > price)) || null;

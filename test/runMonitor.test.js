@@ -168,6 +168,21 @@ test("同一波同方向扫过多个不同价位时只构建一条合并通知",
   assert.match(msg, /0\.3161/);
 });
 
+test("同一扫损 K 上单根收回与跨根收回两池 → eventAt 统一（BTW 08/16 同根双推回归）", () => {
+  const kTime = Date.UTC(2026, 8 - 1, 16, 12, 15); // 刺破 K 开盘 20:15 北京
+  const kClose = kTime + 5 * 60_000 - 1; // 刺破 K 收盘 20:19:59
+  const nextOpen = kTime + 5 * 60_000; // 收回 K 开盘 20:20
+  const events = [
+    // 单根收回：closedTime = 刺破 K 收盘
+    { key: "a", tier: 2, stage: "RECLAIMED_RAID", side: "BSL", type: "INTERNAL_HIGH", level: 0.32542, sweptPrice: 0.32838, close: 0.32499, time: kTime, closedTime: kClose, realtime: false },
+    // 跨根收回：reclaimTime 为收回 K 开盘；closedTime 也统一为刺破 K 收盘（sweep.js 修复后）
+    { key: "b", tier: 2, stage: "RECLAIMED_RAID", side: "BSL", type: "INTERNAL_HIGH", level: 0.32474, sweptPrice: 0.32838, close: 0.32247, time: kTime, reclaimTime: nextOpen, closedTime: kClose, realtime: false },
+  ];
+  const grouped = groupSweepNotifications(events);
+  assert.equal(grouped.length, 1, "同扫损 K 的单根+跨根事件应合并为一条通知");
+  assert.deepEqual(grouped[0].notificationKeys, ["a", "b"]);
+});
+
 test("扫损消息只关联扫损后、反转方向一致的 MSS", () => {
   const identity = { originRangeId: "DR_RUN", rangeId: "DR_RUN", tradingDayId: "2026-08-16" };
   const sweep = { side: "SSL", closedTime: 200, ...identity };

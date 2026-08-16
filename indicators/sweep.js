@@ -62,7 +62,7 @@ function judasOf(side, bias) {
  *   time    — K 开盘时间（标识）
  *   key     — 事件去重键（`${openTime}_${side}`，同一根 5m 内同一侧只推一次）
  *   realtime— true=进行中 K 实时检测；false=已收盘 K 收盘确认
- *   closedTime — 已收盘事件确认时的 K 收盘时间（实时事件无此字段）
+ *   closedTime — 已收盘事件"扫损发生 K"的收盘时间（单根与跨根统一用刺破 K 收盘，实时事件无此字段）
  *   judas   — true=NY Open 窗口内且方向与 bias 相反的扫损（开盘假动作）
  *   levelTime/levelDate — 被扫流动性位的形成时间（透传自流动性项：levelTime=形成 K 开盘 ms，
  *     如 PDH 的昨日日 K；levelDate=盘前区间北京日期 "YYYY-MM-DD"），供消息层展示"这个流动性是什么时候形成的"
@@ -172,9 +172,12 @@ function detectSingleSweep(h5m, buySide, sellSide, price, window = 48, bias = nu
       }
       // V2.7 跨根收回：本根刺破但收盘未收回（仍在上方），次根（已收盘）收回下方也算 BSL。
       // ICT 中"插针式扫损"常在 1-2 根内完成；跨根形态比突破回踩更接近扫损语义。
+      // closedTime 统一用刺破 K 的收盘（与单根一致）——事件时间锚点是"扫损发生的那根 K"，
+      // 收回只是确认。否则单根/跨根的 closedTime 分叉（差一根 5m）会让 groupSweepNotifications
+      // 按 eventAt 合并失效，同一根扫损 K 扫多个位时被拆成多条推送（BTW 08/16 同根双推回归）。
       const next = h5m[idx + 1];
       if (k.high > lv.price && k.close >= lv.price && eventAllowed(next) && next.closeTime <= now && next.close < lv.price && formedAfter(lv, k) && !unavailable(lv, true, idx)) {
-        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: next.close, time: k.time, reclaimTime: next.time, key: `${k.time}_BSL`, realtime: false, closedTime: next.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv, k) };
+        return { side: "BSL", type: lv.type, level: lv.price, sweptPrice: k.high, close: next.close, time: k.time, reclaimTime: next.time, key: `${k.time}_BSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("BSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv, k) };
       }
     }
     for (const lv of sellSide || []) {
@@ -183,9 +186,10 @@ function detectSingleSweep(h5m, buySide, sellSide, price, window = 48, bias = nu
         return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: k.close, time: k.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv, k) };
       }
       // V2.7 跨根收回：本根刺破但收盘未收回（仍在下方），次根（已收盘）收回上方也算 SSL。
+      // closedTime 统一用刺破 K 的收盘，理由同 BSL 跨根（避免单根/跨根 eventAt 分叉拆条）。
       const next = h5m[idx + 1];
       if (k.low < lv.price && k.close <= lv.price && eventAllowed(next) && next.closeTime <= now && next.close > lv.price && formedAfter(lv, k) && !unavailable(lv, false, idx)) {
-        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: next.close, time: k.time, reclaimTime: next.time, key: `${k.time}_SSL`, realtime: false, closedTime: next.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv, k) };
+        return { side: "SSL", type: lv.type, level: lv.price, sweptPrice: k.low, close: next.close, time: k.time, reclaimTime: next.time, key: `${k.time}_SSL`, realtime: false, closedTime: k.closeTime, judas: judasOf("SSL", bias) && isJudasWindow(new Date(k.time)), ...levelMeta(lv, k) };
       }
     }
   }

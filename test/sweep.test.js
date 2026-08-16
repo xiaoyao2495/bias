@@ -87,6 +87,7 @@ test("V2.7 跨根收回：第一根刺破未收回，次根收回 → 报 SSL", 
   assert.equal(s.sweptPrice, 108); // 刺破 K 的极值
   assert.equal(s.close, 115); // 次根收回价
   assert.equal(s.reclaimTime, bars[49].time);
+  assert.equal(s.closedTime, bars[48].closeTime); // 跨根统一用刺破 K 收盘（与单根一致，避免 eventAt 分叉拆条）
 });
 
 test("无 price → 跳过实时检测，只做已收盘确认", () => {
