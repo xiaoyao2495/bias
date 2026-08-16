@@ -36,7 +36,9 @@ export function formatReport(r) {
   lines.push("");
 
   lines.push("Range Type:");
-  lines.push(location.rangeType || "-", "");
+  lines.push(location.rangeType === "RECENT" ? "RECENT (OBSERVATION ONLY)" : location.rangeType || "-", "");
+  lines.push("Range Status:");
+  lines.push(location.lifecycleStatus || "-", "");
   lines.push("Range:");
   if (location.high != null) lines.push(`${fmtPrice(location.low)} - ${fmtPrice(location.high)}`);
   else lines.push("-");

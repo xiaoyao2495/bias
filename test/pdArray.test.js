@@ -3,7 +3,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { annotateFvgQuality, findFvgs, findOrderBlocks, annotatePDArray, inferTickSize, isExecutableFvg, rankPDArray } from "../indicators/pdArray.js";
+import { annotateFvgQuality, findFvgs, findOrderBlocks, annotatePDArray, inferTickSize, isExecutableFvg, isIctValidFvg, rankPDArray } from "../indicators/pdArray.js";
 import { computeDealingRange } from "../indicators/dealingRange.js";
 
 function candle(o, h, l, c, i) {
@@ -46,6 +46,9 @@ test("5m FVG质量：ATR/tick动态门槛 + RAW/DISPLACEMENT/STRUCTURE 分级", 
   const raw = annotateFvgQuality(annotated, candles, { tickSize: 0.1 })[0];
   assert.equal(raw.quality, "RAW");
   assert.equal(raw.executable, true);
+  assert.equal(raw.ictValid, true);
+  assert.equal(raw.executionQuality, "STANDARD");
+  assert.equal(raw.valid, true);
   assert.ok(raw.widthAtr > 0);
   assert.ok(raw.ticks >= 3);
 
@@ -58,7 +61,7 @@ test("5m FVG质量：ATR/tick动态门槛 + RAW/DISPLACEMENT/STRUCTURE 分级", 
   assert.equal(isExecutableFvg(structured), true);
 });
 
-test("5m FVG动态门槛：极窄缺口即使几何成立也不可执行", () => {
+test("5m FVG语义分层：极窄缺口仍是ICT FVG，但不可作为工程执行区", () => {
   const candles = [
     candle(99.5, 100, 99, 99.8, 0),
     candle(99.8, 100.2, 99.6, 100.1, 1),
@@ -66,7 +69,12 @@ test("5m FVG动态门槛：极窄缺口即使几何成立也不可执行", () =>
   ];
   const annotated = annotatePDArray({ fvg: findFvgs(candles), ob: [] }, null, candles).fvg;
   const [fvg] = annotateFvgQuality(annotated, candles, { tickSize: 0.01 });
+  assert.equal(fvg.ictValid, true);
+  assert.equal(fvg.valid, true);
+  assert.equal(isIctValidFvg(fvg), true);
   assert.equal(fvg.executable, false);
+  assert.equal(fvg.meetsExecutionWidth, false);
+  assert.equal(fvg.executionQuality, "THIN");
   assert.equal(fvg.rejectionReason, "TOO_NARROW");
 });
 
@@ -88,6 +96,22 @@ test("5m FVG消耗：wick填平与close填平分开记录", () => {
   assert.equal(close.closeStatus, "FILLED");
   assert.equal(close.executionStatus, "FILLED");
   assert.equal(close.fillType, "CLOSE");
+});
+
+test("FVG完全被wick穿越后原区不再可执行", () => {
+  const rows = [
+    candle(99, 100, 98, 99, 0),
+    candle(100, 110, 99, 109, 1),
+    candle(109, 112, 108, 111, 2),
+    candle(108, 109, 99, 105, 3),
+  ];
+  const annotated = annotatePDArray({ fvg: findFvgs(rows), ob: [] }, null, rows).fvg;
+  const [fvg] = annotateFvgQuality(annotated, rows, { tickSize: 0.1, displacements: [{ index: 1, confirmationIndex: 2, fvg: { bottom: 100, top: 108 } }] });
+  assert.equal(fvg.executionStatus, "WICK_FILLED");
+  assert.equal(fvg.ictValid, false);
+  assert.equal(isIctValidFvg(fvg), false);
+  assert.equal(fvg.executable, false);
+  assert.equal(fvg.rejectionReason, "MITIGATED");
 });
 
 test("tick推断与低价FVG稳定id保留原始精度", () => {
@@ -118,29 +142,52 @@ test("FVG稳定id不依赖滚动窗口index", () => {
   assert.match(idOf(before), /_2000_100_105$/);
 });
 
-test("Order Block: Bullish（阴线后强阳突破）", () => {
+function structuralDisp(index, direction, swingIndex = 0) {
+  return {
+    index,
+    direction,
+    quality: "HIGH",
+    structureBreak: { type: "BOS", direction, level: direction === "UP" ? 103 : 98, swingIndex },
+  };
+}
+
+function displacementMss(index, direction, swingIndex = 0) {
+  return {
+    id: `mss-${direction}-${index}`,
+    type: "MSS",
+    direction,
+    confirmed: true,
+    confirmedByDisplacement: true,
+    displacementIndex: index,
+    swingIndex,
+    level: direction === "UP" ? 103 : 98,
+  };
+}
+
+function displacementBos(index, direction, swingIndex = 0) {
+  return {
+    ...displacementMss(index, direction, swingIndex),
+    id: `bos-${direction}-${index}`,
+    type: "BOS",
+  };
+}
+
+test("严格 OB：只有阴线后强阳突破、没有结构位移 → 不生成 Bullish OB", () => {
   const candles = [
     candle(102, 103, 98, 99, 0), // 阴线
     candle(100, 107, 99, 106, 1), // 阳线突破 prev.high
   ];
   const obs = findOrderBlocks(candles);
-  assert.equal(obs.length, 1);
-  assert.equal(obs[0].type, "BULLISH_OB");
-  assert.equal(obs[0].high, 103);
-  assert.equal(obs[0].low, 98);
-  assert.equal(obs[0].experimental, true); // V1.1: OB 标记 experimental
+  assert.deepEqual(obs, []);
 });
 
-test("Order Block: Bearish（阳线后强阴跌破）", () => {
+test("严格 OB：只有阳线后强阴跌破、没有结构位移 → 不生成 Bearish OB", () => {
   const candles = [
     candle(99, 104, 98, 103, 0), // 阳线
     candle(102, 103, 95, 96, 1), // 阴线跌破 prev.low
   ];
   const obs = findOrderBlocks(candles);
-  assert.equal(obs.length, 1);
-  assert.equal(obs[0].type, "BEARISH_OB");
-  assert.equal(obs[0].high, 104);
-  assert.equal(obs[0].low, 98);
+  assert.deepEqual(obs, []);
 });
 
 test("Dealing Range: price 低于中线 → DISCOUNT", () => {
@@ -175,57 +222,81 @@ test("V1.6 FVG 带 direction 字段", () => {
   assert.equal(fvgs[0].direction, "BULLISH");
 });
 
-test("V1.6 OB 带 confirmed: true", () => {
+test("严格 Bullish OB：结构上破位移前最后一根阴线，创建腿不算回踩", () => {
   const candles = [
     candle(102, 103, 98, 99, 0),
     candle(100, 107, 99, 106, 1),
   ];
-  const obs = findOrderBlocks(candles);
-  assert.equal(obs[0].confirmed, true);
+  const [ob] = findOrderBlocks(candles, { displacements: [structuralDisp(1, "UP")] });
+  assert.equal(ob.confirmed, true);
+  assert.equal(ob.ict, true);
+  assert.equal(ob.type, "BULLISH_OB");
+  assert.equal(ob.high, 103);
+  assert.equal(ob.low, 98);
+  assert.equal(ob.midpoint, 100.5);
+  assert.equal(ob.state, "FRESH");
+  assert.equal(ob.sourceIndex, 0);
+  assert.equal(ob.index, 1);
 });
 
-test("L4 OB 细类: BREAKER（OB 被收盘穿透后收回 → 角色反转）", () => {
+test("严格 Bearish OB：结构下破位移前最后一根阳线，多空字段镜像", () => {
   const candles = [
-    candle(102, 103, 98, 99, 0), // BULLISH_OB 区间 [98, 103]
-    candle(100, 107, 99, 106, 1), // 阳线突破 → OB 确认
-    candle(98, 98, 96, 96.5, 2), // 阴线收盘 96.5 < 98 → 穿透
-    candle(97, 101, 96, 99.5, 3), // 阳线收盘 99.5 >= 98 → 收回
+    candle(99, 104, 98, 103, 0),
+    candle(102, 103, 95, 96, 1),
   ];
-  const obs = findOrderBlocks(candles);
-  const first = obs.find((o) => o.type === "BULLISH_OB");
-  assert.equal(first.kind, "BREAKER");
-  assert.equal(first.state, "USED"); // 突破 K 已访问 OB 区间
+  const [ob] = findOrderBlocks(candles, { displacements: [structuralDisp(1, "DOWN")] });
+  assert.equal(ob.type, "BEARISH_OB");
+  assert.equal(ob.state, "FRESH");
+  assert.equal(ob.proximal, 98);
+  assert.equal(ob.distal, 104);
 });
 
-test("L4 OB 细类: REJECTION（OB 所在 K 长下影 → 机构拒绝）", () => {
+test("OB 生命周期：浅触及 → MITIGATED；触及 CE 后只升级不降级", () => {
   const candles = [
-    candle(100.9, 101, 97.8, 100, 0), // 阴线 body=0.9，下影 100-97.8=2.2 >= 2*0.9
-    candle(100, 108, 100.5, 107, 1), // 阳线突破，未回踩 OB
+    candle(102, 103, 98, 99, 0),
+    candle(100, 108, 99, 107, 1),
+    candle(106, 107, 102, 106, 2),
   ];
-  const obs = findOrderBlocks(candles);
-  assert.equal(obs[0].kind, "REJECTION");
+  const shallow = findOrderBlocks(candles, { displacements: [structuralDisp(1, "UP")] })[0];
+  assert.equal(shallow.state, "MITIGATED");
+  const deeper = [...candles, candle(104, 105, 100, 104, 3), candle(106, 107, 102, 106, 4)];
+  const ce = findOrderBlocks(deeper, { displacements: [structuralDisp(1, "UP")] })[0];
+  assert.equal(ce.state, "CE_REACHED");
+  assert.equal(ce.ceReachedAt, 3);
 });
 
-test("L4 OB 细类: 未回踩 → FRESH；无穿透无拒绝 → STANDARD", () => {
+test("失败 Bullish OB：原对象 INVALIDATED，只有反向结构位移才派生 Bearish Breaker", () => {
   const candles = [
-    candle(102, 103, 98, 99, 0), // 阴线
-    candle(104, 107, 105, 106, 1), // 阳线突破，low 105 > 103 未触及 OB
+    candle(102, 103, 98, 99, 0),
+    candle(100, 108, 99, 107, 1),
+    candle(106, 107, 95, 96, 2),
+    candle(97, 101, 96, 97, 3),
   ];
-  const obs = findOrderBlocks(candles);
-  assert.equal(obs[0].kind, "STANDARD");
-  assert.equal(obs[0].state, "FRESH");
+  const obs = findOrderBlocks(candles, {
+    displacements: [structuralDisp(1, "UP"), structuralDisp(2, "DOWN", 1)],
+    structureEvents: [displacementBos(1, "UP"), displacementMss(2, "DOWN", 1)],
+  });
+  const original = obs.find((o) => o.type === "BULLISH_OB");
+  const breaker = obs.find((o) => o.type === "BEARISH_BREAKER");
+  assert.equal(original.state, "INVALIDATED");
+  assert.equal(original.executable, false);
+  assert.equal(breaker.direction, "BEARISH");
+  assert.equal(breaker.kind, "BREAKER");
+  assert.equal(breaker.sourceObId, original.id);
+  assert.equal(breaker.state, "CE_REACHED");
 });
 
-test("L4 OB 细类: BEARISH_OB 穿透后收回 → BREAKER", () => {
+test("OB 被普通收破或反向 BOS 穿透：失效但不冒充 Breaker", () => {
   const candles = [
-    candle(99, 104, 98, 103, 0), // BEARISH_OB 区间 [98, 104]
-    candle(102, 103, 95, 96, 1), // 阴线跌破 → OB 确认
-    candle(97, 103, 96, 104.5, 2), // 阳线收盘 104.5 > 104 → 穿透
-    candle(104, 104, 100, 101, 3), // 阴线收盘 101 <= 104 → 收回
+    candle(102, 103, 98, 99, 0),
+    candle(100, 108, 99, 107, 1),
+    candle(106, 107, 95, 96, 2),
   ];
-  const obs = findOrderBlocks(candles);
-  assert.equal(obs[0].type, "BEARISH_OB");
-  assert.equal(obs[0].kind, "BREAKER");
+  const obs = findOrderBlocks(candles, {
+    displacements: [structuralDisp(1, "UP"), structuralDisp(2, "DOWN", 1)],
+  });
+  assert.equal(obs[0].state, "INVALIDATED");
+  assert.equal(obs.some((o) => o.kind === "BREAKER"), false);
 });
 
 test("V1.6 annotatePDArray: location / age / status", () => {
@@ -335,6 +406,36 @@ test("V1.6 rankPDArray: Bullish bias + Discount Bullish FVG → Primary VALID", 
   assert.equal(r.primary.score, 90); // 60 同向 + 30 顺位
 });
 
+test("实盘回归：执行价越过本轮 dealing range 失效边界的旧 FVG 不得成为 Primary/Alternative", () => {
+  const bullish = rankPDArray({
+    bias: "BULLISH",
+    range: { low: 902, high: 988.27, equilibrium: 945.135 },
+    pdArray: {
+      fvg: [
+        { type: "BULLISH_FVG", direction: "BULLISH", top: 876.25, bottom: 870.67, status: "OPEN", executable: true, age: 10 },
+        { type: "BULLISH_FVG", direction: "BULLISH", top: 930, bottom: 920, status: "OPEN", executable: true, age: 5 },
+      ],
+      ob: [],
+    },
+  });
+  assert.equal(bullish.primary.price, 920);
+  assert.equal(bullish.alternatives.some((x) => x.bottom === 870.67), false);
+
+  const bearish = rankPDArray({
+    bias: "BEARISH",
+    range: { low: 100, high: 200, equilibrium: 150 },
+    pdArray: {
+      fvg: [
+        { type: "BEARISH_FVG", direction: "BEARISH", top: 230, bottom: 220, status: "OPEN", executable: true, age: 3 },
+        { type: "BEARISH_FVG", direction: "BEARISH", top: 180, bottom: 170, status: "OPEN", executable: true, age: 3 },
+      ],
+      ob: [],
+    },
+  });
+  assert.equal(bearish.primary.price, 180);
+  assert.equal(bearish.alternatives.some((x) => x.top === 230), false);
+});
+
 test("V1.6 rankPDArray: Bullish bias + Premium FVG → primary null（Ignore）", () => {
   const pd = {
     fvg: [{ type: "BULLISH_FVG", direction: "BULLISH", top: 118, bottom: 112, index: 2, age: 5, status: "OPEN" }],
@@ -356,16 +457,119 @@ test("V1.6 rankPDArray: 反向 FVG（Bearish）+ Bullish bias → Ignore", () =>
   assert.deepEqual(r.alternatives, []);
 });
 
-// ---- V2.0 OB-Displacement 关联（ICT 2022：OB = 导致 Displacement 的 K 的前一根）----
+test("RECENT 中点不得给 FVG/OB 排执行顺位", () => {
+  const out = rankPDArray({
+    bias: "BULLISH",
+    range: { rangeType: "RECENT", low: 90, high: 120, equilibrium: 105 },
+    pdArray: {
+      fvg: [{ type: "BULLISH_FVG", direction: "BULLISH", top: 102, bottom: 100, status: "OPEN", executable: true }],
+      ob: [],
+    },
+  });
+  assert.deepEqual(out, { primary: null, alternatives: [] });
+});
+
+test("严格 OB 排名门禁：排除非 ICT 区域与已失效 OB，只保留有效 Breaker", () => {
+  const r = rankPDArray({
+    bias: "BEARISH",
+    range: { low: 90, high: 130, equilibrium: 105 },
+    pdArray: {
+      fvg: [],
+      ob: [
+        { type: "BEARISH_OB", direction: "BEARISH", high: 120, low: 115, age: 2, status: "FRESH", executable: true },
+        { type: "BEARISH_OB", direction: "BEARISH", high: 119, low: 114, age: 2, status: "INVALIDATED", ict: true, executable: false },
+        { id: "breaker-1", type: "BEARISH_BREAKER", direction: "BEARISH", kind: "BREAKER", high: 118, low: 112, top: 118, bottom: 112, age: 3, status: "MITIGATED", lifecycleState: "MITIGATED", ict: true, executable: true },
+      ],
+    },
+  });
+  assert.equal(r.primary.type, "BEARISH_BREAKER");
+  assert.equal(r.primary.id, "breaker-1");
+  assert.equal(r.primary.lifecycleState, "MITIGATED");
+  assert.equal(r.primary.score, 80);
+  assert.deepEqual(r.alternatives, []);
+});
+
+test("annotatePDArray 保留严格 OB 生命周期，不把回踩改写成 FILLED", () => {
+  const candles = [
+    candle(102, 103, 98, 99, 0),
+    candle(100, 108, 99, 107, 1),
+    candle(106, 107, 102, 106, 2),
+  ];
+  const ob = findOrderBlocks(candles, { displacements: [structuralDisp(1, "UP")] })[0];
+  const annotated = annotatePDArray({ fvg: [], ob: [ob] }, { equilibrium: 110 }, candles).ob[0];
+  assert.equal(annotated.status, "MITIGATED");
+  assert.equal(annotated.lifecycleState, "MITIGATED");
+  assert.equal(annotated.location, "DISCOUNT");
+});
+
+test("确认且由位移交付的 MSS 可建立 OB；普通位移不能", () => {
+  const candles = [
+    candle(102, 103, 98, 99, 0),
+    candle(100, 108, 99, 107, 1),
+  ];
+  const d = { index: 1, direction: "UP", quality: "HIGH", structureBreak: null };
+  assert.deepEqual(findOrderBlocks(candles, { displacements: [d] }), []);
+  assert.deepEqual(
+    findOrderBlocks(candles, { displacements: [structuralDisp(1, "UP")], structureEvents: [] }),
+    [],
+    "正式调用显式传入结构事件后，不得用 displacement 的 1/1 BOS 标签旁路统一结构口径",
+  );
+  const structureEvents = [{
+    id: "mss-1",
+    type: "MSS",
+    direction: "UP",
+    confirmed: true,
+    confirmedByDisplacement: true,
+    displacementIndex: 1,
+    swingIndex: 0,
+    level: 103,
+    rangeId: "range-1",
+  }];
+  const [ob] = findOrderBlocks(candles, { displacements: [d], structureEvents });
+  assert.equal(ob.structureEventType, "MSS");
+  assert.equal(ob.structureEventId, "mss-1");
+  assert.equal(ob.rangeId, "range-1");
+});
+
+test("Bullish Breaker 多空镜像：失败 Bearish OB 经向上结构位移后翻为多头", () => {
+  const candles = [
+    candle(99, 104, 98, 103, 0),
+    candle(102, 103, 95, 96, 1),
+    candle(97, 107, 96, 106, 2),
+    candle(105, 106, 100, 105, 3),
+  ];
+  const obs = findOrderBlocks(candles, {
+    displacements: [structuralDisp(1, "DOWN"), structuralDisp(2, "UP", 1)],
+    structureEvents: [displacementBos(1, "DOWN"), displacementMss(2, "UP", 1)],
+  });
+  const original = obs.find((o) => o.type === "BEARISH_OB");
+  const breaker = obs.find((o) => o.type === "BULLISH_BREAKER");
+  assert.equal(original.state, "INVALIDATED");
+  assert.equal(breaker.direction, "BULLISH");
+  assert.equal(breaker.state, "CE_REACHED");
+});
+
+test("OB 稳定 id 不依赖滚动窗口 index", () => {
+  const source = { time: 1000, open: 102, high: 103, low: 98, close: 99, closeTime: 1499 };
+  const impulse = { time: 2000, open: 100, high: 108, low: 99, close: 107, closeTime: 2499 };
+  const before = [candle(100, 101, 99, 100, -1), source, impulse];
+  const after = [source, impulse, { time: 3000, open: 106, high: 109, low: 104, close: 108, closeTime: 3499 }];
+  const a = findOrderBlocks(before, { displacements: [structuralDisp(2, "UP", 1)] })[0];
+  const b = findOrderBlocks(after, { displacements: [structuralDisp(1, "UP", 0)] })[0];
+  assert.equal(a.id, b.id);
+  assert.match(a.id, /BULLISH_OB_1000_98_103/);
+});
+
+// ---- 结构位移与 OB 关联 ----
 // 构造：前 19 根小实体横盘（avg body ≈ 0.2）→ K19 swing high 101.5 → K20 小阴线（body 0.25，
 // ratio < 1.5，不构成位移）→ K21 大阳线（body 14.2，BODY 达标位移；fixture 无量跳过量门槛）
-// 期望：仅生成 1 个 BULLISH_OB（displacement: true），fallback 简化规则因区间重叠被去重
+// 期望：仅结构上破位移产生 1 个 BULLISH_OB
 
 function dispCandle(o, h, l, c, i) {
   return { time: i * 1000, open: o, high: h, low: l, close: c, closeTime: i * 1000 + 500 };
 }
 
-test("V2.0 位移驱动 OB：BODY 达标位移 K 的前一根生成 OB（displacement: true），fallback 去重", () => {
+test("结构位移驱动 OB：BODY 达标且收破 swing 的位移腿生成 OB", () => {
   const candles = [];
   for (let i = 0; i < 19; i++) candles.push(dispCandle(100, 100.6, 99.8, 100.2, i)); // 横盘小实体（body 0.2）
   candles.push(dispCandle(100.2, 101.5, 100.0, 100.4, 19)); // K19: swing high 101.5
@@ -380,13 +584,11 @@ test("V2.0 位移驱动 OB：BODY 达标位移 K 的前一根生成 OB（displac
   assert.equal(obs[0].displacement, true);
 });
 
-test("V2.0 无位移时 fallback 简化规则仍工作（displacement: false）", () => {
+test("无结构位移时不再使用阴阳线 fallback", () => {
   const candles = [
     candle(102, 103, 98, 99, 0), // 阴线
-    candle(100, 107, 99, 106, 1), // 阳线突破 prev.high（无位移三条件 → 走 fallback）
+    candle(100, 107, 99, 106, 1), // 阳线突破 prev.high，但没有结构位移证据
   ];
   const obs = findOrderBlocks(candles);
-  assert.equal(obs.length, 1);
-  assert.equal(obs[0].type, "BULLISH_OB");
-  assert.equal(obs[0].displacement, false);
+  assert.deepEqual(obs, []);
 });

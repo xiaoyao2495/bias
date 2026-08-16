@@ -17,8 +17,11 @@ import {
   assessKeyMssChase,
   dedupeOverlappingFvgZones,
 } from "../monitor/opportunity.js";
+import { resolveInstrumentProfile, tradingDayIdAt } from "../indicators/instrumentProfile.js";
+import { buildLiquiditySequences, LIQUIDITY_SEQUENCE_POLICIES } from "../indicators/liquiditySequence.js";
 
 const NOW = Date.now();
+const CRYPTO_PROFILE = resolveInstrumentProfile("BTCUSDT", { BTCUSDT: "COIN" });
 // 前置 15 根 flat K 使数据量 ≥ 20（scanOpportunities 的最低防御），同时
 // 保证 BOS/MSS 事件与末根价格都在 60 分钟有效窗口内（T0 需足够早）
 const PADS = 15;
@@ -39,15 +42,59 @@ function mkCandles(rows) {
 
 const baseEnv = (over) => ({
   bias: "BULLISH",
+  dealingRangeReady: true,
+  range: { rangeId: "DR_TEST" },
   price: 0,
   confidence: "HIGH",
   quality: "HIGH",
   decision: "WATCH",
   ictSession: { name: "NEW_YORK" },
+  instrumentProfile: CRYPTO_PROFILE,
+  analysisTime: NOW,
+  amd: {
+    stage: "DISTRIBUTION",
+    direction: "BULLISH",
+    tradingDayId: tradingDayIdAt(NOW, CRYPTO_PROFILE),
+    liquiditySequenceId: "fixture-sequence",
+  },
   structureStatus: "VALID",
   sweep: null,
   ...over,
 });
+
+/** 构造与 biasMonitor 相同的冻结身份链；机会层不得再从历史 ctx 临时拼链。 */
+function formalChainEnv(m5, rawSweep, price) {
+  const rangeId = "DR_TEST";
+  const tradingDayId = tradingDayIdAt(NOW, CRYPTO_PROFILE);
+  const ctx = computeM5Context(m5, price);
+  const sweep = { ...rawSweep, tier: 2, reclaimed: true, originRangeId: rangeId, rangeId, tradingDayId };
+  const events = (ctx.events || []).map((event) => {
+    const displacementId = event.confirmedByDisplacement ? `DISP_5m_${event.direction}_${event.time}` : null;
+    return { ...event, id: `STRUCT_5m_${event.type}_${event.direction}_${event.time}`, originRangeId: rangeId, rangeId, tradingDayId, displacementId };
+  });
+  const fvgs = (ctx.pd.fvg || []).map((fvg) => {
+    const event = events.find((item) => item.confirmedByDisplacement
+      && item.displacementConfirmationIndex === fvg.index
+      && Math.abs(item.displacementFvg?.top - fvg.top) < 1e-9
+      && Math.abs(item.displacementFvg?.bottom - fvg.bottom) < 1e-9);
+    return event ? { ...fvg, originRangeId: rangeId, rangeId, tradingDayId, displacementId: event.displacementId, structureEventId: event.id } : fvg;
+  });
+  const causal = buildLiquiditySequences({
+    sweeps: [sweep],
+    structureEvents: events,
+    ...LIQUIDITY_SEQUENCE_POLICIES["5m"],
+    confirmationZoneForMss: (event) => fvgs.find((fvg) => fvg.ictValid !== false
+      && fvg.displacementId === event.displacementId
+      && fvg.structureEventId === event.id) || null,
+  });
+  const sequence = causal.sequences[0];
+  return {
+    sweep,
+    sweeps: [sweep],
+    liquiditySequences: causal.sequences,
+    amd: { stage: "DISTRIBUTION", direction: "BULLISH", tradingDayId, liquiditySequenceId: sequence?.id || null },
+  };
+}
 
 test("P1-3 RETRACE：回踩 5m FVG 后收阳站回中点 → 出现确认机会", () => {
   // 三根 K 形成 bullish FVG [100,102]（idx0.high=100 < idx2.low=102），随后价格回踩到区间内
@@ -98,7 +145,7 @@ test("RETRACE稳定key不随滚动窗口与新确认K变化", () => {
   assert.equal(first.key, second.key);
 });
 
-test("WICK_FILLED回踩以拒绝极值止损，且文案不再称已填平", () => {
+test("WICK完全穿越FVG后原执行区失效，不再生成RETRACE", () => {
   const m5 = mkCandles([
     [100, 100, 100, 100],
     [99, 100, 98, 99],
@@ -106,17 +153,12 @@ test("WICK_FILLED回踩以拒绝极值止损，且文案不再称已填平", () 
     [109, 112, 108, 111],
     [103, 109, 99, 105],
   ]);
-  const [op] = scanOpportunities({
+  const op = scanOpportunities({
     symbol: "MUUSDT",
     env: baseEnv({ price: 105, targets: { first: { price: 120 } } }),
     m5,
-  });
-
-  assert.ok(op);
-  assert.equal(op.zone.executionStatus, "WICK_FILLED");
-  assert.equal(op.trade.stop, 99);
-  assert.equal(op.trade.stopSource, "REJECTION_EXTREME");
-  assert.match(op.trigger, /影线填平、收盘未填平/);
+  }).find((item) => item.type === "RETRACE" && item.zone?.executionStatus === "WICK_FILLED");
+  assert.equal(op, undefined);
 });
 
 test("低价FVG触发文案保留可区分精度", () => {
@@ -153,8 +195,8 @@ test("CHAIN：SSL 扫损 → 5m MSS 向上 → 回踩位移腿 FVG（完整 ICT 
     [102.6, 102.8, 102.6, 102.6], // 回踩，尚未确认
     [102.5, 103.2, 102.4, 103.1], // 收阳站回 FVG 中点，确认
   ]);
-  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 102.6, time: T0 };
-  const env = baseEnv({ price: 103.1, sweep });
+  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 102.6, time: m5[20].time, closedTime: m5[20].closeTime };
+  const env = baseEnv({ price: 103.1, ...formalChainEnv(m5, sweep, 103.1) });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   const chain = opps.find((o) => o.type === "CHAIN");
   assert.ok(chain, "应出现 CHAIN 机会");
@@ -183,19 +225,19 @@ test("P1: CHAIN 要求 MSS 位移确认 —— 贴线（非位移）MSS 不触�
     [102, 102, 102, 102], // bullish FVG [101,102]
     [101.5, 102, 101.5, 101.8], // 回踩到 FVG 内，price=101.8
   ]);
-  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 101.8, time: T0 };
+  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 101.8, time: m5[20].time, closedTime: m5[20].closeTime };
   const env = baseEnv({ price: 101.8, sweep });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   assert.ok(!opps.find((o) => o.type === "CHAIN"), "贴线（非位移）MSS 不应触发 CHAIN");
 });
 
-test("关键位置 MSS：4H执行区内扫高后普通5m MSS向下 → 保留为WATCH，不要求FVG", () => {
+test("关键位置普通结构收破没有位移 → 不冒充 KEY_MSS", () => {
   const base = Date.now() - 45 * 60_000;
   const candles = [
     [100, 101, 99, 100], [100, 102, 99.5, 101], [101, 101.5, 99.8, 100.5],
     [100.5, 103, 100, 102], [102, 104, 101, 103],
     [103, 105, 102, 103.5], // 扫过前6根最高 104，收回其下
-    [103.5, 104, 99, 99.5], // 普通 MSS DOWN 确认
+    [103.5, 104, 99, 99.5], // 普通 STRUCTURE_BREAK DOWN 确认
   ].map(([open, high, low, close], i) => ({ time: base + i * 300_000, closeTime: base + (i + 1) * 300_000, open, high, low, close }));
   const event = { type: "MSS", direction: "DOWN", level: 100, price: 99.5, confirmed: true, confirmedByDisplacement: false, time: candles[6].closeTime };
   const env = baseEnv({
@@ -204,9 +246,21 @@ test("关键位置 MSS：4H执行区内扫高后普通5m MSS向下 → 保留为
     targets: { first: { type: "PDL", price: 95 } },
   });
   const op = detectKeyPositionMss({ env, ctx: { candles, events: [event] }, bias: "BEARISH" });
-  assert.ok(op, "关键4H执行区内的扫高+普通MSS应保留");
+  assert.equal(op, null);
+});
+
+test("关键位置扫损后由displacement交付的结构转移 → KEY_MSS WATCH", () => {
+  const base = Date.now() - 45 * 60_000;
+  const candles = [
+    [100, 101, 99, 100], [100, 102, 99.5, 101], [101, 101.5, 99.8, 100.5],
+    [100.5, 103, 100, 102], [102, 104, 101, 103], [103, 105, 102, 103.5],
+    [103.5, 104, 99, 99.5],
+  ].map(([open, high, low, close], i) => ({ time: base + i * 300_000, closeTime: base + (i + 1) * 300_000, open, high, low, close }));
+  const event = { type: "MSS", semanticType: "MSS", ictMss: true, direction: "DOWN", level: 100, price: 99.5, confirmed: true, confirmedByDisplacement: true, time: candles[6].closeTime };
+  const env = baseEnv({ bias: "BEARISH", price: 99.5, executionZones: [{ type: "BEARISH_OB", top: 106, bottom: 102 }], targets: { first: { price: 95 } } });
+  const op = detectKeyPositionMss({ env, ctx: { candles, events: [event] }, bias: "BEARISH" });
   assert.equal(op.type, "KEY_MSS");
-  assert.equal(op.displacementConfirmed, false);
+  assert.equal(op.displacementConfirmed, true);
   assert.equal(op.localSweep.sweptPrice, 105);
 });
 
@@ -260,8 +314,8 @@ test("P1: CHAIN 的 MSS 位移在事件根即可确认（第三根位移 FVG）�
     [102.6, 102.8, 102.6, 102.6], // 回踩，尚未确认
     [102.5, 103.2, 102.4, 103.1], // 5m 收阳站回中点确认
   ]);
-  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 102.6, time: T0 };
-  const env = baseEnv({ price: 103.1, sweep });
+  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 102.6, time: m5[20].time, closedTime: m5[20].closeTime };
+  const env = baseEnv({ price: 103.1, ...formalChainEnv(m5, sweep, 103.1) });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   const chain = opps.find((o) => o.type === "CHAIN");
   assert.ok(chain, "位移确认的 MSS 应触发 CHAIN");
@@ -286,7 +340,7 @@ test("P1: 位移腿 FVG 已填平 → 旧 FVG 不能拼成 CHAIN（只能回踩�
     [101.5, 102, 100.8, 101.8], // 深回踩：low 100.8 插到 [100,102] 中点 101 以下（V2.7 深触碰要求）
     [101.6, 102.3, 101.5, 102.1], // 收阳确认普通 RETRACE
   ]);
-  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 101.8, time: T0 };
+  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 101.8, time: m5[20].time, closedTime: m5[20].closeTime };
   const env = baseEnv({ price: 102.1, sweep });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   assert.ok(!opps.find((o) => o.type === "CHAIN"), "旧 FVG 不得拼成完整 CHAIN");
@@ -320,7 +374,7 @@ test("环境过滤：4H decision NO_TRADE → 无机会（决策层拦截，避�
     [102, 102, 102, 102], // bullish FVG [101,102]
     [101.5, 102, 101.5, 101.8], // 回踩到 FVG 内
   ]);
-  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 101.8, time: T0 };
+  const sweep = { side: "SSL", key: "t0_SSL", level: 99, sweptPrice: 97, close: 101.8, time: m5[20].time, closedTime: m5[20].closeTime };
   const env = baseEnv({ price: 101.8, sweep, confidence: "LOW", decision: "NO_TRADE", decisionLabel: "NO TRADE" });
   const opps = scanOpportunities({ symbol: "BTCUSDT", env, m5 });
   assert.deepEqual(opps, [], "decision NO_TRADE 时机会层必须返回空");
@@ -373,6 +427,17 @@ test("环境过滤：4H bias NEUTRAL → 无机会", () => {
   assert.deepEqual(opps, []);
 });
 
+test("RECENT/未确认 4H Dealing Range 不得生成任何 5m 机会", () => {
+  const m5 = mkCandles([
+    [100, 100, 100, 100],
+    [100, 103, 100, 103],
+    [103, 104, 102, 103],
+    [103, 103, 101, 102.5],
+  ]);
+  const env = baseEnv({ price: 102.5, dealingRangeReady: false, rangeObservation: { rangeType: "RECENT", high: 104, low: 100 } });
+  assert.deepEqual(scanOpportunities({ symbol: "BTCUSDT", env, m5 }), []);
+});
+
 test("重叠FVG去重：保留质量更高的结构级区域，独立区域不受影响", () => {
   const zones = [
     { type: "FVG", id: "raw", quality: "RAW", bottom: 100, top: 110, age: 1 },
@@ -392,6 +457,30 @@ test("ICT 2022 时间门槛：Killzone 外即使高质量回踩也不出机会",
     env: baseEnv({ price: 102.1, confidence: "HIGH", quality: "HIGH", ictSession: null }),
     m5,
   });
+  assert.deepEqual(opps, []);
+});
+
+test("ICT 2022 因果门槛：没有当日 DISTRIBUTION 完整链，即使回踩成立也不出机会", () => {
+  const m5 = mkCandles([
+    [100, 100, 100, 100], [101, 101, 101, 101], [102, 102, 102, 102],
+    [101.5, 103, 101, 102], [101, 101.5, 100.8, 101], [101, 102.2, 100.9, 102.1],
+  ]);
+  const noAmd = scanOpportunities({ symbol: "BTCUSDT", env: baseEnv({ price: 102.1, amd: null }), m5 });
+  assert.deepEqual(noAmd, []);
+  const oldDay = scanOpportunities({
+    symbol: "BTCUSDT",
+    env: baseEnv({ price: 102.1, amd: { stage: "DISTRIBUTION", direction: "BULLISH", tradingDayId: "2000-01-01", liquiditySequenceId: "old" } }),
+    m5,
+  });
+  assert.deepEqual(oldDay, []);
+});
+
+test("Crypto Asia 只形成流动性，不作为 5m 执行窗口", () => {
+  const m5 = mkCandles([
+    [100, 100, 100, 100], [101, 101, 101, 101], [102, 102, 102, 102],
+    [101.5, 103, 101, 102], [101, 101.5, 100.8, 101], [101, 102.2, 100.9, 102.1],
+  ]);
+  const opps = scanOpportunities({ symbol: "BTCUSDT", env: baseEnv({ price: 102.1, ictSession: { name: "ASIA" } }), m5 });
   assert.deepEqual(opps, []);
 });
 

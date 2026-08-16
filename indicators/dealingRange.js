@@ -1,5 +1,5 @@
 /**
- * dealingRange.js — Premium / Discount（Impulse Range V1.8 + Location Context V1.9）
+ * dealingRange.js — ICT 2022 Premium / Discount（Impulse Range）
  *
  * 区间 = 最近一次推动波段（impulsive move），而不是整个大趋势：
  *
@@ -7,31 +7,33 @@
  *              即"最后一次 HL/LL → HH 推动"的范围
  *   BEARISH  → IMPULSE_BEARISH：最近一个 LL + 其之前最近的 HIGH（LH/HH 均可）
  *              即"最后一次 LH/HH → LL 下跌"的范围
- *   NEUTRAL / 无有效推动 → RECENT fallback：最近一个 Swing High + 最近一个 Swing Low
+ *   NEUTRAL / 无有效推动 → RECENT observation：最近一个 Swing High + 最近一个 Swing Low；
+ *              只供画图/审计，不进入 Location、ERL/IRL、PD Array 或通知因果链
  *
  *   equilibrium = (high + low) / 2
  *   price > eq → PREMIUM（溢价区，适合找空）
  *   price < eq → DISCOUNT（折价区，适合找多）
  *
- * V1.9 Location Context：Location 只分 PREMIUM/DISCOUNT 信息不足。
- * 增加 context 区分"有效折价/溢价区"与"接近目标（推动末端）"：
- *
- *   BULLISH（目标 = range.high）：
- *     price > high - 60%·span → LATE_IMPULSE（距目标 < 60%，推动进入末端，不追多）
- *     price < equilibrium      → DISCOUNT_VALID（有效折价区）
- *     其余（溢价未接近目标）    → PREMIUM（等回撤）
- *   BEARISH（目标 = range.low）对称：
- *     price < low + 60%·span  → LATE_IMPULSE
- *     price > equilibrium     → PREMIUM_VALID（有效溢价区）
- *     其余                     → DISCOUNT
- *
- * 阈值说明（V1.9 人工裁定）：25% 会让 BTC 2025-10-06（距高点 53%）保持 READY；
- * 采用 60% 才能同时满足 4 例审计预期（10-06 → WAIT、ETH 06-10 → READY 等）。
+ * 位置语义只使用 50% Equilibrium：低于 EQ = Discount，高于 EQ = Premium。
+ * “推动末端/是否追价”不是 ICT Dealing Range 的第三种位置，不在这里使用任意 40%/60%
+ * 阈值覆盖 Premium/Discount；交易空间由 Draw、失效位和 planR 在决策层单独判断。
  */
 import { analyzeSwings } from "./swing.js";
 
-/** V1.9：距目标 < 60% 区间高度 → 视为接近目标（推动末端） */
-const LATE_IMPULSE_THRESHOLD = 0.6;
+export const IMPULSE_DEALING_RANGE_TYPES = Object.freeze(["IMPULSE_BULLISH", "IMPULSE_BEARISH"]);
+
+/** RECENT 只是观察候选；只有明确推动腿才有资格进入交易、流动性与通知主链。 */
+export function isImpulseDealingRange(range) {
+  return !!range && IMPULSE_DEALING_RANGE_TYPES.includes(range.rangeType);
+}
+
+/** 生命周期已确认且仍有效的推动区间。 */
+export function isActiveDealingRange(range) {
+  return isImpulseDealingRange(range)
+    && !!range.rangeId
+    && range.lifecycleStatus === "ACTIVE"
+    && range.tradable !== false;
+}
 
 export function computeDealingRange(swings, structure, price, liquidity) {
   const range = findImpulseRange(swings, structure, liquidity) || findRecentRange(swings);
@@ -41,35 +43,52 @@ export function computeDealingRange(swings, structure, price, liquidity) {
   }
 
   const equilibrium = (range.high + range.low) / 2;
-  let location = "AT_EQ";
-  if (price > equilibrium) location = "PREMIUM";
-  else if (price < equilibrium) location = "DISCOUNT";
+  const current = Number(price);
+  const hasPrice = Number.isFinite(current);
+  let location = hasPrice ? "AT_EQ" : "UNKNOWN";
+  if (hasPrice && current > equilibrium) location = "PREMIUM";
+  else if (hasPrice && current < equilibrium) location = "DISCOUNT";
   // 连续位置（通用位置度量）：0 = 区间低点，1 = 区间高点，0.5 = 中点。
   // 不做 clamp（价格突破区间时 >1 / <0 本身是有意义的信息，消费方可自行截断）。
-  const position = range.high > range.low ? (price - range.low) / (range.high - range.low) : null;
+  const position = hasPrice && range.high > range.low ? (current - range.low) / (range.high - range.low) : null;
 
-  const context = computeLocationContext(range, structure, price, equilibrium);
+  const context = computeLocationContext(range, structure, current, equilibrium);
 
-  return { high: range.high, low: range.low, equilibrium, location, rangeType: range.type, context, startReason: range.startReason || null, endReason: range.endReason || null, position };
+  return {
+    high: range.high,
+    low: range.low,
+    equilibrium,
+    location,
+    rangeType: range.type,
+    context,
+    startReason: range.startReason || null,
+    endReason: range.endReason || null,
+    position,
+    // ERL/IRL 必须与同一个 dealing range 共用端点和形成时间，不能再从 structure
+    // 另找一组所谓“external”价位。索引用于等待 pivot 右侧确认，杜绝未来函数。
+    highIndex: range.highIndex ?? null,
+    lowIndex: range.lowIndex ?? null,
+    highTime: range.highTime ?? null,
+    lowTime: range.lowTime ?? null,
+  };
 }
 
 /**
- * V1.9 Location Context：在 Location 基础上细分执行语义。
- * 只依赖方向、价格与区间；不参与 Bias 判断（Bias 仍只由 Structure 决定）。
+ * 兼容字段 context：只表达当前位置是否与结构方向的 Premium/Discount 顺位一致。
+ * 不再产生 LATE_IMPULSE；是否追价由实际 Draw/Risk 的 planR 决定。
  */
 export function computeLocationContext(range, structure, price, equilibrium) {
   const dir = structure && structure.direction;
   if (dir !== "BULLISH" && dir !== "BEARISH") return "UNKNOWN";
-  const span = range.high - range.low;
-  if (!span || span <= 0) return "UNKNOWN";
-
+  const current = Number(price);
+  const eq = Number.isFinite(Number(equilibrium)) ? Number(equilibrium) : (Number(range.high) + Number(range.low)) / 2;
+  if (!(range.high > range.low) || !Number.isFinite(current) || !Number.isFinite(eq)) return "UNKNOWN";
+  if (current === eq) return "AT_EQ";
   if (dir === "BULLISH") {
-    if (price > range.high - LATE_IMPULSE_THRESHOLD * span) return "LATE_IMPULSE";
-    if (price < equilibrium) return "DISCOUNT_VALID";
+    if (current < eq) return "DISCOUNT_VALID";
     return "PREMIUM";
   }
-  if (price < range.low + LATE_IMPULSE_THRESHOLD * span) return "LATE_IMPULSE";
-  if (price > equilibrium) return "PREMIUM_VALID";
+  if (current > eq) return "PREMIUM_VALID";
   return "DISCOUNT";
 }
 
@@ -110,6 +129,8 @@ export function findImpulseRange(swings, structure, liquidity) {
         low: low.price,
         highIndex: hh.index,
         lowIndex: low.index,
+        highTime: hh.time ?? null,
+        lowTime: low.time ?? null,
         type: "IMPULSE_BULLISH",
         startReason: sweptLevelReason(liquidity, "SELL", low.price) || (low.label === "LL" ? "外部结构启动低点(LL)" : "回撤低点(HL)"),
         endReason: "结构推进高点(HH)",
@@ -132,6 +153,8 @@ export function findImpulseRange(swings, structure, liquidity) {
         low: ll.price,
         highIndex: high.index,
         lowIndex: ll.index,
+        highTime: high.time ?? null,
+        lowTime: ll.time ?? null,
         type: "IMPULSE_BEARISH",
         startReason: sweptLevelReason(liquidity, "BUY", high.price) || (high.label === "HH" ? "外部结构启动高点(HH)" : "反抽高点(LH)"),
         endReason: "结构推进低点(LL)",
@@ -171,6 +194,8 @@ export function findRecentRange(swings) {
     low: low.price,
     highIndex: high.index,
     lowIndex: low.index,
+    highTime: high.time ?? null,
+    lowTime: low.time ?? null,
     type: "RECENT",
     startReason: "最近摆动低点",
     endReason: "最近摆动高点",

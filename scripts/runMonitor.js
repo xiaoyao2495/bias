@@ -32,6 +32,7 @@ import { sendMarkdown } from "../monitor/dingTalk.js";
 import { loadCalendarEvents, loadExchangeInfo, newsLineFor } from "../monitor/newsCalendar.js";
 import { getHistory, syncBinanceClock } from "../data/binance.js";
 import { marketNow } from "../utils/marketClock.js";
+import { attachSweepNotificationAudit, formatSweepAudit } from "../indicators/sweepAudit.js";
 import { appendFileSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,11 +93,20 @@ function sweepPushedOf(prev, retained = {}) {
 export function pendingSweepEvents(sweeps, pushed = {}, now = marketNow()) {
   return (sweeps || []).filter((sweep) => {
     const eventAt = sweep.closedTime ?? sweep.reclaimTime ?? sweep.time;
-    if ((sweep.tier ?? 2) === 1 && Number.isFinite(Number(eventAt)) && now - Number(eventAt) > L1_NOTIFY_MAX_AGE_MS) return false;
+    const eventTime = Number(eventAt);
+    if (!Number.isFinite(eventTime)) return false;
+    const age = now - eventTime;
+    if (age < -SWEEP_FUTURE_TOLERANCE_MS || age > SWEEP_NOTIFY_MAX_AGE_MS) return false;
+    if ((sweep.tier ?? 2) === 1 && age > L1_NOTIFY_MAX_AGE_MS) return false;
     if (pushed[sweep.key]) return false;
     const stageRank = (key) => key.endsWith("_ICT_2022_CONFIRMED") ? 3 : key.endsWith("_RECLAIMED_RAID") ? 2 : key.endsWith("_LIQUIDITY_TAKEN") ? 1 : 0;
     // 同一 baseKey 只允许向上升级；合并同价来源后也兼容任一旧来源 key，避免部署迁移重推。
-    const baseKeys = [...new Set([sweep.baseKey, ...(sweep.sourceBaseKeys || [])].filter(Boolean))];
+    const baseKeys = [...new Set([
+      sweep.baseKey,
+      sweep.previousBaseKey,
+      ...(sweep.sourceBaseKeys || []),
+      ...(sweep.sourcePreviousBaseKeys || []),
+    ].filter(Boolean))];
     if (baseKeys.some((baseKey) => Object.keys(pushed).some((key) => key.startsWith(`${baseKey}_`) && stageRank(key) >= (sweep.tier ?? 2)))) return false;
     // 旧 key 只代表旧版“已收回扫损”（现 L2），不能吞掉新增的 L1 或后续升级的 L3。
     return !((sweep.tier ?? 2) === 2 && sweep.legacyKey && pushed[sweep.legacyKey]);
@@ -162,6 +172,9 @@ const SWEEP_HISTORY_TTL_MS = 24 * 3600_000;
 const SWEEP_HISTORY_MAX_PER_SYMBOL = 500;
 /** L1 只是“拿走但未收回”，只保留两个轮询周期的即时价值；L2/L3 仍可在 4h 事件窗内补报。 */
 const L1_NOTIFY_MAX_AGE_MS = 20 * 60_000;
+/** 48 根 5m 检测窗 + 一个轮询宽限；超过它说明行情快照已经陈旧，不得补发 L2/L3。 */
+const SWEEP_NOTIFY_MAX_AGE_MS = 4 * 3600_000 + 10 * 60_000;
+const SWEEP_FUTURE_TOLERANCE_MS = 10 * 60_000;
 
 /** 去重历史独立于 Top30 当前成员保存，避免标的跌出后再进入导致旧事件重推。 */
 export function pruneSweepPushed(pushed, now = marketNow()) {
@@ -216,14 +229,7 @@ export function resolveFinalAction(r, prev = null) {
   if (directionDecision === "WAIT" && r.planR <= 0.55 && prev?.decision === "NO TRADE") return "NO TRADE";
   if (directionDecision !== "WATCH") return directionDecision;
 
-  let execution = r.execution;
-  // LATE_IMPULSE 0.6 阈值对应多头 position=0.4、空头 position=0.6；±0.03 内沿用旧动作。
-  const position = Number(r.rangePosition);
-  const boundary = r.bias === "BULLISH" ? 0.4 : r.bias === "BEARISH" ? 0.6 : null;
-  if (boundary != null && Number.isFinite(position) && Math.abs(position - boundary) <= 0.03) {
-    if (prev?.decision === "WATCH") execution = "READY";
-    else if (prev?.decision === "WAIT") execution = "WAIT";
-  }
+  const execution = r.execution;
   if (execution !== "READY") return "WAIT";
   if (r.planR == null || r.planR < 0.95) return "WAIT";
   // 1R 临界区使用旧状态，避免价格轻微波动造成 WATCH/WAIT 每十分钟翻转。
@@ -260,7 +266,8 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
   const boundaryMs = latestBjBoundaryMs();
   const force4h = isFirstRun || boundaryMs > loadCloseReport();
   if (force4h) log(`[runMonitor] 4H 收盘边界轮 → 强制刷新 4H 数据`);
-  const results = await analyzeSymbols(list, { onProgress: (n, t) => log(`[runMonitor] 分析进度 ${n}/${t}`), force4h });
+  const priorRanges = Object.fromEntries(list.map((symbol) => [symbol, prevState[symbol]?.rangeLifecycle || null]));
+  const results = await analyzeSymbols(list, { onProgress: (n, t) => log(`[runMonitor] 分析进度 ${n}/${t}`), force4h, priorRanges, exchangeInfo: newsClasses });
   const failed = results.filter((r) => r.error).length;
   log(`[runMonitor] 分析完成：成功 ${results.length - failed} / ${results.length}`);
   const nextState = {};
@@ -292,9 +299,16 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       location: r.location,
       context: r.context,
       rangePosition: r.rangePosition,
+      dealingRangeReady: r.dealingRangeReady === true,
+      rangeObservation: r.rangeObservation || null,
       scenario: r.scenario,
+      instrumentProfile: r.instrumentProfile || null,
+      sessionRange: r.sessionRange || null,
+      referenceSessionRange: r.referenceSessionRange || null,
+      amd: r.amd || null,
       activeVolumeWindow: r.activeVolumeWindow || r.session,
       ictSession: r.ictSession || null,
+      executionSession: r.executionSession || null,
       session: r.session, // 兼容旧 state；语义为 activeVolumeWindow
       quality: r.quality,
       planR: r.planR,
@@ -303,6 +317,8 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       structureSpaceRatio: r.structureSpaceRatio,
       remoteStructureSpaceRatio: r.remoteStructureSpaceRatio,
       targets: r.targets,
+      rangeLifecycle: r.rangeLifecycle || null,
+      sweepAudit: r.sweepAudit || null,
       // 扫损事件去重：已推送的扫损 key 集合（key = 5m K 开盘时间_方向）。
       // 原为单值 sweepTime，位列表漂移（INTERNAL_HIGH→PDH 或新事件插入）导致检测事件在
       // 新旧 key 间切换时旧事件被重复推（08/15 SNDK/BZ/ZEC/BNB 5 处重复）；集合保证同 key 永不重推。
@@ -321,6 +337,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     const item = {
       symbol: r.symbol,
       price: r.price,
+      analysisTime: r.analysisTime,
       newsLine: newsLineFor(r.symbol, newsEvents, newsClasses), // 消息面窗口标注（股票代币 + BTC/ETH）
       confluenceScore: r.confluenceScore ?? r.confidenceScore,
       confidenceScore: r.confidenceScore,
@@ -336,14 +353,33 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       last4h: r.last4h,
       sweep: r.sweep,
       sweeps: r.sweeps || (r.sweep ? [r.sweep] : []),
+      liquiditySequences: r.liquiditySequences || [],
+      sweepAudit: r.sweepAudit || null,
+      rangeTransition: r.rangeTransition || null,
       displacement: r.displacement,
       executionZones: r.executionZones,
+      instrumentProfile: r.instrumentProfile || null,
+      sessionRange: r.sessionRange || null,
+      referenceSessionRange: r.referenceSessionRange || null,
+      amd: r.amd || null,
       ...cmp,
       prev,
       cur,
     };
     overview.push(item);
     if (cmp.changed) changed.push(item);
+  }
+
+  // 检测层与通知层分开审计：市场事件存在但 pending=0 时，可以明确判断是去重/过期，
+  // 不再把“一直没通报”笼统归因于扫损检测。dry-run 也计算并打印，但不写 state。
+  for (const item of overview) {
+    item.pendingSweeps = pendingSweepEvents(item.sweeps, item.cur.sweepPushed);
+    item.sweepAudit = attachSweepNotificationAudit(item.sweepAudit, item.sweeps, item.pendingSweeps);
+    item.cur.sweepAudit = item.sweepAudit;
+    log(`[sweep-audit] ${item.symbol} ${formatSweepAudit(item.sweepAudit)}`);
+    if (item.rangeTransition?.changed) {
+      log(`[range] ${item.symbol} ${item.rangeTransition.reason}: ${item.rangeTransition.from || "-"} -> ${item.rangeTransition.to || "-"}`);
+    }
   }
 
   if (!dryRun) {
@@ -371,7 +407,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     }
     // 流动性扫损是独立事件：首轮及新进入 Top30 的标的也必须推；cur 已合并跨 Top30 的历史去重。
     for (const item of overview) {
-      const pendingSweeps = pendingSweepEvents(item.sweeps, item.cur.sweepPushed);
+      const pendingSweeps = item.pendingSweeps || [];
       for (const sweep of groupSweepNotifications(pendingSweeps)) {
         try {
           await sendNotification(
@@ -761,7 +797,7 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m, 
   if (mss5m && mss5m.lastEvent) {
     const ev = mss5m.lastEvent;
     const status = ev.confirmed ? "已确认" : ev.realtime ? "实时" : "";
-    lines.push(`5m 结构: ${ev.type} ${ev.direction} @ ${ev.level}（${status}）`);
+    lines.push(`5m 结构: ${ev.semanticType || ev.type} ${ev.direction} @ ${ev.level}（${status}）`);
     if (tier === 3 && sweep.confirmationFvg) {
       const fvg = sweep.confirmationFvg;
       const fvgStatus = fvg.executionStatus || fvg.status || "OPEN";
@@ -774,8 +810,8 @@ export function buildSweep({ symbol, sweep, price, cur, confidenceScore, mss5m, 
   return lines.join("<br/>");
 }
 
-/** 位移证据摘要：结构突破位（BOS）+ 缺口区间（FVG）+ 量能倍率，让用户确认是否真为 ICT 位移
- *  （BODY + VOLUME 门槛；BOS/FVG 为标签可能为空）。FVG 极窄（宽度 ≤ 价格 0.02%，1 tick 级）
+/** 位移证据摘要：结构突破位（BOS）+ 缺口区间（FVG）+ 可选量能倍率。
+ *  位移硬条件来自价格交付；量能为辅助证据，BOS/FVG 为标签可能为空。FVG 极窄（宽度 ≤ 价格 0.02%，1 tick 级）
  *  时只显示单值，避免 0.05-0.05 噪音 */
 function dispEvidence(d) {
   const parts = [];
@@ -804,27 +840,28 @@ function sweepTypeLabel(type) {
       PDL: "昨日低点",
       PWH: "上周高点",
       PWL: "上周低点",
+      PRE_MARKET_HIGH: "盘前高点",
+      PRE_MARKET_LOW: "盘前低点",
+      ASIA_HIGH: "亚洲时段高点",
+      ASIA_LOW: "亚洲时段低点",
       EQH: "等高点",
       EQL: "等低点",
-      EXTERNAL_HIGH: "外部结构高点",
-      EXTERNAL_LOW: "外部结构低点",
+      EXTERNAL_HIGH: "区间外部高点（ERL）",
+      EXTERNAL_LOW: "区间外部低点（ERL）",
       INTERNAL_HIGH: "内部摆动高点",
       INTERNAL_LOW: "内部摆动低点",
     }[type] || type
   );
 }
 
-/** Order Block → 直白交易文案。
- *  根据当前价格说明区域在上方/下方/当前，同时说明历史作用、消耗状态和与 Bias 的关系。
- *  仅在有关注价值时显示：BREAKER/REJECTION 总是显示；STANDARD 需未回踩（FRESH）才显示。 */
+/** 严格 ICT Order Block / Breaker → 直白交易文案。 */
 function obText(o, bias, price) {
   if (!o) return null;
-  if (o.status === "FILLED") return null;
-  if (o.kind === "STANDARD" && o.state === "USED") return null;
+  if (o.status === "FILLED" || o.status === "INVALIDATED" || o.state === "INVALIDATED") return null;
   const midpoint = o.low != null && o.high != null ? (o.low + o.high) / 2 : null;
   if (price != null && midpoint != null && Math.abs(midpoint - price) / Math.abs(price) > 0.15) return null;
 
-  const bullish = o.type === "BULLISH_OB";
+  const bullish = o.direction ? o.direction === "BULLISH" : String(o.type || "").startsWith("BULLISH");
   let position = null;
   if (price != null && o.low != null && o.high != null) {
     if (price < o.low) position = "ABOVE";
@@ -839,11 +876,16 @@ function obText(o, bias, price) {
   else title = bullish ? "多头支撑" : "空头阻力";
 
   let behavior;
-  if (o.kind === "REJECTION") behavior = bullish ? "多头区域曾推动价格反弹" : "空头区域曾压低价格";
-  else if (o.kind === "BREAKER") behavior = bullish ? "多头区域破位后重新收回" : "空头区域破位后重新跌回";
-  else behavior = bullish ? "多头支撑区域" : "空头阻力区域";
+  if (o.kind === "BREAKER") behavior = bullish ? "失败空头 OB 反转为多头 Breaker" : "失败多头 OB 反转为空头 Breaker";
+  else behavior = bullish ? "结构上破位移产生的多头 OB" : "结构下破位移产生的空头 OB";
 
-  const state = o.state === "USED" ? "已回踩，效力减弱" : o.state === "FRESH" ? "尚未回踩，参考价值较高" : null;
+  const state = o.state === "FRESH"
+    ? "尚未回踩"
+    : o.state === "MITIGATED" || o.state === "USED"
+      ? "已浅回踩"
+      : o.state === "CE_REACHED"
+        ? "已触及中点，消耗较深"
+        : null;
   const relation =
     bias === "BULLISH" && !bullish
       ? "与当前多头方向相反"
@@ -952,6 +994,8 @@ export function opportunityEnvOf(item) {
     price: item?.price,
     structureStatus: item?.structureStatus,
     sweep: item?.sweep || null,
+    sweeps: item?.sweeps || [],
+    liquiditySequences: item?.liquiditySequences || [],
   };
 }
 
@@ -1039,9 +1083,10 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
     lines.push(`${ICON[prev.bias] || ""} ${prev.bias} → ${ICON[cur.bias] || ""} ${cur.bias}`, "");
     // Change Reason：市场发生了什么（结构失效 = MSS 事件 → 突破保护位）
     if (structureStatus === "INVALIDATED" && mss) {
-      // schema 与 indicators/mss.js 统一：direction = UP/DOWN（突破方向），type 恒为 "MSS"
+      // 无位移只是结构破坏；只有 displacement 交付才使用课程意义的 MSS 标签。
       const dirText = mss.direction === "UP" ? "向上突破" : "向下跌破";
-      lines.push(`**结构事件: MSS**（${dirText} ${mss.level}，原 ${mss.structureFrom} 结构失效）`);
+      const structureEventName = mss.semanticType || (mss.confirmedByDisplacement ? "MSS" : "STRUCTURE_BREAK");
+      lines.push(`**结构事件: ${structureEventName}**（${dirText} ${mss.level}，原 ${mss.structureFrom} 结构失效）`);
       lines.push(`触发: ${mss.time} · 价格 ${mss.price}`);
     } else if (structureStatus === "INVALIDATED") {
       const broken = invalidation && invalidation.type === "BREAK_PROTECTED_HIGH";
@@ -1079,7 +1124,7 @@ export function buildChanged({ symbol, price, reason, changes, prev, cur, confid
   if (newsLine) lines.push(`⚠️ 消息面: ${newsLine}`);
   if (cur.activeVolumeWindow || cur.session) lines.push(`活跃成交量: ${sessionText(cur.activeVolumeWindow || cur.session)}`);
   if (cur.ictSession) lines.push(ictSessionText(cur.ictSession));
-  // 辅助状态：OB 细类（ICT 2022 L4），仅在有关注价值时显示，避免噪音
+  // 辅助状态：最近仍有效的结构级 OB / Breaker；失效对象已在分析层过滤。
   const ob = obText(cur.ob, cur.bias, price);
   if (ob) lines.push(ob);
   if (changes.includes("confidence")) lines.push(`模型信心: ${prev.confidence} → ${cur.confidence}${confidenceScore != null ? ` · 共振评分 ${confidenceScore}` : ""}`);
@@ -1126,15 +1171,11 @@ function formatPlanR(value) {
 }
 
 function targetTypeCN(type) {
-  return ({ PDH: "昨日高点", PDL: "昨日低点", PWH: "上周高点", PWL: "上周低点", EQH: "等高点", EQL: "等低点", PRE_MARKET_HIGH: "时段高点", PRE_MARKET_LOW: "时段低点", INTERNAL_HIGH: "内部摆动高点", INTERNAL_LOW: "内部摆动低点" })[type] || type;
+  return ({ PDH: "昨日高点", PDL: "昨日低点", PWH: "上周高点", PWL: "上周低点", EQH: "等高点", EQL: "等低点", PRE_MARKET_HIGH: "盘前高点", PRE_MARKET_LOW: "盘前低点", ASIA_HIGH: "亚洲时段高点", ASIA_LOW: "亚洲时段低点", INTERNAL_HIGH: "内部摆动高点", INTERNAL_LOW: "内部摆动低点" })[type] || type;
 }
 
 function finalReason(cur, fallback) {
   if (cur.directionDecision === "WATCH" && cur.decision === "WAIT") {
-    if (cur.context === "LATE_IMPULSE") {
-      const side = cur.bias === "BULLISH" ? "多" : cur.bias === "BEARISH" ? "空" : "单";
-      return `方向成立，但价格处于推动末端，当前位置不追${side}`;
-    }
     if (cur.planR != null && cur.planR < 1) return "方向成立，但第一目标结构空间不足，等待更好位置";
     return "方向成立，但执行区尚未就绪，继续等待";
   }
@@ -1190,12 +1231,12 @@ function klineSpan(openMs) {
 function levelFormedText(sweep) {
   if (sweep.levelTime != null) {
     const isDayK = sweep.type === "PDH" || sweep.type === "PDL" || sweep.type === "PWH" || sweep.type === "PWL";
-    const isPremkt = sweep.type === "PRE_MARKET_HIGH" || sweep.type === "PRE_MARKET_LOW";
+    const isSession = ["PRE_MARKET_HIGH", "PRE_MARKET_LOW", "ASIA_HIGH", "ASIA_LOW"].includes(sweep.type);
     const is1h = sweep.type === "INTERNAL_HIGH" || sweep.type === "INTERNAL_LOW";
     const opts = { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour12: false };
     if (!isDayK) Object.assign(opts, { hour: "2-digit", minute: "2-digit" });
     const t = new Date(sweep.levelTime).toLocaleString("zh-CN", opts);
-    const suffix = isDayK ? "（日/周 K）" : isPremkt ? "" : is1h ? "（1H K）" : "（4H K）";
+    const suffix = isDayK ? "（日/周 K）" : isSession ? "" : is1h ? "（1H K）" : "（4H K）";
     return `流动性位形成: ${t}${suffix}`;
   }
   const d = sweep.levelDate; // PRE_MARKET 旧数据兜底："2026-08-07"

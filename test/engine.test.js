@@ -220,13 +220,14 @@ test("4H 与已确认 HTF 冲突：证据未闭环保持中性，扫损+位移 M
   assert.deepEqual(confirmed.drawOnLiquidity, confirmed.draw);
 });
 
-// ---- V1.9 Location Context ----
+// ---- ICT 2022 50% Premium / Discount ----
 
-test("Bullish + DISCOUNT + LATE_IMPULSE（接近目标/推动末端）→ Execution WAIT", () => {
+test("Bullish + DISCOUNT：旧LATE_IMPULSE字段不得覆盖50%课程位置 → READY", () => {
   const r = computeDailyBias({ structure: bullishStruct, liquidity: liqBull, location: { location: "DISCOUNT", context: "LATE_IMPULSE" } });
   assert.equal(r.bias, "BULLISH"); // Bias 不变
-  assert.equal(r.executionState, "WAIT"); // 不追多
-  assert.ok(r.reason.some((x) => x.includes("LATE_IMPULSE")));
+  assert.equal(r.executionState, "READY");
+  assert.ok(r.reason.some((x) => x.includes("Price in discount")));
+  assert.ok(!r.reason.some((x) => x.includes("LATE_IMPULSE")));
 });
 
 test("Bullish + DISCOUNT + DISCOUNT_VALID → Execution READY", () => {
@@ -235,20 +236,29 @@ test("Bullish + DISCOUNT + DISCOUNT_VALID → Execution READY", () => {
   assert.ok(r.reason.some((x) => x.includes("execution READY (look for longs)")));
 });
 
-test("Bullish + PREMIUM + LATE_IMPULSE → Execution WAIT（context 覆盖 location）", () => {
+test("Bullish + PREMIUM → Execution WAIT（只服从50%位置）", () => {
   const r = computeDailyBias({ structure: bullishStruct, liquidity: liqBull, location: { location: "PREMIUM", context: "LATE_IMPULSE" } });
   assert.equal(r.executionState, "WAIT");
 });
 
-test("Bearish + PREMIUM + LATE_IMPULSE（接近低点目标/推动末端）→ Execution WAIT", () => {
+test("Bearish + PREMIUM：旧LATE_IMPULSE字段不得覆盖50%课程位置 → READY", () => {
   const r = computeDailyBias({ structure: bearishStruct, liquidity: liqBear, location: { location: "PREMIUM", context: "LATE_IMPULSE" } });
   assert.equal(r.bias, "BEARISH");
-  assert.equal(r.executionState, "WAIT"); // 不追空
-  assert.ok(r.reason.some((x) => x.includes("LATE_IMPULSE")));
+  assert.equal(r.executionState, "READY");
+  assert.ok(r.reason.some((x) => x.includes("Price in premium")));
+  assert.ok(!r.reason.some((x) => x.includes("LATE_IMPULSE")));
 });
 
 test("Bearish + PREMIUM + PREMIUM_VALID → Execution READY", () => {
   const r = computeDailyBias({ structure: bearishStruct, liquidity: liqBear, location: { location: "PREMIUM", context: "PREMIUM_VALID" } });
   assert.equal(r.executionState, "READY");
   assert.ok(r.reason.some((x) => x.includes("execution READY (look for shorts)")));
+});
+
+test("价格恰好位于 Equilibrium → 多空都 WAIT", () => {
+  const bull = computeDailyBias({ structure: bullishStruct, liquidity: liqBull, location: { location: "AT_EQ", context: "AT_EQ" } });
+  const bear = computeDailyBias({ structure: bearishStruct, liquidity: liqBear, location: { location: "AT_EQ", context: "AT_EQ" } });
+  assert.equal(bull.executionState, "WAIT");
+  assert.equal(bear.executionState, "WAIT");
+  assert.ok(bull.reason.some((x) => x.includes("at equilibrium")));
 });

@@ -58,23 +58,22 @@ function explainLiquidity(bias, draw) {
   return { component: "Liquidity", lines };
 }
 
-/** 3. Location：价格位置 + Context 的执行含义 */
+/** 3. Location：严格按 50% EQ 的 Premium/Discount 给出执行含义。 */
 function explainLocation(location, bias, structureStatus) {
   const loc = location.location;
-  const ctx = location.context && location.context !== "UNKNOWN" ? location.context : null;
-  const lines = [loc == null || loc === "UNKNOWN" ? "Price location unknown" : `Price in ${loc}${ctx ? ` — ${ctx}` : ""}`];
+  const lines = [loc == null || loc === "UNKNOWN" ? "Price location unknown" : loc === "AT_EQ" ? "Price at EQUILIBRIUM" : `Price in ${loc}`];
 
   let meaning = "";
   if (structureStatus === "INVALIDATED") {
     meaning = "structure invalidated — no execution";
   } else if (bias === "BULLISH") {
-    if (ctx === "LATE_IMPULSE") meaning = "near range target — avoid chasing (WAIT)";
-    else if (loc === "DISCOUNT") meaning = "valid discount zone (READY for longs)";
+    if (loc === "DISCOUNT") meaning = "valid discount zone (READY for longs)";
     else if (loc === "PREMIUM") meaning = "wait for discount retracement (WAIT)";
+    else if (loc === "AT_EQ") meaning = "no premium/discount advantage (WAIT)";
   } else if (bias === "BEARISH") {
-    if (ctx === "LATE_IMPULSE") meaning = "near range target — avoid chasing (WAIT)";
-    else if (loc === "PREMIUM") meaning = "valid premium zone (READY for shorts)";
+    if (loc === "PREMIUM") meaning = "valid premium zone (READY for shorts)";
     else if (loc === "DISCOUNT") meaning = "wait for premium retracement (WAIT)";
+    else if (loc === "AT_EQ") meaning = "no premium/discount advantage (WAIT)";
   }
   if (meaning) lines.push(meaning);
   return { component: "Location", lines };

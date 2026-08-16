@@ -1,9 +1,9 @@
 /**
- * dealingRange（Impulse Range V1.8 + Location Context V1.9）单元测试
+ * dealingRange（ICT 2022 Impulse Range + 50% Premium/Discount）单元测试
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeDealingRange, findRecentRange } from "../indicators/dealingRange.js";
+import { computeDealingRange, computeLocationContext, findRecentRange } from "../indicators/dealingRange.js";
 
 const S = (type, price, index) => ({ type, price, index });
 
@@ -17,7 +17,7 @@ test("Case1 Bullish: LOW100→HIGH150→LOW130→HIGH180 → IMPULSE_BULLISH 130
   assert.equal(r.high, 180);
   assert.equal(r.equilibrium, 155);
   assert.equal(r.location, "DISCOUNT"); // 120 < 155
-  assert.equal(r.context, "DISCOUNT_VALID"); // V1.9：距高点 (180-120)/50=100% > 60%，有效折价区
+  assert.equal(r.context, "DISCOUNT_VALID");
   // 审计字段：起点 = 回撤低点(HL)，终点 = 结构推进高点(HH)
   assert.equal(r.startReason, "回撤低点(HL)");
   assert.equal(r.endReason, "结构推进高点(HH)");
@@ -33,7 +33,7 @@ test("Case2 Bearish: HIGH200→LOW150→HIGH170→LOW120 → IMPULSE_BEARISH 170
   assert.equal(r.low, 120);
   assert.equal(r.equilibrium, 145);
   assert.equal(r.location, "PREMIUM"); // 160 > 145
-  assert.equal(r.context, "PREMIUM_VALID"); // V1.9：距低点 (160-120)/50=80% > 60%，有效溢价区
+  assert.equal(r.context, "PREMIUM_VALID");
   // 审计字段：起点 = 反抽高点(LH)，终点 = 结构推进低点(LL)
   assert.equal(r.startReason, "反抽高点(LH)");
   assert.equal(r.endReason, "结构推进低点(LL)");
@@ -64,10 +64,31 @@ test("Location 计算: 价格高于/低于 equilibrium", () => {
   const swings = [S("LOW", 100, 0), S("HIGH", 200, 1)];
   const d = computeDealingRange(swings, { direction: "BULLISH" }, 50);
   assert.equal(d.location, "DISCOUNT");
-  assert.equal(d.context, "DISCOUNT_VALID"); // 距高点 150/100 > 60%
+  assert.equal(d.context, "DISCOUNT_VALID");
   const p = computeDealingRange(swings, { direction: "BULLISH" }, 250);
   assert.equal(p.location, "PREMIUM");
-  assert.equal(p.context, "LATE_IMPULSE"); // 价格已在目标之上 → 推动末端
+  assert.equal(p.context, "PREMIUM");
+});
+
+test("ICT 50% EQ 边界：不再用40%/60%阈值覆盖Premium/Discount", () => {
+  const range = { low: 100, high: 200 };
+  const bull = { direction: "BULLISH" };
+  const bear = { direction: "BEARISH" };
+  assert.equal(computeLocationContext(range, bull, 140, 150), "DISCOUNT_VALID");
+  assert.equal(computeLocationContext(range, bull, 149.99, 150), "DISCOUNT_VALID");
+  assert.equal(computeLocationContext(range, bull, 150, 150), "AT_EQ");
+  assert.equal(computeLocationContext(range, bull, 150.01, 150), "PREMIUM");
+  assert.equal(computeLocationContext(range, bear, 149.99, 150), "DISCOUNT");
+  assert.equal(computeLocationContext(range, bear, 150, 150), "AT_EQ");
+  assert.equal(computeLocationContext(range, bear, 150.01, 150), "PREMIUM_VALID");
+});
+
+test("有区间但没有当前价格 → Location/Context 保持 UNKNOWN", () => {
+  const swings = [S("LOW", 100, 0), S("HIGH", 200, 1)];
+  const r = computeDealingRange(swings, { direction: "BULLISH" });
+  assert.equal(r.location, "UNKNOWN");
+  assert.equal(r.context, "UNKNOWN");
+  assert.equal(r.position, null);
 });
 
 test("无高低点 → UNKNOWN / NONE", () => {

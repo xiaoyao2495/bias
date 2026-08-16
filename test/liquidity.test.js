@@ -3,7 +3,19 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeLiquidity, findEqualHighs, findEqualLows, rankLiquidityTargets, findPremarketRange, isEquityLinkedSymbol, liquidityStateForLevel } from "../indicators/liquidity.js";
+import {
+  applyDealingRangeLiquidity,
+  computeLiquidity,
+  findEqualHighClusters,
+  findEqualHighs,
+  findEqualLows,
+  rankLiquidityTargets,
+  findPremarketRange,
+  findAsiaRange,
+  isEquityLinkedSymbol,
+  liquidityStateForLevel,
+  resolveEqualLevelTolerance,
+} from "../indicators/liquidity.js";
 
 const now = Date.now();
 
@@ -26,16 +38,16 @@ test("PDH/PDL/PWH/PWL: 取最近已收盘的日/周 K 线", () => {
   const l = computeLiquidity(daily, weekly, [], 0.002);
 
   assert.deepEqual(l.buySide, [
-    { type: "PWH", price: 60000, time: 0, group: "HTF" },
-    { type: "PDH", price: 50000, time: 0, group: "HTF" },
+    { type: "PWH", price: 60000, time: 0, group: "HTF", source: "EXCHANGE_UTC", sessionModel: "CRYPTO_24X7", activeFrom: daily[0].closeTime },
+    { type: "PDH", price: 50000, time: 0, group: "HTF", source: "EXCHANGE_UTC", sessionModel: "CRYPTO_24X7", tradingDayId: "1970-01-01", activeFrom: daily[0].closeTime },
   ]);
   assert.deepEqual(l.sellSide, [
-    { type: "PDL", price: 48000, time: 0, group: "HTF" },
-    { type: "PWL", price: 52000, time: 0, group: "HTF" },
+    { type: "PDL", price: 48000, time: 0, group: "HTF", source: "EXCHANGE_UTC", sessionModel: "CRYPTO_24X7", tradingDayId: "1970-01-01", activeFrom: daily[0].closeTime },
+    { type: "PWL", price: 52000, time: 0, group: "HTF", source: "EXCHANGE_UTC", sessionModel: "CRYPTO_24X7", activeFrom: daily[0].closeTime },
   ]);
-  // ICT 优先级：买侧 PWH > PDH，卖侧 PWL > PDL（time = 形成该位 K 线的开盘时间）
-  assert.deepEqual(l.primaryBuyDraw, { type: "PWH", price: 60000, time: 0, group: "HTF" });
-  assert.deepEqual(l.primarySellDraw, { type: "PWL", price: 52000, time: 0, group: "HTF" });
+  // range/price 未知时不伪造固定主 Draw；主目标由 analyzeBias 绑定 dealing range 后生成。
+  assert.equal(l.primaryBuyDraw, null);
+  assert.equal(l.primarySellDraw, null);
 });
 
 test("EQH: 0.2% 容差内的多个高点归为等高点（含时间信息）", () => {
@@ -55,7 +67,7 @@ test("EQH: 0.2% 容差内的多个高点归为等高点（含时间信息）", (
   });
 });
 
-test("EQL: 同理，取聚类中的最低点", () => {
+test("EQL: 非传递聚类不会把首尾已超容差的价位链式吞并", () => {
   const swings = [
     { type: "LOW", price: 90.1, index: 1, time: 1001 },
     { type: "LOW", price: 90.2, index: 2, time: 1002 },
@@ -63,11 +75,11 @@ test("EQL: 同理，取聚类中的最低点", () => {
     { type: "LOW", price: 110, index: 4, time: 1004 },
   ];
   assert.deepEqual(findEqualLows(swings, 0.002), {
-    price: 90.1,
-    touches: 3,
-    firstIndex: 1,
+    price: 90.2,
+    touches: 2,
+    firstIndex: 2,
     lastIndex: 3,
-    firstTime: 1001,
+    firstTime: 1002,
     lastTime: 1003,
   });
 });
@@ -112,7 +124,7 @@ const structNoExt = {
   lastLow: null,
 };
 
-test("V1.5 Bullish: PWH > EQH > PDH（都在价格上方）→ 主 Draw = PWH，备选按近到远", () => {
+test("动态 Draw：多头不套固定周高优先级，结合距离与池质量选择 PDH", () => {
   const liquidity = {
     buySide: [
       { type: "PWH", price: 190 },
@@ -122,18 +134,17 @@ test("V1.5 Bullish: PWH > EQH > PDH（都在价格上方）→ 主 Draw = PWH，
     sellSide: [],
   };
   const r = rankLiquidityTargets(structNoExt, liquidity, "BULLISH", 150);
-  assert.equal(r.primary.type, "PWH");
-  assert.equal(r.primary.price, 190);
-  assert.equal(r.primary.priority, 2);
-  assert.ok(r.primary.reason.includes("Previous Week High"));
-  // 备选从近到远（多头升序）：PDH 170 最近 → EQH 185
+  assert.equal(r.primary.type, "PDH");
+  assert.equal(r.primary.price, 170);
+  assert.equal(r.primary.priority, null);
+  // 备选仍按价格先后：EQH 185 → PWH 190
   assert.deepEqual(r.alternatives, [
-    { type: "PDH", price: 170 },
-    { type: "EQH", price: 185 },
+    { type: "EQH", price: 185, score: r.alternatives[0].score },
+    { type: "PWH", price: 190, score: r.alternatives[1].score },
   ]);
 });
 
-test("V1.5 Bearish: PWL < EQL < PDL（都在价格下方）→ 主 Draw = PWL，备选按近到远", () => {
+test("动态 Draw：空头可优先选择更集中的 EQL，而不是无条件选择 PWL", () => {
   const liquidity = {
     buySide: [],
     sellSide: [
@@ -143,12 +154,10 @@ test("V1.5 Bearish: PWL < EQL < PDL（都在价格下方）→ 主 Draw = PWL，
     ],
   };
   const r = rankLiquidityTargets({ ...structNoExt, direction: "BEARISH" }, liquidity, "BEARISH", 150);
-  assert.equal(r.primary.type, "PWL");
-  assert.equal(r.primary.priority, 2);
-  // 备选从近到远（空头降序）：PDL 120 最近 → EQL 110 → PWL 100
-  assert.deepEqual(r.alternatives, [
-    { type: "PDL", price: 120 },
-    { type: "EQL", price: 110 },
+  assert.equal(r.primary.type, "EQL");
+  assert.equal(r.primary.priority, null);
+  assert.deepEqual(r.alternatives.map(({ type, price }) => ({ type, price })), [
+    { type: "PDL", price: 120 }, { type: "PWL", price: 100 },
   ]);
 });
 
@@ -159,7 +168,7 @@ test("V1.5 无任何目标 → primary 为 null（Draw = NONE）", () => {
   assert.deepEqual(r.alternatives, []);
 });
 
-test("V1.5 External High 优先级最高：外部结构高点 > PWH", () => {
+test("structure 的历史 external 字段不再被当成 ERL", () => {
   const structure = {
     direction: "BULLISH",
     externalSwingHigh: 220, // 未突破的外部高点 → 首要 BSL 目标
@@ -169,10 +178,8 @@ test("V1.5 External High 优先级最高：外部结构高点 > PWH", () => {
   };
   const liquidity = { buySide: [{ type: "PWH", price: 190 }], sellSide: [] };
   const r = rankLiquidityTargets(structure, liquidity, "BULLISH", 150);
-  assert.equal(r.primary.type, "EXTERNAL_HIGH");
-  assert.equal(r.primary.price, 220);
-  assert.equal(r.primary.priority, 1);
-  assert.equal(r.alternatives[0].type, "PWH");
+  assert.equal(r.primary.type, "PWH");
+  assert.equal(r.primary.price, 190);
 });
 
 test("V1.5 已突破的方向侧目标被过滤（价格不在正确一侧）", () => {
@@ -201,6 +208,7 @@ test("V2.1 findPremarketRange: 粗周期不会把 09:30 后半小时混入盘前
   assert.equal(r.high, 102.4); // 21:00-22:00 北京 = 09:00-10:00 ET，跨过 09:30，整根排除
   assert.equal(r.low, 98); // 最低 low
   assert.equal(r.bars, 5);
+  assert.equal(r.completed, false, "粗周期未覆盖 09:00-09:30，不得冒充完整盘前区间");
   assert.equal(r.date, "2026-08-07");
   assert.equal(r.highTime, T0 + 4 * 3600_000);
   assert.equal(r.lowTime, T0);
@@ -239,21 +247,48 @@ test("V2.1 computeLiquidity: 美股关联 symbol 才注入 PRE_MARKET_HIGH/LOW",
   const daily = [mkCandle(0, 50000, 48000, true)];
   const weekly = [mkCandle(0, 60000, 52000, true)];
   const T0 = Date.UTC(2026, 7, 7, 8, 0);
-  const h1 = [0, 1, 2, 3, 4, 5].map((i) => ({
-    time: T0 + i * 3600_000,
+  const m5 = Array.from({ length: 66 }, (_, i) => ({
+    time: T0 + i * 5 * 60_000,
     open: 100,
     high: 102 + i * 0.1,
     low: 98 + i * 0.1,
     close: 101,
-    closeTime: T0 + (i + 1) * 3600_000,
+    closeTime: T0 + (i + 1) * 5 * 60_000,
   }));
-  const l = computeLiquidity(daily, weekly, [], 0.002, Date.UTC(2026, 7, 7, 14, 30), 150, h1, null, { symbol: "MUUSDT" });
+  const l = computeLiquidity(daily, weekly, [], 0.002, Date.UTC(2026, 7, 7, 14, 30), 150, m5, null, { symbol: "MUUSDT" });
   const pmh = l.buySide.find((t) => t.type === "PRE_MARKET_HIGH");
   const pml = l.sellSide.find((t) => t.type === "PRE_MARKET_LOW");
-  assert.ok(pmh && pmh.price === 102.4);
+  assert.ok(pmh && pmh.price === 108.5);
   assert.ok(pml && pml.price === 98);
-  assert.equal(pmh.time, T0 + 4 * 3600_000);
+  assert.equal(pmh.time, T0 + 65 * 5 * 60_000);
   assert.equal(pml.time, T0);
+});
+
+test("周末只保留上个交易日盘前为历史参考，不冒充当前 Session Range", () => {
+  const start = Date.UTC(2026, 7, 7, 8); // Fri 04:00 EDT
+  const bars = Array.from({ length: 66 }, (_, i) => ({
+    time: start + i * 300_000,
+    closeTime: start + (i + 1) * 300_000,
+    open: 100, high: 105 + i / 100, low: 95, close: 100,
+  }));
+  const sunday = Date.UTC(2026, 7, 9, 14); // Sun 10:00 EDT
+  const liquidity = computeLiquidity([], [], [], null, sunday, 150, bars, null, { symbol: "MUUSDT" });
+  assert.equal(liquidity.sessionRange, null);
+  assert.equal(liquidity.referenceSessionRange.name, "PRE_MARKET");
+  assert.equal(liquidity.referenceSessionRange.tradingDayId, "2026-08-07");
+});
+
+test("盘前缓存从 06:00 开始时，即使已到 09:30 也保持未完成", () => {
+  const start = Date.UTC(2026, 7, 7, 10); // 06:00 EDT
+  const bars = Array.from({ length: 42 }, (_, i) => ({
+    time: start + i * 300_000, closeTime: start + (i + 1) * 300_000,
+    open: 100, high: 105 + i, low: 95, close: 100,
+  }));
+  const range = findPremarketRange(bars, Date.UTC(2026, 7, 7, 14));
+  assert.equal(range.dataComplete, false);
+  assert.equal(range.completed, false);
+  const liquidity = computeLiquidity([], [], [], null, Date.UTC(2026, 7, 7, 14), 150, bars, null, { symbol: "MUUSDT" });
+  assert.equal(liquidity.buySide.some((x) => x.type === "PRE_MARKET_HIGH"), false);
 });
 
 test("EQH: 第二触点需等右侧 2 根 4H K 收盘后才生效", () => {
@@ -312,8 +347,78 @@ test("V2.1 盘前流动性只对显式美股关联标的启用", () => {
   assert.equal(btc.buySide.some((x) => x.type === "PRE_MARKET_HIGH"), false);
 });
 
-test("V2.0 rankLiquidityTargets: 优先级 PWH > PDH > PRE_MARKET_HIGH > EQH", () => {
-  // 无 PWH：PDH 优先于盘前高
+test("24×7 Crypto：Asia 20:00-00:00 ET 完成后才形成 ASIA_HIGH/LOW", () => {
+  const start = Date.UTC(2026, 7, 7, 0, 0); // 2026-08-06 20:00 EDT
+  const bars = Array.from({ length: 48 }, (_, i) => ({
+    time: start + i * 5 * 60_000,
+    closeTime: start + (i + 1) * 5 * 60_000,
+    open: 100, high: i === 10 ? 108 : 104, low: i === 20 ? 92 : 96, close: 100,
+  }));
+  const partial = findAsiaRange(bars, start + 2 * 60 * 60_000);
+  assert.equal(partial.completed, false);
+  const complete = findAsiaRange(bars, start + 4 * 60 * 60_000);
+  assert.equal(complete.completed, true);
+  assert.equal(complete.tradingDayId, "2026-08-07");
+  assert.equal(complete.high, 108);
+  assert.equal(complete.low, 92);
+
+  const before = computeLiquidity([], [], [], 0.002, start + 2 * 60 * 60_000, 150, bars, null, { symbol: "BTCUSDT" });
+  assert.equal(before.buySide.some((x) => x.type === "ASIA_HIGH"), false);
+  const after = computeLiquidity([], [], [], 0.002, start + 4 * 60 * 60_000, 150, bars, null, { symbol: "BTCUSDT" });
+  assert.equal(after.buySide.find((x) => x.type === "ASIA_HIGH").price, 108);
+  assert.equal(after.sellSide.find((x) => x.type === "ASIA_LOW").price, 92);
+  assert.equal(after.sessionRange.name, "ASIA");
+});
+
+test("商品 24×5：周六晚伪 Asia 数据和周日午夜价不得成为流动性参考", () => {
+  const start = Date.UTC(2026, 7, 16, 0, 0); // 周六 20:00 EDT
+  const bars = Array.from({ length: 49 }, (_, i) => ({
+    time: start + i * 5 * 60_000,
+    closeTime: start + (i + 1) * 5 * 60_000,
+    open: 100,
+    high: i === 10 ? 108 : 104,
+    low: i === 20 ? 92 : 96,
+    close: 100,
+  }));
+  const now = start + 5 * 60 * 60_000;
+  const commodity = computeLiquidity([], [], [], null, now, 150, bars, null, { symbol: "XAUUSDT" });
+  assert.equal(commodity.buySide.some((x) => x.type === "ASIA_HIGH"), false);
+  assert.equal(commodity.sellSide.some((x) => x.type === "ASIA_LOW"), false);
+  assert.equal(commodity.sessionRange, null);
+  assert.equal(commodity.referenceSessionRange, null);
+  assert.deepEqual(commodity.referencePrices, {});
+
+  const crypto = computeLiquidity([], [], [], null, now, 150, bars, null, { symbol: "BTCUSDT" });
+  assert.equal(crypto.buySide.some((x) => x.type === "ASIA_HIGH"), true);
+  assert.equal(crypto.referencePrices.newYorkMidnightOpen.type, "NEW_YORK_MIDNIGHT_OPEN");
+});
+
+test("Asia 缓存从 22:00 开始时，即使到午夜也不得标记完成", () => {
+  const start = Date.UTC(2026, 7, 7, 2); // 08/06 22:00 EDT
+  const bars = Array.from({ length: 24 }, (_, i) => ({
+    time: start + i * 300_000, closeTime: start + (i + 1) * 300_000,
+    open: 100, high: 105, low: 95 - i, close: 100,
+  }));
+  const range = findAsiaRange(bars, Date.UTC(2026, 7, 7, 5));
+  assert.equal(range.dataComplete, false);
+  assert.equal(range.completed, false);
+  const liquidity = computeLiquidity([], [], [], null, Date.UTC(2026, 7, 7, 5), 150, bars, null, { symbol: "BTCUSDT" });
+  assert.equal(liquidity.sellSide.some((x) => x.type === "ASIA_LOW"), false);
+});
+
+test("市场画像隔离：股票关联不注入 ASIA，Crypto 不注入 PRE_MARKET", () => {
+  const asiaStart = Date.UTC(2026, 7, 7, 0, 0);
+  const asia = Array.from({ length: 48 }, (_, i) => ({ time: asiaStart + i * 300_000, closeTime: asiaStart + (i + 1) * 300_000, high: 105, low: 95, close: 100 }));
+  const equity = computeLiquidity([], [], [], 0.002, asiaStart + 4 * 3600_000, 150, asia, null, { symbol: "MUUSDT" });
+  assert.equal(equity.buySide.some((x) => x.type === "ASIA_HIGH"), false);
+
+  const preStart = Date.UTC(2026, 7, 7, 8, 0);
+  const pre = Array.from({ length: 66 }, (_, i) => ({ time: preStart + i * 300_000, closeTime: preStart + (i + 1) * 300_000, high: 105, low: 95, close: 100 }));
+  const crypto = computeLiquidity([], [], [], 0.002, preStart + 6 * 3600_000, 150, pre, null, { symbol: "BTCUSDT" });
+  assert.equal(crypto.buySide.some((x) => x.type === "PRE_MARKET_HIGH"), false);
+});
+
+test("动态 Draw 不存在 PWH>PDH>盘前>EQH 的无条件固定顺序", () => {
   const l1 = {
     buySide: [
       { type: "PDH", price: 160 },
@@ -323,9 +428,8 @@ test("V2.0 rankLiquidityTargets: 优先级 PWH > PDH > PRE_MARKET_HIGH > EQH", (
     sellSide: [],
   };
   const r1 = rankLiquidityTargets(structNoExt, l1, "BULLISH", 100);
-  assert.equal(r1.primary.type, "PDH");
-  assert.equal(r1.primary.priority, 3);
-  // 无 PWH/PDH：盘前高优先于 EQH
+  assert.equal(r1.primary.type, "EQH");
+  assert.equal(r1.primary.priority, null);
   const l2 = {
     buySide: [
       { type: "PRE_MARKET_HIGH", price: 155 },
@@ -334,9 +438,7 @@ test("V2.0 rankLiquidityTargets: 优先级 PWH > PDH > PRE_MARKET_HIGH > EQH", (
     sellSide: [],
   };
   const r2 = rankLiquidityTargets(structNoExt, l2, "BULLISH", 100);
-  assert.equal(r2.primary.type, "PRE_MARKET_HIGH");
-  assert.equal(r2.primary.priority, 4);
-  assert.ok(r2.primary.reason.includes("Pre-market"));
+  assert.equal(r2.primary.type, "EQH");
 });
 
 test("流动性状态：wick 收回=SWEPT，收盘穿越=BROKEN，未触及=ACTIVE", () => {
@@ -344,6 +446,60 @@ test("流动性状态：wick 收回=SWEPT，收盘穿越=BROKEN，未触及=ACTI
   assert.deepEqual(liquidityStateForLevel(level, true, [{ high: 99, close: 98, closeTime: 2 }], 1), { state: "ACTIVE" });
   assert.deepEqual(liquidityStateForLevel(level, true, [{ high: 101, close: 99, closeTime: 2 }], 1), { state: "SWEPT", sweptAt: 2 });
   assert.deepEqual(liquidityStateForLevel(level, true, [{ high: 102, close: 101, closeTime: 2 }], 1), { state: "BROKEN", brokenAt: 2 });
+  assert.deepEqual(liquidityStateForLevel(level, true, [{ high: 101, close: 100, closeTime: 2 }], 1), { state: "BROKEN", brokenAt: 2 });
+  assert.deepEqual(liquidityStateForLevel(level, false, [{ low: 99, close: 100, closeTime: 2 }], 1), { state: "BROKEN", brokenAt: 2 });
+});
+
+test("ERL/IRL：外部边界来自同一个 dealing range，FVG只进IRL、不进扫损池", () => {
+  const candles = Array.from({ length: 8 }, (_, i) => ({ time: i, closeTime: i + 0.9, open: 100, high: 110, low: 90, close: 100 }));
+  const base = {
+    buySide: [{ type: "PWH", price: 130 }, { type: "PDH", price: 110 }],
+    sellSide: [{ type: "PWL", price: 70 }, { type: "PDL", price: 90 }],
+  };
+  const range = { high: 120, low: 80, highIndex: 2, lowIndex: 1, rangeType: "IMPULSE_BULLISH" };
+  const fvg = { type: "BULLISH_FVG", top: 106, bottom: 104, quality: "STRUCTURE", executable: true, status: "OPEN" };
+  const result = applyDealingRangeLiquidity({ liquidity: base, range, swings: [{ type: "HIGH", price: 112, index: 3 }], fvgs: [fvg], candles, price: 100 });
+  assert.equal(result.externalRange.high, 120);
+  assert.equal(result.buySide.find((x) => x.type === "EXTERNAL_HIGH").rangeClass, "ERL");
+  assert.equal(result.buySide.find((x) => x.type === "PDH").rangeClass, "IRL");
+  assert.equal(result.buySide.some((x) => x.type === "INTERNAL_FVG"), false);
+  assert.equal(result.internalRange.some((x) => x.type === "INTERNAL_FVG" && x.liquidityKind === "IMBALANCE"), true);
+  assert.equal(result.primaryBuyDraw.type, "EXTERNAL_HIGH");
+});
+
+test("RECENT 观察区间不得生成 ERL/IRL 或 Range Draw", () => {
+  const base = {
+    buySide: [{ type: "PDH", price: 125 }],
+    sellSide: [{ type: "PDL", price: 75 }],
+  };
+  const out = applyDealingRangeLiquidity({
+    liquidity: base,
+    range: { rangeType: "RECENT", high: 120, low: 80, equilibrium: 100 },
+    swings: [{ type: "HIGH", price: 110, index: 2 }, { type: "LOW", price: 90, index: 3 }],
+    price: 100,
+  });
+  assert.equal(out.externalRange, null);
+  assert.deepEqual(out.internalRange, []);
+  assert.equal(out.primaryBuyDraw, null);
+  assert.equal(out.primarySellDraw, null);
+  assert.equal(out.buySide.some((x) => x.type === "EXTERNAL_HIGH" || x.type === "INTERNAL_HIGH"), false);
+  assert.equal(out.sellSide.some((x) => x.type === "EXTERNAL_LOW" || x.type === "INTERNAL_LOW"), false);
+});
+
+test("EQH 支持多个独立池，且每个池首尾都直接满足容差", () => {
+  const clusters = findEqualHighClusters([
+    { type: "HIGH", price: 100, index: 1 }, { type: "HIGH", price: 100.1, index: 2 },
+    { type: "HIGH", price: 110, index: 3 }, { type: "HIGH", price: 110.1, index: 4 },
+  ], 0.002);
+  assert.equal(clusters.length, 2);
+  assert.deepEqual(clusters.map((x) => x.touches), [2, 2]);
+});
+
+test("EQH/EQL 容差随4H波动率调整并限制上下界", () => {
+  const calm = Array.from({ length: 15 }, (_, i) => ({ high: 100.1, low: 99.9, close: 100, time: i }));
+  const volatile = Array.from({ length: 15 }, (_, i) => ({ high: 103, low: 97, close: 100, time: i }));
+  assert.equal(resolveEqualLevelTolerance(calm), 0.0005);
+  assert.equal(resolveEqualLevelTolerance(volatile), 0.003);
 });
 
 test("Draw 排名排除 SWEPT/BROKEN，只选择 ACTIVE 流动性", () => {

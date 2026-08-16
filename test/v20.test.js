@@ -50,7 +50,7 @@ test("未传 htfDirection → 按 NEUTRAL 处理", () => {
 const struct = { direction: "BULLISH", protectedLow: 100 };
 const draw = { primary: { type: "PWH", price: 200 } };
 const validLocation = { location: "DISCOUNT", context: "DISCOUNT_VALID" };
-const lateLocation = { location: "DISCOUNT", context: "LATE_IMPULSE" };
+const premiumLocation = { location: "PREMIUM", context: "PREMIUM" };
 const wideLocation = { location: "DISCOUNT", context: "DISCOUNT_VALID", high: 200, low: 100 };
 const pdAligned = { primary: { type: "BULLISH_FVG", price: 120 } };
 
@@ -70,13 +70,12 @@ test("INVALIDATED → 硬门槛不通过 → LOW, score 0", () => {
   assert.equal(c.score, 0);
 });
 
-test("CONTINUATION + HTF 同向 + 全质量（VALID 回撤位）→ MEDIUM（score 65）", () => {
-  // V2.3 数据修正：VALID 折价/溢价位是负因子（未来 5 天易破保护位）
+test("CONTINUATION + HTF 同向 + 全质量 → HIGH（位置不改变方向评分）", () => {
   const c = computeConfidence({ bias: "BULLISH", structure: struct, structureStatus: "VALID", draw, location: validLocation, pdArray: pdAligned, price: 120, scenario: contBull });
-  assert.equal(c.level, "MEDIUM"); // 25+15+25+10−10 = 65 < 75
-  assert.equal(c.score, 65);
-  assert.equal(c.confluenceScore, 65);
-  assert.ok(c.factors.some((f) => f.name === "Retrace location (weak)"));
+  assert.equal(c.level, "HIGH"); // 25+15+25+10 = 75
+  assert.equal(c.score, 75);
+  assert.equal(c.confluenceScore, 75);
+  assert.ok(!c.factors.some((f) => f.name.includes("location") || f.name.includes("impulse")));
   assert.deepEqual(c.checks, {
     structureConfirmed: true,
     protectedValid: true,
@@ -86,33 +85,32 @@ test("CONTINUATION + HTF 同向 + 全质量（VALID 回撤位）→ MEDIUM（sco
   });
 });
 
-test("CONTINUATION + LATE_IMPULSE + PD aligned → HIGH（趋势惯性为正因子）", () => {
-  const c = computeConfidence({ bias: "BULLISH", structure: struct, structureStatus: "VALID", draw, location: lateLocation, pdArray: pdAligned, price: 120, scenario: contBull });
-  assert.equal(c.level, "HIGH"); // 25+15+25+10+15 = 90 ≥ 75
-  assert.equal(c.score, 90);
-  assert.ok(c.factors.some((f) => f.name === "Trend continuation"));
-  assert.ok(c.factors.some((f) => f.name === "Late impulse momentum"));
+test("Premium 与 Discount 不改变方向置信分，只改变执行状态", () => {
+  const discount = computeConfidence({ bias: "BULLISH", structure: struct, structureStatus: "VALID", draw, location: validLocation, pdArray: pdAligned, price: 120, scenario: contBull });
+  const premium = computeConfidence({ bias: "BULLISH", structure: struct, structureStatus: "VALID", draw, location: premiumLocation, pdArray: pdAligned, price: 120, scenario: contBull });
+  assert.equal(premium.score, discount.score);
+  assert.equal(premium.score, 75);
 });
 
 test("REVERSAL_ATTEMPT 最多 MEDIUM（反转不默认 HIGH）", () => {
-  const c = computeConfidence({ bias: "BULLISH", structure: struct, structureStatus: "VALID", draw, location: lateLocation, pdArray: pdAligned, price: 120, scenario: revBull });
-  assert.equal(c.level, "MEDIUM"); // 5−10+25+10+15 = 45 < 75
-  assert.equal(c.score, 45);
+  const c = computeConfidence({ bias: "BULLISH", structure: struct, structureStatus: "VALID", draw, location: premiumLocation, pdArray: pdAligned, price: 120, scenario: revBull });
+  assert.equal(c.level, "LOW"); // 5−10+25+10 = 30
+  assert.equal(c.score, 30);
   assert.ok(c.factors.some((f) => f.name === "HTF conflict"));
 });
 
 test("Near Draw Target（<2%）→ +5（近目标惯性）", () => {
   const nearDraw = { primary: { type: "PDH", price: 121 } }; // (121-120)/120 ≈ 0.8%
   const c = computeConfidence({ bias: "BULLISH", structure: struct, structureStatus: "VALID", draw: nearDraw, location: validLocation, pdArray: pdAligned, price: 120, scenario: contBull });
-  assert.equal(c.level, "MEDIUM"); // 25+15+25+10−10+5 = 70
-  assert.equal(c.score, 70);
+  assert.equal(c.level, "HIGH"); // 25+15+25+10+5 = 80
+  assert.equal(c.score, 80);
   assert.ok(c.factors.some((f) => f.name === "Near draw target"));
 });
 
 test("Wide Range（跨度 >25% 价格）→ -10", () => {
   const c = computeConfidence({ bias: "BULLISH", structure: struct, structureStatus: "VALID", draw, location: wideLocation, pdArray: pdAligned, price: 120, scenario: contBull });
-  assert.equal(c.level, "MEDIUM"); // 25+15+25+10−10−10 = 55
-  assert.equal(c.score, 55);
+  assert.equal(c.level, "MEDIUM"); // 25+15+25+10−10 = 65
+  assert.equal(c.score, 65);
   assert.ok(c.factors.some((f) => f.name === "Wide range"));
 });
 
@@ -219,7 +217,7 @@ test("V2.0 engine: htfDirection 注入 → scenario + confidence 随结果输出
   assert.equal(r.scenario.state, "TREND_CONTINUATION");
   assert.equal(r.scenario.label, "BULLISH_CONTINUATION");
   assert.equal(r.confidence.level, "MEDIUM");
-  assert.equal(r.confidence.score, 55); // V2.3 数据驱动：25+15+25+10−10(VALID)−10(Wide range 66.7%)=55
+  assert.equal(r.confidence.score, 65); // 25+15+25+10−10(Wide range 66.7%)；位置不改方向评分
   assert.ok(r.confidence.factors.some((f) => f.name === "Wide range"));
   assert.equal(r.executionState, "READY"); // DISCOUNT_VALID
 });

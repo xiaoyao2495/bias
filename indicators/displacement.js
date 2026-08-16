@@ -1,12 +1,11 @@
 import { marketNow } from "../utils/marketClock.js";
 
 /**
- * displacement.js — 位移 K 检测（ICT 2022：BODY + VOLUME）
+ * displacement.js — 位移 K 检测（ICT 2022：价格快速、单边地离开区间）
  *
- * ICT 2022 定义：Displacement = 动量 + 机构的量能，是价格快速离开某区域的行为。
- * 两条是位移的判定条件（缺一不可）：
- *   1. BODY（动量）  : 实体 |close−open| ≥ 阈值倍 × 前 lookback 根平均实体（大实体 K）
- *   2. VOLUME（量能）: 位移 K 量 ≥ 阈值倍 × 前 volumeLookback 根均量（机构行为必须带量）
+ * 课程不把中心化交易所成交量定义成 displacement 的硬门槛（外汇等市场也没有统一成交量）。
+ * 工程判定使用可观察的价格交付：大实体、实体占整根比例高、收盘靠近推动方向极值。
+ * 成交量只作为 confluence 输出；调用方确有需要时可用 requireVolume 显式开启门槛。
  *
  * FVG 与结构突破不是位移定义的必要条件，作为标签输出（可能为 null）：
  *   - structureBreak : 位移收盘越过的最近 Swing（BOS）。位移是验证 MSS/BOS 的动能，
@@ -15,8 +14,8 @@ import { marketNow } from "../utils/marketClock.js";
  *
  * 输入用 5m K 线：位移是分钟级价格行为，5m 粒度能捕捉"刚刚"的强动量 K；
  * swing 参照用 ICT 最小窗口（每侧 1 根），与 5m MSS/BOS 检测（mss.js）一致。
- * 成交量：优先 quoteVol（USDT 成交额，最能代表资金）；K 线源不提供成交量时
- * （如测试 fixture）退化为纯实体判定——真实行情恒有 quoteVol，量门槛恒生效。
+ * 成交量：优先 quoteVol（USDT 成交额，最能代表资金）；真实行情有量时输出 volumeRatio
+ * 供共振评分/审计，但默认仍以价格交付确认 displacement。
  */
 
 /**
@@ -32,7 +31,15 @@ import { marketNow } from "../utils/marketClock.js";
  *   fvg: { top, bottom, middleIndex } | null（缺口标签）
  *   volumeRatio: 位移 K 量 / 前 volumeLookback 根均量（无成交量数据时为 null）
  */
-export function findDisplacements(h5m, { lookback = 20, threshold = 1.5, volumeLookback = 20, volumeThreshold = 1.5 } = {}) {
+export function findDisplacements(h5m, {
+  lookback = 20,
+  threshold = 1.5,
+  minBodyFraction = 0.6,
+  minCloseLocation = 0.75,
+  volumeLookback = 20,
+  volumeThreshold = 1.5,
+  requireVolume = false,
+} = {}) {
   const closed = h5m.filter((k) => k.closeTime <= marketNow());
   if (closed.length <= lookback) return [];
 
@@ -67,6 +74,13 @@ export function findDisplacements(h5m, { lookback = 20, threshold = 1.5, volumeL
     const c = closed[i];
     const body = Math.abs(c.close - c.open);
     if (body <= 0) continue;
+    // 使用包含 OHLC 的真实包络，既防御脏数据，也避免测试/交易所异常字段造成负比例。
+    const effectiveHigh = Math.max(c.high, c.open, c.close);
+    const effectiveLow = Math.min(c.low, c.open, c.close);
+    const fullRange = effectiveHigh - effectiveLow;
+    if (!(fullRange > 0)) continue;
+    const bodyFraction = body / fullRange;
+    if (bodyFraction < minBodyFraction) continue;
     let sum = 0;
     for (let j = i - lookback; j < i; j++) sum += Math.abs(closed[j].close - closed[j].open);
     const avgBody = sum / lookback;
@@ -74,7 +88,11 @@ export function findDisplacements(h5m, { lookback = 20, threshold = 1.5, volumeL
     const ratio = body / avgBody;
     if (ratio < threshold) continue;
 
-    // 成交量确认（ICT 2022：机构行为带量）—— 量 ≥ 前 volumeLookback 根均量 × volumeThreshold
+    const dir = c.close >= c.open ? "UP" : "DOWN";
+    const closeLocation = dir === "UP" ? (c.close - effectiveLow) / fullRange : (effectiveHigh - c.close) / fullRange;
+    if (closeLocation < minCloseLocation) continue;
+
+    // 成交量仅作辅助证据；默认不因单一交易所量能不足否决价格位移。
     let volumeRatio = null;
     if (hasVolData) {
       const vFrom = Math.max(0, i - volumeLookback);
@@ -83,12 +101,11 @@ export function findDisplacements(h5m, { lookback = 20, threshold = 1.5, volumeL
       const avgVol = vsum / (i - vFrom);
       if (avgVol > 0) {
         const vr = volOf(c) / avgVol;
-        if (vr < volumeThreshold) continue;
+        if (requireVolume && vr < volumeThreshold) continue;
         volumeRatio = vr;
       }
     }
 
-    const dir = c.close >= c.open ? "UP" : "DOWN";
     // 标签 1：结构突破（BOS）—— 收盘越过最近 swing；区间内强动量可能没有 → null
     const swingRef = dir === "UP" ? lastHighAt[i] : lastLowAt[i];
     const structureBreak = swingRef && (dir === "UP" ? c.close > swingRef.price : c.close < swingRef.price)
@@ -104,17 +121,18 @@ export function findDisplacements(h5m, { lookback = 20, threshold = 1.5, volumeL
       body,
       avgBody,
       ratio,
+      bodyFraction,
+      closeLocation,
       volumeRatio,
       // 位移质量（审计/展示）：ratio ≥ 2× 平均实体为强位移（与 4H 收盘报告的 strongOppositeDisp 同语义）
-      quality: ratio >= 2 ? "HIGH" : "MEDIUM",
+      quality: ratio >= 2 && bodyFraction >= 0.7 && closeLocation >= 0.8 ? "HIGH" : "MEDIUM",
       close: c.close,
       index: i, // 在 closed（已收盘）数组中的索引——供 mss.js 与结构事件对齐打标
-      // FVG 标签真正确认的 K 索引（P1 防前视）：
+      // 关联 FVG 真正确认的 K 索引（P1 防前视；位移本身仍在 i 收盘确认）：
       //   位移 K 为第三根 → FVG 由位移 K 自身确认 → confirmationIndex = i
       //   位移 K 为中间根 → FVG 由下一根（i+1）确认 → confirmationIndex = i + 1
-      //   无 FVG → 位移（实体+量）在自身收盘即成立 → confirmationIndex = i
-      // 消费方（mss.js）必须确认 confirmationIndex 已到（<= 当前已收盘索引）才能使用，
-      // 否则逐根历史扫描会提前一根读到"未来的确认 K"。
+      //   无 FVG → 没有额外等待，confirmationIndex = i
+      // 消费方可立即使用 displacement；只有消费 d.fvg 时必须确认该索引已经到达。
       confirmationIndex: fvg ? fvg.middleIndex + 1 : i,
       structureBreak,
       fvg,

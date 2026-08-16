@@ -4,34 +4,31 @@
  * 用法：
  *   node scripts/analyze.js BTCUSDT [limit]
  */
-import { get4hKlines, getDailyKlines, getWeeklyKlines } from "../data/binance.js";
 import { detectStructureEvents } from "../indicators/mss.js";
-import { analyzeBias } from "../engine/analyzeBias.js";
+import { analyzeReplayPoint, loadReplayHistory, REPLAY_HISTORY_COUNTS } from "../engine/replayPipeline.js";
 import { formatReport } from "../report/formatter.js";
+import { marketNow } from "../utils/marketClock.js";
 
 const symbol = process.argv[2] || "BTCUSDT";
-const limit = Number(process.argv[3]) || 500;
+// 默认与 Monitor / Scanner / Replay 共用 5000 根 4H 冷启动窗口；显式 limit 仍保留为
+// 调试开关，但短窗口输出不应拿来与生产 Range version 做逐字段比较。
+const limit = Number(process.argv[3]) || REPLAY_HISTORY_COUNTS.h4;
 
 async function main() {
   console.error(`正在获取 ${symbol} 数据...`);
 
-  const [candles4h, daily, weekly] = await Promise.all([
-    get4hKlines(symbol, limit),
-    getDailyKlines(symbol, 30),
-    getWeeklyKlines(symbol, 10),
-  ]);
-
-  const price = candles4h[candles4h.length - 1].close;
-
-  // 共用分析链路（与监控/回放一致，engine/analyzeBias.js）：内部按 time 截断日/周线
-  // 并注入 htfDirection 用于 Scenario 判定——此前缺该参数导致 HTF 恒为 NEUTRAL，与监控结果不一致
-  const { structure, liquidity, location, pdArray, bias } = analyzeBias({
-    candles: candles4h,
-    daily,
-    weekly,
-    price,
-    time: candles4h[candles4h.length - 1].closeTime,
+  const cutoff = marketNow();
+  const history = await loadReplayHistory({
+    symbol,
+    earliestCutoff: cutoff,
+    h4Count: limit,
+    dailyCount: REPLAY_HISTORY_COUNTS.daily,
+    weeklyCount: REPLAY_HISTORY_COUNTS.weekly,
   });
+  const point = analyzeReplayPoint({ symbol, cutoff, history });
+  const candles4h = point.input.candles;
+  const price = point.price;
+  const { structure, liquidity, location, pdArray, bias } = point.result;
 
   // P1-B：MSS / BOS（4H 环境层，周期无关指标；传入当前价判断"哪个 swing 被打破"）
   const mss = detectStructureEvents(candles4h, { price });

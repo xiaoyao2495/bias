@@ -20,10 +20,10 @@ test("最终操作服从执行区，并在 1R 临界区保留旧状态", () => {
   assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "READY", planR: 1.06 }, { decision: "WAIT" }), "WATCH");
 });
 
-test("最终操作在 planR 0.5 与 LATE_IMPULSE 边界保留旧状态", () => {
+test("最终操作只在 planR 边界滞回，不再使用40%/60%区间边界", () => {
   assert.equal(resolveFinalAction({ decisionLabel: "NO TRADE", reason: "Direction correct but reward insufficient (planR < 0.5)", planR: 0.49 }, { decision: "WAIT" }), "WAIT");
   assert.equal(resolveFinalAction({ decisionLabel: "WAIT", planR: 0.51 }, { decision: "NO TRADE" }), "NO TRADE");
-  assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "WAIT", planR: 1.2, bias: "BULLISH", rangePosition: 0.41 }, { decision: "WATCH" }), "WATCH");
+  assert.equal(resolveFinalAction({ decisionLabel: "WATCH", execution: "WAIT", planR: 1.2, bias: "BULLISH", rangePosition: 0.41 }, { decision: "WATCH" }), "WAIT");
 });
 
 test("扫损去重历史会裁掉过期 key，并可跨 Top30 成员变化保留", () => {
@@ -33,31 +33,50 @@ test("扫损去重历史会裁掉过期 key，并可跨 Top30 成员变化保留
 });
 
 test("扫损通知逐事件消费，并兼容旧版去重 key", () => {
+  const now = 1_000;
   const events = [
-    { key: "1_BSL_PDH_105", legacyKey: "1_BSL" },
-    { key: "2_BSL_PWH_110", legacyKey: "2_BSL" },
+    { key: "1_BSL_PDH_105", legacyKey: "1_BSL", time: 100 },
+    { key: "2_BSL_PWH_110", legacyKey: "2_BSL", time: 200 },
   ];
-  assert.deepEqual(pendingSweepEvents(events, {}).map((x) => x.key), events.map((x) => x.key));
-  assert.deepEqual(pendingSweepEvents(events, { "1_BSL": 1 }).map((x) => x.key), ["2_BSL_PWH_110"]);
-  const upgraded = { key: "1_BSL_PDH_105_ICT_2022_CONFIRMED", legacyKey: "1_BSL", tier: 3 };
-  assert.deepEqual(pendingSweepEvents([upgraded], { "1_BSL": 1 }), [upgraded]);
-  const downgraded = { key: "1_BSL_PDH_105_RECLAIMED_RAID", baseKey: "1_BSL_PDH_105", legacyKey: "1_BSL", tier: 2 };
-  assert.deepEqual(pendingSweepEvents([downgraded], { "1_BSL_PDH_105_ICT_2022_CONFIRMED": 1 }), []);
+  assert.deepEqual(pendingSweepEvents(events, {}, now).map((x) => x.key), events.map((x) => x.key));
+  assert.deepEqual(pendingSweepEvents(events, { "1_BSL": 1 }, now).map((x) => x.key), ["2_BSL_PWH_110"]);
+  const upgraded = { key: "1_BSL_PDH_105_ICT_2022_CONFIRMED", legacyKey: "1_BSL", tier: 3, time: 100 };
+  assert.deepEqual(pendingSweepEvents([upgraded], { "1_BSL": 1 }, now), [upgraded]);
+  const downgraded = { key: "1_BSL_PDH_105_RECLAIMED_RAID", baseKey: "1_BSL_PDH_105", legacyKey: "1_BSL", tier: 2, time: 100 };
+  assert.deepEqual(pendingSweepEvents([downgraded], { "1_BSL_PDH_105_ICT_2022_CONFIRMED": 1 }, now), []);
   const merged = {
     key: "1_BSL_EXTERNAL_HIGH_105_LIQUIDITY_TAKEN",
     baseKey: "1_BSL_EXTERNAL_HIGH_105",
     sourceBaseKeys: ["1_BSL_EXTERNAL_HIGH_105", "1_BSL_PDH_105"],
     tier: 1,
+    time: 1,
   };
   assert.deepEqual(pendingSweepEvents([merged], { "1_BSL_PDH_105_LIQUIDITY_TAKEN": 1 }, 1), []);
+  assert.deepEqual(pendingSweepEvents([{ key: "missing_time", tier: 2 }], {}, now), []);
 });
 
-test("L1 只补报最近20分钟，L2/L3仍允许历史升级通知", () => {
+test("rangeId key 上线迁移：既有旧 L3 baseKey 可抑制同一历史事件重推", () => {
+  const event = {
+    tier: 3,
+    key: "1_BSL_DR_NEW_PDH_105_ICT_2022_CONFIRMED",
+    baseKey: "1_BSL_DR_NEW_PDH_105",
+    previousBaseKey: "1_BSL_PDH_105",
+    legacyKey: "1_BSL",
+    time: 1,
+  };
+  const pushed = { "1_BSL_PDH_105_ICT_2022_CONFIRMED": 123 };
+  assert.deepEqual(pendingSweepEvents([event], pushed, 1), []);
+});
+
+test("L1 只补报最近20分钟，L2/L3只在当前4小时检测窗内升级", () => {
   const now = 10_000_000;
   const oldTime = now - 21 * 60_000;
   const l1 = { key: "old_l1", tier: 1, time: oldTime };
   const l2 = { key: "old_l2", tier: 2, time: oldTime };
   assert.deepEqual(pendingSweepEvents([l1, l2], {}, now), [l2]);
+  const staleL2 = { key: "stale_l2", tier: 2, time: now - 5 * 3600_000 };
+  const staleL3 = { key: "stale_l3", tier: 3, time: now - 24 * 3600_000 };
+  assert.deepEqual(pendingSweepEvents([staleL2, staleL3], {}, now), []);
 });
 
 test("机会冷却兼容旧版滚动index key，部署后不重推同一FVG", () => {
@@ -115,7 +134,7 @@ test("buildSweep: 同价位多来源合并展示", () => {
       level: 0.1025, sweptPrice: 0.1026, close: 0.1026, time: 1, realtime: false,
     },
   });
-  assert.match(msg, /外部结构高点 \/ 昨日高点 \/ 内部摆动高点 0\.1025/);
+  assert.match(msg, /区间外部高点（ERL） \/ 昨日高点 \/ 内部摆动高点 0\.1025/);
 });
 
 test("同一波同方向扫过多个不同价位时只构建一条合并通知", () => {
@@ -134,21 +153,23 @@ test("同一波同方向扫过多个不同价位时只构建一条合并通知",
 });
 
 test("扫损消息只关联扫损后、反转方向一致的 MSS", () => {
-  const sweep = { side: "SSL", closedTime: 200 };
+  const identity = { originRangeId: "DR_RUN", rangeId: "DR_RUN", tradingDayId: "2026-08-16" };
+  const sweep = { side: "SSL", closedTime: 200, ...identity };
   const events = [
-    { type: "MSS", direction: "UP", confirmed: true, time: 100 },
-    { type: "MSS", direction: "DOWN", confirmed: true, time: 250 },
-    { type: "BOS", direction: "UP", confirmed: true, time: 260 },
-    { type: "MSS", direction: "UP", confirmed: true, time: 270 },
+    { type: "MSS", direction: "UP", confirmed: true, time: 100, ...identity },
+    { type: "MSS", direction: "DOWN", confirmed: true, time: 250, ...identity },
+    { type: "BOS", direction: "UP", confirmed: true, time: 260, ...identity },
+    { type: "MSS", direction: "UP", confirmed: true, time: 270, ...identity },
   ];
   assert.equal(structureEventForSweep(events, sweep)?.time, 270);
 });
 
 test("一次 MSS 只确认它之前最近的一组 sweep，不复用到更早的独立 raid", () => {
-  const oldSweep = { tier: 2, side: "BSL", closedTime: 100 };
-  const recentA = { tier: 2, side: "BSL", closedTime: 200 };
-  const recentB = { tier: 2, side: "BSL", closedTime: 200 };
-  const mss = { type: "MSS", direction: "DOWN", confirmed: true, time: 300 };
+  const identity = { originRangeId: "DR_RUN", rangeId: "DR_RUN", tradingDayId: "2026-08-16" };
+  const oldSweep = { tier: 2, side: "BSL", closedTime: 100, ...identity };
+  const recentA = { tier: 2, side: "BSL", closedTime: 200, ...identity };
+  const recentB = { tier: 2, side: "BSL", closedTime: 200, ...identity };
+  const mss = { type: "MSS", direction: "DOWN", confirmed: true, time: 300, ...identity };
   const links = linkStructureEventsToSweeps([mss], [oldSweep, recentA, recentB], 1000);
 
   assert.equal(links.has(oldSweep), false);
@@ -163,18 +184,20 @@ test("超过 sweep→MSS 因果窗口的结构转移不得把旧 sweep 升级为
   assert.equal(linkStructureEventsToSweeps([late], [sweep], 100).size, 0);
 });
 
-test("L3只绑定本次MSS位移产生且仍可执行的FVG", () => {
-  const event = { confirmedByDisplacement: true, displacementConfirmationIndex: 7, displacementFvg: { bottom: 0.03982, top: 0.04001 } };
-  const valid = { index: 7, bottom: 0.03982, top: 0.04001, executable: true, quality: "STRUCTURE" };
-  const filled = { ...valid, executable: false, executionStatus: "FILLED" };
+test("L3绑定本次MSS位移产生的ICT有效FVG，不受ATR执行宽度影响", () => {
+  const identity = { originRangeId: "DR_RUN", rangeId: "DR_RUN", tradingDayId: "2026-08-16", displacementId: "DISP_RUN" };
+  const event = { confirmedByDisplacement: true, displacementConfirmationIndex: 7, displacementFvg: { bottom: 0.03982, top: 0.04001 }, ...identity };
+  const valid = { index: 7, bottom: 0.03982, top: 0.04001, ictValid: true, executable: false, executionQuality: "THIN", quality: "STRUCTURE", ...identity };
+  const filled = { ...valid, ictValid: false, executionStatus: "FILLED" };
   assert.equal(executableFvgForMss([filled, valid], event), valid);
   assert.equal(executableFvgForMss([filled], event), null);
 });
 
 test("P0: overview 嵌套状态展开为 5m 机会扫描所需环境", () => {
   const sweep = { side: "SSL", time: 1 };
+  const liquiditySequences = [{ id: "LIQSEQ_SSL_1", status: "ICT_CONFIRMED" }];
   const env = opportunityEnvOf({
-    symbol: "BTCUSDT", price: 100, structureStatus: "VALID", sweep,
+    symbol: "BTCUSDT", price: 100, structureStatus: "VALID", sweep, sweeps: [sweep], liquiditySequences,
     cur: { bias: "BULLISH", confidence: "HIGH", quality: "HIGH", decision: "WATCH" },
   });
   assert.equal(env.bias, "BULLISH");
@@ -184,6 +207,8 @@ test("P0: overview 嵌套状态展开为 5m 机会扫描所需环境", () => {
   assert.equal(env.price, 100);
   assert.equal(env.structureStatus, "VALID");
   assert.equal(env.sweep, sweep);
+  assert.deepEqual(env.sweeps, [sweep]);
+  assert.equal(env.liquiditySequences, liquiditySequences);
 });
 
 test("目标摘要优先显示价格先遇到的流动性，再显示远端 HTF Draw", () => {
@@ -210,7 +235,7 @@ test("buildChanged: bias 翻转 + 结构失效 MSS（C1 schema）— ⚠️ 头�
   });
   assert.match(msg, /\*\*⚠️ BTCUSDT 4H Bias 变化\*\*/);
   assert.match(msg, /🟢 BULLISH → ⚪ NEUTRAL/);
-  assert.match(msg, /\*\*结构事件: MSS\*\*（向下跌破 108.5，原 BULLISH 结构失效）/);
+  assert.match(msg, /\*\*结构事件: STRUCTURE_BREAK\*\*（向下跌破 108.5，原 BULLISH 结构失效）/);
   assert.match(msg, /触发: 08\/05 20:00 · 价格 108/);
   assert.match(msg, /操作: WAIT/);
   assert.match(msg, /价格: 108/);
@@ -337,25 +362,33 @@ test("buildSweep: BSL 实时 — 刺破上方流动性且现价收回", () => {
   assert.match(msg, /流动性位形成: \d{2}\/\d{2}（日\/周 K）/);
 });
 
-test("buildSweep: 纽约盘前区间流动性位（PRE_MARKET）— 只显形成时间，不标时段名", () => {
+test("buildSweep: 股票关联盘前区间流动性位（PRE_MARKET）— 显示明确来源与形成时间", () => {
   const msg = buildSweep({
-    symbol: "BICOUSDT", price: 0.0401,
+    symbol: "MUUSDT", price: 0.0401,
     sweep: { side: "SSL", type: "PRE_MARKET_LOW", level: 0.04, sweptPrice: 0.0399, close: 0.0401, time: 111111, key: "k", realtime: false, closedTime: 111222, levelTime: 1754604000000, levelDate: "2026-08-07" },
     cur: baseCur, confidenceScore: 0, mss5m: null,
   });
-  // 虚拟币无盘前概念：只显示形成极值的那根 1H K 时间（日期+小时分钟），不带"盘前"字样
+  assert.match(msg, /盘前低点/);
   assert.match(msg, /流动性位形成: \d{2}\/\d{2} \d{2}:\d{2}/);
-  assert.ok(!msg.includes("盘前"), "虚拟币消息不应出现盘前字样");
 });
 
 test("buildSweep: 纽约盘前区间位无 highTime/lowTime（旧数据）→ 回退只显日期", () => {
   const msg = buildSweep({
-    symbol: "BICOUSDT", price: 0.0401,
+    symbol: "MUUSDT", price: 0.0401,
     sweep: { side: "SSL", type: "PRE_MARKET_LOW", level: 0.04, sweptPrice: 0.0399, close: 0.0401, time: 111111, key: "k", realtime: false, closedTime: 111222, levelDate: "2026-08-07" },
     cur: baseCur, confidenceScore: 0, mss5m: null,
   });
+  assert.match(msg, /盘前低点/);
   assert.match(msg, /流动性位形成: 08\/07/);
-  assert.ok(!msg.includes("盘前"), "虚拟币消息不应出现盘前字样");
+});
+
+test("buildSweep: Crypto Asia Range 使用独立中文标签", () => {
+  const msg = buildSweep({
+    symbol: "BTCUSDT", price: 64010,
+    sweep: { side: "SSL", type: "ASIA_LOW", level: 64000, sweptPrice: 63980, close: 64010, time: 111111, key: "asia", realtime: false, closedTime: 111222, levelTime: 1754604000000 },
+    cur: baseCur, confidenceScore: 0, mss5m: null,
+  });
+  assert.match(msg, /亚洲时段低点/);
 });
 
 test("buildSweep: 内部摆动位（INTERNAL_LOW，1H swing 低点）— 显示中文标签+形成时间（1H K）", () => {
@@ -525,18 +558,18 @@ test("buildOverview: 首轮全览字段布局（Scenario · 模型信心/共振�
   assert.match(msg, /市场背景: 4H 与大周期一致向上 · 模型信心: MEDIUM · 共振评分 52 · 机会质量: MEDIUM \(1.20\) · 操作: WATCH_FOR_ENTRY/);
 });
 
-test("buildChanged: 有效且距离较近的下方多头 BREAKER → 显示位置、作用和消耗状态", () => {
+test("buildChanged: 有效且距离较近的多头 Breaker → 显示角色反转与消耗状态", () => {
   const msg = buildChanged({
     symbol: "ETHUSDT", price: 1910.86, reason: [],
     changes: ["confidence"],
     prev: { ...basePrev, bias: "BULLISH" },
     cur: {
       bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", quality: "HIGH", planR: 1.26, scenario: "BULLISH_REVERSAL_ATTEMPT",
-      ob: { type: "BULLISH_OB", kind: "BREAKER", state: "USED", high: 1850, low: 1830, status: "OPEN", location: "DISCOUNT" },
+      ob: { type: "BULLISH_BREAKER", direction: "BULLISH", kind: "BREAKER", state: "MITIGATED", high: 1850, low: 1830, status: "MITIGATED", location: "DISCOUNT" },
     },
     confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
   });
-  assert.match(msg, /下方支撑: 多头区域破位后重新收回（已回踩，效力减弱）/);
+  assert.match(msg, /下方支撑: 失败空头 OB 反转为多头 Breaker（已浅回踩）/);
 });
 
 test("buildChanged: 已填补或距现价过远的 Breaker 不再显示成当前支撑阻力", () => {
@@ -557,18 +590,18 @@ test("buildChanged: 已填补或距现价过远的 Breaker 不再显示成当前
   assert.ok(!far.includes("上方阻力:"));
 });
 
-test("buildChanged: 多头 Bias 的上方空头 REJECTION → 标注阻力、效力和反向关系", () => {
+test("buildChanged: 多头 Bias 的上方结构级空头 OB → 标注阻力、消耗和反向关系", () => {
   const msg = buildChanged({
     symbol: "BTCUSDT", price: 100, reason: "Direction probability too low",
     changes: ["confidence"],
     prev: { ...basePrev, bias: "BULLISH", confidence: "MEDIUM" },
     cur: {
       bias: "BULLISH", confidence: "LOW", decision: "NO_TRADE", quality: "LOW", planR: 0.36, scenario: "BULLISH_REVERSAL_ATTEMPT",
-      ob: { type: "BEARISH_OB", kind: "REJECTION", state: "USED", high: 105, low: 102, status: "OPEN", location: "PREMIUM" },
+      ob: { type: "BEARISH_OB", direction: "BEARISH", kind: "STANDARD", state: "MITIGATED", high: 105, low: 102, status: "MITIGATED", location: "PREMIUM" },
     },
     confidenceScore: 25, structureStatus: "VALID", invalidation: null, mss: null,
   });
-  assert.match(msg, /上方阻力: 空头区域曾压低价格（已回踩，效力减弱；与当前多头方向相反）/);
+  assert.match(msg, /上方阻力: 结构下破位移产生的空头 OB（已浅回踩；与当前多头方向相反）/);
 });
 
 test("buildChanged: 价格正处于未回踩空头 OB 内 → 显示当前阻力", () => {
@@ -578,21 +611,21 @@ test("buildChanged: 价格正处于未回踩空头 OB 内 → 显示当前阻力
     prev: { ...basePrev, bias: "BULLISH", confidence: "MEDIUM" },
     cur: {
       bias: "BULLISH", confidence: "LOW", decision: "NO_TRADE", quality: "LOW", planR: 0.36, scenario: "BULLISH_REVERSAL_ATTEMPT",
-      ob: { type: "BEARISH_OB", kind: "REJECTION", state: "FRESH", high: 105, low: 102, status: "OPEN", location: "PREMIUM" },
+      ob: { type: "BEARISH_OB", direction: "BEARISH", kind: "STANDARD", state: "FRESH", high: 105, low: 102, status: "FRESH", location: "PREMIUM" },
     },
     confidenceScore: 25, structureStatus: "VALID", invalidation: null, mss: null,
   });
-  assert.match(msg, /当前阻力: 空头区域曾压低价格（尚未回踩，参考价值较高；与当前多头方向相反）/);
+  assert.match(msg, /当前阻力: 结构下破位移产生的空头 OB（尚未回踩；与当前多头方向相反）/);
 });
 
-test("buildChanged: OB STANDARD·USED → 不显示辅助行（避免噪音）", () => {
+test("buildChanged: 已失效 OB → 不显示辅助行", () => {
   const msg = buildChanged({
     symbol: "ETHUSDT", price: 1910.86, reason: [],
     changes: ["confidence"],
     prev: { ...basePrev, bias: "BULLISH" },
     cur: {
       bias: "BULLISH", confidence: "MEDIUM", decision: "WATCH", quality: "HIGH", planR: 1.26, scenario: "BULLISH_REVERSAL_ATTEMPT",
-      ob: { type: "BULLISH_OB", kind: "STANDARD", state: "USED", high: 101.5, low: 98, status: "OPEN", location: "DISCOUNT" },
+      ob: { type: "BULLISH_OB", direction: "BULLISH", kind: "STANDARD", state: "INVALIDATED", high: 101.5, low: 98, status: "INVALIDATED", location: "DISCOUNT" },
     },
     confidenceScore: 45, structureStatus: "VALID", invalidation: null, mss: null,
   });
@@ -649,22 +682,22 @@ test("buildOpportunity: 带执行区（CHAIN 链）— 显示执行区行与 4H 
   assert.match(msg, /环境: 🔴 BEARISH · 模型信心 LOW · 共振评分 0 · 操作 NO TRADE · 非活跃窗口 · 当前不在 ICT Killzone/);
 });
 
-test("buildOpportunity: 关键位置普通MSS明确标注WATCH且非最高质量", () => {
+test("buildOpportunity: 关键位置位移MSS明确标注WATCH", () => {
   const op = {
     symbol: "BTCUSDT", type: "KEY_MSS", direction: "BEARISH", entry: 64039.4, score: 70,
     zone: { type: "4H OB", top: 64380, bottom: 64010.4 },
     localSweep: { side: "BSL", level: 64400, sweptPrice: 64450 },
     confirmation: { text: "5m MSS DOWN 收盘确认", price: 64039.4, time: Date.parse("2026-08-12T12:39:59.999Z") },
     trade: { entry: 64039.4, stop: 64450, stopSource: "LOCAL_SWEEP_EXTREME", target: 63211.6, planR: 2.016 },
-    displacementConfirmed: false,
-    trigger: "4H关键执行区 → 扫BSL → 5m MSS DOWN（普通确认）",
+    displacementConfirmed: true,
+    trigger: "4H关键执行区 → 扫BSL → 5m MSS DOWN（位移确认）",
   };
   const env = { price: 64039.4, confidenceScore: 75, cur: { bias: "BEARISH", confidence: "HIGH", decision: "WAIT", session: null } };
   const msg = buildOpportunity(op, env);
   assert.match(msg, /关键位置5m结构确认/);
   assert.match(msg, /扫上方短线流动性 64400（极值 64450）/);
   assert.match(msg, /参考 planR 2\.02/);
-  assert.match(msg, /未形成位移\/FVG，不是最高质量信号.*操作 WATCH/);
+  assert.match(msg, /带位移确认.*操作 WATCH/);
 });
 
 test("buildOpportunityDigest: 📊 机会榜汇总 Top 列表", () => {

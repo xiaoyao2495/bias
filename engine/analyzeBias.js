@@ -12,13 +12,20 @@
  */
 import { findSwings, analyzeSwings } from "../indicators/swing.js";
 import { buildStructure } from "../indicators/structure.js";
-import { computeLiquidity, liquidityStateForLevel } from "../indicators/liquidity.js";
-import { computeDealingRange } from "../indicators/dealingRange.js";
-import { findFvgs, findOrderBlocks, annotatePDArray } from "../indicators/pdArray.js";
+import { applyDealingRangeLiquidity, computeLiquidity, liquidityStateForLevel } from "../indicators/liquidity.js";
+import { computeDealingRange, isActiveDealingRange } from "../indicators/dealingRange.js";
+import { resolveDealingRangeLifecycle } from "../indicators/dealingRangeLifecycle.js";
+import { annotateFvgQuality, findFvgs, findOrderBlocks, annotatePDArray, isIctValidFvg } from "../indicators/pdArray.js";
+import { findDisplacements } from "../indicators/displacement.js";
 import { computeHtfContext } from "../indicators/scenario.js";
 import { lastTradingWeek, computeActiveWindows, activeVolumeWindowAt, ictSessionAt } from "../indicators/killzone.js";
 import { scanStructureEvents } from "../indicators/mss.js";
+import { buildLiquiditySequences, LIQUIDITY_SEQUENCE_POLICIES } from "../indicators/liquiditySequence.js";
+import { isExecutionSessionForProfile, tradingDayIdAt } from "../indicators/instrumentProfile.js";
+import { bindStructureEventsIdentity, causalRangeId, rangeForEvent, sameCausalIdentity } from "../indicators/causalIdentity.js";
 import { computeDailyBias } from "./dailyBiasEngine.js";
+
+export const HTF_REVERSAL_MAX_BARS = LIQUIDITY_SEQUENCE_POLICIES["4h"].maxBars;
 
 /**
  * @param {Object} p
@@ -36,10 +43,11 @@ import { computeDailyBias } from "./dailyBiasEngine.js";
  * @param {Array}  [p.m5]     5m K 线（可选，仅美股关联标的用于精确计算盘前 04:00-09:30 ET）。
  * @param {{low:number|null, high:number|null}} [p.internalSwing] 1h 最近 ACTIVE swing 高低点（实盘由 biasMonitor 注入，
  *                            用于 planR 的最近失效线 riskLine；不传则回退 4H MSS/深层保护位）。
- * @param {string} [p.symbol] 合约代码；用于显式限定 PRE_MARKET 流动性的资产范围。
+ * @param {string} [p.symbol] 合约代码。
+ * @param {Object} [p.instrumentProfile] 统一市场画像；决定 Session 流动性与执行时段，不改变价格行为定义。
  * @returns {{ structure, liquidity, location, pdArray, htfDirection, htfContext, activeVolumeWindow, ictSession, session, bias }}
  */
-export function analyzeBias({ candles, daily, weekly, price, structurePrice, time, analysisTime, h1, m5, symbol, internalSwing, pdArrayLimit = 6 }) {
+export function analyzeBias({ candles, daily, weekly, price, structurePrice, time, analysisTime, h1, m5, symbol, instrumentProfile, internalSwing, priorRange = null, pdArrayLimit = 6 }) {
   // P1：日/周/盘前流动性截断时刻与结构参考时刻拆分——结构只用已收盘 4H（candles），
   // 流动性截断用 analysisTime（实时 = 最近已收盘 5m 的 closeTime），回放回退 time（4H 收盘点）。
   const cutoff = analysisTime ?? time;
@@ -49,15 +57,79 @@ export function analyzeBias({ candles, daily, weekly, price, structurePrice, tim
   const swings = findSwings(candles);
   const labeled = analyzeSwings(swings);
   const structure = buildStructure(labeled);
-  const liquidity = computeLiquidity(day, week, swings, 0.002, cutoff, 150, m5, candles, { symbol });
+  let liquidity = computeLiquidity(day, week, swings, null, cutoff, 150, m5, candles, { symbol, profile: instrumentProfile });
+  const resolvedInstrumentProfile = liquidity.instrumentProfile || instrumentProfile || null;
   annotateStructureLiquidityStates(structure, candles);
-  const location = computeDealingRange(swings, structure, price, liquidity);
+  const displacements4h = findDisplacements(candles);
+  const structureEvents4h = scanStructureEvents(candles, { lookback: 50, left: 2, right: 2 });
+  const rangeCandidate = computeDealingRange(swings, structure, price, liquidity);
+  const { range: lifecycleRange, transition: rangeTransition } = resolveDealingRangeLifecycle({
+    candidate: rangeCandidate,
+    prior: priorRange,
+    candles,
+    structureEvents: structureEvents4h,
+    price,
+    confirmedClose: candles.at(-1)?.close,
+    selectedAt: cutoff,
+  });
+  const dealingRangeReady = isActiveDealingRange(lifecycleRange);
+  // OBSERVATION / INVALIDATED 区间可以保留端点供审计，但不能提供交易位置。
+  const location = dealingRangeReady ? lifecycleRange : lifecycleRange ? {
+    ...lifecycleRange,
+    location: "UNKNOWN",
+    context: "UNKNOWN",
+    position: null,
+    tradable: false,
+  } : lifecycleRange;
+  const activeRange = dealingRangeReady ? location : null;
   const fvgs = findFvgs(candles);
-  const obs = findOrderBlocks(candles);
-  const pdArray = annotatePDArray({ fvg: fvgs.slice(-pdArrayLimit), ob: obs.slice(-pdArrayLimit) }, location, candles);
+  const rangedStructureEvents4h = bindStructureEventsIdentity(structureEvents4h, {
+    candles,
+    currentRange: activeRange,
+    priorRange,
+    profile: resolvedInstrumentProfile,
+    timeframe: "4h",
+    allowOriginLeg: true,
+  });
+  const obs = findOrderBlocks(candles, {
+    displacements: displacements4h,
+    structureEvents: rangedStructureEvents4h,
+  });
+  // 反转证据不能只看“展示用最后6个 FVG”，否则高波动阶段相关位移 FVG 会因切片被漏掉。
+  const allAnnotatedFvgs = annotatePDArray({ fvg: fvgs, ob: [] }, activeRange, candles).fvg;
+  const identifiedFvgs = annotateFvgQuality(allAnnotatedFvgs, candles, {
+    displacements: displacements4h,
+    structureEvents: rangedStructureEvents4h,
+    currentRange: activeRange,
+    priorRange,
+    profile: resolvedInstrumentProfile,
+    timeframe: "4h",
+  });
+  const allQualifiedFvgs = annotatePDArray(
+    { fvg: identifiedFvgs, ob: [] },
+    activeRange,
+    candles,
+    { requireRangeIdentity: true },
+  ).fvg;
+  // pdArray 是执行视图：先过滤失效原 OB，再截取最近区域，避免大量历史 INVALIDATED
+  // 对象占满 limit 后把稍早但仍有效的 OB/Breaker 挤出。完整审计仍可直接调用 findOrderBlocks。
+  const activeFvgs = allQualifiedFvgs.filter((item) => item.executable === true && causalRangeId(item) === activeRange?.rangeId);
+  const activeObs = obs.filter((item) => item.executable === true && causalRangeId(item) === activeRange?.rangeId);
+  const annotatedObs = annotatePDArray(
+    { fvg: [], ob: activeObs.slice(-pdArrayLimit) },
+    activeRange,
+    candles,
+    { requireRangeIdentity: true },
+  ).ob;
+  const pdArray = { fvg: activeFvgs.slice(-pdArrayLimit), ob: annotatedObs.filter((item) => item.executable === true) };
+  liquidity = applyDealingRangeLiquidity({ liquidity, range: activeRange, swings, fvgs: activeFvgs.slice(-80), candles, price });
   const htfContext = computeHtfContext(day, week, price);
   const htfDirection = htfContext.confirmedDirection;
-  const reversalEvidence = findReversalEvidence(candles, structure, liquidity);
+  const reversalEvidence = findReversalEvidence(candles, structure, liquidity, rangedStructureEvents4h, allQualifiedFvgs, {
+    currentRange: activeRange,
+    priorRange,
+    profile: resolvedInstrumentProfile,
+  });
   // 数据驱动活跃窗口只按“当前分析时刻”命中，不能拿整根进行中 4H 的覆盖范围判断，
   // 否则 20:10 会因该 K 将在 21:00 覆盖活跃窗口而提前获得评分。
   let activeVolumeWindow = null;
@@ -68,6 +140,8 @@ export function analyzeBias({ candles, daily, weekly, price, structurePrice, tim
     }
   }
   const ictSession = ictSessionAt(cutoff);
+  const resolvedProfile = resolvedInstrumentProfile;
+  const executionSession = isExecutionSessionForProfile(resolvedProfile, ictSession, cutoff) ? ictSession : null;
   const session = activeVolumeWindow; // 兼容旧 state/消息；新代码应读取 activeVolumeWindow
   const bias = computeDailyBias({
     structure,
@@ -79,11 +153,31 @@ export function analyzeBias({ candles, daily, weekly, price, structurePrice, tim
     htfDirection,
     htfContext,
     reversalEvidence,
-    ictSession,
+    structureEvents: rangedStructureEvents4h,
+    ictSession: executionSession,
     internalSwing,
   });
 
-  return { structure, liquidity, location, pdArray, htfDirection, htfContext, activeVolumeWindow, ictSession, session, bias };
+  return {
+    structure,
+    liquidity,
+    location,
+    dealingRangeReady,
+    rangeCandidate,
+    rangeTransition,
+    pdArray,
+    structureEvents4h: rangedStructureEvents4h,
+    htfDirection,
+    htfContext,
+    activeVolumeWindow,
+    ictSession,
+    executionSession,
+    session,
+    instrumentProfile: resolvedProfile,
+    sessionRange: liquidity.sessionRange || null,
+    referenceSessionRange: liquidity.referenceSessionRange || null,
+    bias,
+  };
 }
 
 export function annotateStructureLiquidityStates(structure, candles) {
@@ -128,23 +222,75 @@ export function annotateStructureLiquidityStates(structure, candles) {
 }
 
 /** HTF 冲突时，只有“反向流动性已扫 + 4H 位移 MSS”才确认反转 Narrative。 */
-export function findReversalEvidence(candles, structure, liquidity) {
+export function findReversalEvidence(candles, structure, liquidity, structureEvents = null, fvgs = [], identityContext = {}) {
   const direction = structure.direction;
   if (direction !== "BULLISH" && direction !== "BEARISH") return { confirmed: false, sweep: null, mss: null };
   const levels = direction === "BULLISH" ? [...(liquidity.sellSide || [])] : [...(liquidity.buySide || [])];
-  const extState = direction === "BULLISH" ? structure.externalSwingLowState : structure.externalSwingHighState;
-  if (extState && extState.state === "SWEPT") {
-    levels.push({ type: direction === "BULLISH" ? "EXTERNAL_LOW" : "EXTERNAL_HIGH", ...extState });
-  }
-  const swept = levels
-    .filter((x) => x.state === "SWEPT")
-    .sort((a, b) => (b.sweptAt || 0) - (a.sweptAt || 0))[0] || null;
-  if (!swept) return { confirmed: false, sweep: null, mss: null };
+  const events = structureEvents || scanStructureEvents(candles, { lookback: 50, left: 2, right: 2 });
+  return reversalEvidenceFromEvents(events, direction, levels, HTF_REVERSAL_MAX_BARS, fvgs, identityContext);
+}
 
-  const expected = direction === "BULLISH" ? "UP" : "DOWN";
-  const events = scanStructureEvents(candles, { lookback: 50, left: 2, right: 2 });
-  const mss = [...events]
-    .reverse()
-    .find((e) => e.type === "MSS" && e.direction === expected && e.confirmedByDisplacement && e.time >= swept.sweptAt) || null;
-  return { confirmed: !!mss, sweep: swept, mss };
+/**
+ * 4H 反转证据使用与 5m L3/CHAIN 相同的 raid→首条 MSS 匹配算法；仅周期策略不同。
+ * 3 根 4H 是当前工程初值（12 小时），不是冒充 ICT 课程中的固定数字。
+ */
+export function reversalEvidenceFromEvents(events, direction, levels, maxBars = HTF_REVERSAL_MAX_BARS, fvgs = [], identityContext = {}) {
+  if (direction !== "BULLISH" && direction !== "BEARISH") return { confirmed: false, sweep: null, mss: null };
+  const side = direction === "BULLISH" ? "SSL" : "BSL";
+  const raids = (levels || [])
+    .filter((level) => level?.state === "SWEPT" && Number.isFinite(Number(level.sweptAt)))
+    .map((level) => {
+      const sweptAt = Number(level.sweptAt);
+      const range = rangeForEvent({ time: sweptAt, originRangeId: level.originRangeId ?? null }, {
+        currentRange: identityContext.currentRange,
+        priorRange: identityContext.priorRange,
+        allowOriginLeg: true,
+      });
+      const originRangeId = level.originRangeId || range?.rangeId || null;
+      return ({
+      tier: 2,
+      side,
+      time: sweptAt,
+      closedTime: sweptAt,
+      key: `HTF_${side}_${level.type || "LEVEL"}_${level.price ?? "-"}_${level.sweptAt}`,
+      sourceLevel: level,
+      originRangeId,
+      rangeId: originRangeId,
+      tradingDayId: level.sweepTradingDayId ?? tradingDayIdAt(sweptAt, identityContext.profile),
+    });
+    });
+  if (!raids.length) return { confirmed: false, sweep: null, mss: null };
+
+  const { sequences } = buildLiquiditySequences({
+    sweeps: raids,
+    structureEvents: events,
+    timeframeMs: LIQUIDITY_SEQUENCE_POLICIES["4h"].timeframeMs,
+    maxBars,
+    confirmationZoneForMss: (event) => ictFvgForStructureEvent(fvgs, event),
+  });
+  const sequence = sequences
+    .filter((item) => item.status === "ICT_CONFIRMED")
+    .sort((a, b) => b.confirmedAt - a.confirmedAt)[0] || null;
+  if (!sequence) {
+    const latest = [...raids].sort((a, b) => b.closedTime - a.closedTime)[0];
+    return { confirmed: false, sweep: latest?.sourceLevel || null, mss: null };
+  }
+  return {
+    confirmed: true,
+    sweep: sequence.primarySweep?.sourceLevel || null,
+    mss: sequence.firstMss,
+    fvg: sequence.confirmationFvg,
+    liquiditySequenceId: sequence.id,
+  };
+}
+
+function ictFvgForStructureEvent(fvgs, event) {
+  if (!event?.confirmedByDisplacement || !event.displacementFvg) return null;
+  const near = (a, b) => Math.abs(a - b) / Math.max(Math.abs(b), 1e-9) < 0.000001;
+  return (fvgs || []).find((fvg) => isIctValidFvg(fvg)
+    && sameCausalIdentity(event, fvg, { requireDisplacement: true })
+    && fvg.quality === "STRUCTURE"
+    && fvg.index === event.displacementConfirmationIndex
+    && near(fvg.top, event.displacementFvg.top)
+    && near(fvg.bottom, event.displacementFvg.bottom)) || null;
 }

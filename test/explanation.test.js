@@ -37,7 +37,7 @@ test("BULLISH 完整链：5 段组件与关键措辞", () => {
   assert.equal(e[0].lines[0], "HH + HL confirmed — EXTERNAL_BULLISH");
   assert.equal(e[1].lines[0], "Buy-side above: PWH 200 (Previous Week High (HTF objective))");
   assert.equal(e[1].lines[1], "Alternatives: PDH 180");
-  assert.deepEqual(e[2].lines, ["Price in DISCOUNT — DISCOUNT_VALID", "valid discount zone (READY for longs)"]);
+  assert.deepEqual(e[2].lines, ["Price in DISCOUNT", "valid discount zone (READY for longs)"]);
   assert.equal(e[3].lines[0], "Bullish FVG 120-125 — DISCOUNT, VALID");
   assert.equal(e[4].lines[0], "Protected Low 100 — break = bias invalidated [HL_BEFORE_DISPLACEMENT]");
 });
@@ -46,7 +46,7 @@ test("BEARISH 完整链：对称措辞", () => {
   const e = buildExplanation({ structure: structBear, draw: drawBear, location: locValidPremium, pdArray: pdBear, bias: "BEARISH", invalidation: invBear, structureStatus: "VALID" });
   assert.equal(e[0].lines[0], "LH + LL confirmed — EXTERNAL_BEARISH");
   assert.equal(e[1].lines[0], "Sell-side below: PDL 80 (Previous Day Low)");
-  assert.deepEqual(e[2].lines, ["Price in PREMIUM — PREMIUM_VALID", "valid premium zone (READY for shorts)"]);
+  assert.deepEqual(e[2].lines, ["Price in PREMIUM", "valid premium zone (READY for shorts)"]);
   assert.equal(e[3].lines[0], "Bearish FVG 90-95 — PREMIUM, VALID");
   assert.equal(e[4].lines[0], "Protected High 90 — break = bias invalidated [LH_BEFORE_DISPLACEMENT]");
 });
@@ -60,9 +60,14 @@ test("NEUTRAL：结构未确认，其余组件给出占位措辞", () => {
   assert.equal(e[4].lines[0], "-");
 });
 
-test("LATE_IMPULSE：Location 解释为不追（WAIT）", () => {
+test("旧LATE_IMPULSE字段不再覆盖课程Discount位置", () => {
   const e = buildExplanation({ structure: structBull, draw: drawBull, location: { location: "DISCOUNT", context: "LATE_IMPULSE" }, pdArray: pdBull, bias: "BULLISH", invalidation: invBull, structureStatus: "VALID" });
-  assert.deepEqual(e[2].lines, ["Price in DISCOUNT — LATE_IMPULSE", "near range target — avoid chasing (WAIT)"]);
+  assert.deepEqual(e[2].lines, ["Price in DISCOUNT", "valid discount zone (READY for longs)"]);
+});
+
+test("Equilibrium 没有 Premium/Discount 优势", () => {
+  const e = buildExplanation({ structure: structBull, draw: drawBull, location: { location: "AT_EQ", context: "AT_EQ" }, pdArray: pdBull, bias: "BULLISH", invalidation: invBull, structureStatus: "VALID" });
+  assert.deepEqual(e[2].lines, ["Price at EQUILIBRIUM", "no premium/discount advantage (WAIT)"]);
 });
 
 test("无 Draw → Liquidity 说明无目标", () => {

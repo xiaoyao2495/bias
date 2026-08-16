@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { analyzeBias, annotateStructureLiquidityStates, findReversalEvidence } from "../engine/analyzeBias.js";
+import { analyzeBias, annotateStructureLiquidityStates, findReversalEvidence, reversalEvidenceFromEvents } from "../engine/analyzeBias.js";
 import { computeConfidence } from "../engine/confidence.js";
 
 const H4 = 4 * 3600_000;
@@ -87,6 +87,32 @@ test("P0: 反转证据存在扫损时返回该事件，不引用未定义变量"
   assert.equal(evidence.mss, null);
 });
 
+test("HTF反转统一因果链：只接受扫损后3根4H内的第一条位移MSS", () => {
+  const identity = { originRangeId: "DR_HTF_TEST", rangeId: "DR_HTF_TEST", tradingDayId: "2026-08-16" };
+  const swept = { type: "PDL", price: 90, state: "SWEPT", sweptAt: T0, sweepTradingDayId: identity.tradingDayId, ...identity };
+  const displacementFvg = { bottom: 100, top: 101 };
+  const valid = { type: "MSS", direction: "UP", confirmed: true, confirmedByDisplacement: true, displacementConfirmationIndex: 7, displacementFvg, displacementId: "DISP_HTF_TEST", time: T0 + 3 * H4, ...identity };
+  // ATR/tick 判为过窄只影响下单过滤，不能否定课程意义上的 HTF 因果确认。
+  const fvg = { ...displacementFvg, index: 7, quality: "STRUCTURE", ictValid: true, executable: false, displacementId: "DISP_HTF_TEST", ...identity };
+  const evidence = reversalEvidenceFromEvents([valid], "BULLISH", [swept], 3, [fvg]);
+  assert.equal(evidence.confirmed, true);
+  assert.equal(evidence.sweep, swept);
+  assert.equal(evidence.mss, valid);
+
+  const late = { ...valid, time: T0 + 4 * H4 };
+  assert.equal(reversalEvidenceFromEvents([late], "BULLISH", [swept], 3, [fvg]).confirmed, false);
+});
+
+test("HTF反转不跳过第一条普通结构收破去选择后面的位移MSS", () => {
+  const swept = { type: "PDL", price: 90, state: "SWEPT", sweptAt: T0 };
+  const ordinary = { type: "MSS", direction: "UP", confirmed: true, confirmedByDisplacement: false, time: T0 + H4 };
+  const laterDisplacement = { type: "MSS", direction: "UP", confirmed: true, confirmedByDisplacement: true, time: T0 + 2 * H4 };
+  const evidence = reversalEvidenceFromEvents([ordinary, laterDisplacement], "BULLISH", [swept]);
+  assert.equal(evidence.confirmed, false);
+  assert.equal(evidence.sweep, swept);
+  assert.equal(evidence.mss, null);
+});
+
 test("P0-4: 活跃窗口按 analysisTime 命中，不读取进行中 4H 的未来覆盖范围", () => {
   const now = Date.now();
   const BJ = 8 * 3600_000;
@@ -129,7 +155,8 @@ test("4H BULLISH + 日线 BULLISH → htfDirection 注入，Scenario TREND_CONTI
   // Liquidity：日/周线按 time 截断后取 lastCompleted → PDH 107.5 / PWH 125
   assert.ok(r.liquidity.buySide.some((x) => x.type === "PDH" && x.price === 107.5));
   assert.ok(r.liquidity.buySide.some((x) => x.type === "PWH" && x.price === 125));
-  assert.equal(r.liquidity.primaryBuyDraw.type, "PWH");
+  assert.equal(r.liquidity.primaryBuyDraw.type, "EXTERNAL_HIGH");
+  assert.equal(r.liquidity.primaryBuyDraw.rangeClass, "ERL");
 
   // Location：Impulse Range = 最后 HH(118) → 前低(107)；price 108 < eq 112.5 → DISCOUNT_VALID
   assert.equal(r.location.rangeType, "IMPULSE_BULLISH");
@@ -150,16 +177,32 @@ test("4H BULLISH + 日线 BULLISH → htfDirection 注入，Scenario TREND_CONTI
   assert.equal(r.bias.scenario.htfDirection, "BULLISH");
   assert.equal(r.bias.executionState, "READY");
   assert.equal(r.bias.draw.side, "BSL");
-  assert.equal(r.bias.draw.primary.type, "PWH");
+  assert.equal(r.bias.draw.primary.type, "EXTERNAL_HIGH");
 
   // PD Array：结构化输出（fvg/ob 数组），供执行区展示
   assert.ok(Array.isArray(r.pdArray.fvg));
   assert.ok(Array.isArray(r.pdArray.ob));
   assert.equal(typeof r.bias.pdArray.primary, "object");
 
-  // Confidence：共用链路派生（continuation 25 + HTF 对齐 15 + PD aligned 25 + 流动性 10 - 回撤位 10）
-  assert.equal(r.bias.confidence.level, "MEDIUM");
-  assert.equal(r.bias.confidence.score, 65);
+  // Confidence：方向评分不再因 Discount/Premium 加减分（25 + 15 + 25 + 10）
+  assert.equal(r.bias.confidence.level, "HIGH");
+  assert.equal(r.bias.confidence.score, 75);
+});
+
+test("RECENT fallback 只作观察：不提供 Location、ERL/IRL、PD Array 或执行状态", () => {
+  // 截到只有首个 LOW/HIGH 的阶段：已有最近高低点，但尚无 HH+HL / LH+LL 推动结构。
+  const candles = h4Bull().slice(0, 12);
+  const r = analyzeBias({ candles, daily: [], weekly: [], price: 98, time: candles.at(-1).closeTime });
+  assert.equal(r.rangeCandidate.rangeType, "RECENT");
+  assert.equal(r.dealingRangeReady, false);
+  assert.equal(r.location.rangeType, "RECENT");
+  assert.equal(r.location.lifecycleStatus, "OBSERVATION");
+  assert.equal(r.location.rangeId, null);
+  assert.equal(r.location.location, "UNKNOWN");
+  assert.equal(r.liquidity.externalRange, null);
+  assert.deepEqual(r.liquidity.internalRange, []);
+  assert.deepEqual(r.bias.pdArray, { primary: null, alternatives: [] });
+  assert.equal(r.bias.executionState, "NONE");
 });
 
 test("日线无方向（空）→ 周线兜底 → htfDirection 仍 BULLISH", () => {
@@ -190,7 +233,8 @@ test("日/周线按 time 截断：进行中的日 K（closeTime > time）不参�
 
 /**
  * P0-1 fixture：BULLISH 结构（swings：LOW 100→HIGH 140→HL 130→HH 165→HL 140），
- * 最近 swing low(140) 高于保护位(130)。价格跌破 140 但未破 130 → 应判 MSS（INVALIDATED）。
+ * 最近 swing low(140) 高于保护位(130)。价格跌破 140 但未破 130 → 旧结构应失效；
+ * fixture 没有 displacement 时语义为 STRUCTURE_BREAK，不冒充 ICT MSS。
  */
 function h4MssFixture() {
   const rows = [
@@ -202,7 +246,7 @@ function h4MssFixture() {
   return rows.map(([o, c, h, l], i) => k(o, c, h, l, T0 + i * H4, H4));
 }
 
-test("P0-1: 价格跌破最近 swing low（未破保护位）→ MSS，effectiveBias 转 NEUTRAL（ICT：MSS = 打破最近 swing）", () => {
+test("价格跌破最近 swing low（未破保护位）→ STRUCTURE_BREAK，effectiveBias 转 NEUTRAL", () => {
   const candles = h4MssFixture();
   // 结构确认：lastHigh = HH 165，lastLow = HL 140；保护位 = 130（HH 165 之前的 HL）
   const r = analyzeBias({ candles, daily: [], weekly: [], price: 135, time: TIME });
@@ -213,7 +257,9 @@ test("P0-1: 价格跌破最近 swing low（未破保护位）→ MSS，effective
   assert.equal(r.bias.structureStatus, "INVALIDATED");
   assert.equal(r.bias.effectiveBias, "NEUTRAL");
   assert.ok(r.bias.mss);
-  assert.equal(r.bias.mss.level, 140); // MSS 基准 = 被打破的最近 swing，而非深位保护位
+  assert.equal(r.bias.mss.semanticType, "STRUCTURE_BREAK");
+  assert.equal(r.bias.mss.ictMss, false);
+  assert.equal(r.bias.mss.level, 140); // 结构破坏基准 = 被打破的最近 swing，而非深位保护位
   assert.equal(r.bias.mss.direction, "DOWN");
   assert.equal(r.bias.mss.structureFrom, "BULLISH");
 });
@@ -278,18 +324,22 @@ test("P1: analysisTime 决定 09:25-09:30 ET 最后一根盘前 5m 是否已收�
   const tCut = Date.UTC(2026, 7, 7, 13, 25); // 09:25 EDT，最后一根尚未收盘
   const tAnalysis = Date.UTC(2026, 7, 7, 13, 30); // 09:30 EDT，最后一根刚收盘
   const first = Date.UTC(2026, 7, 7, 8, 0); // 04:00 EDT
-  const m5 = [
-    { time: first, open: 100, high: 110, low: 90, close: 100, closeTime: first + 5 * 60_000 },
-    { time: tCut, open: 100, high: 999, low: 1, close: 100, closeTime: tAnalysis },
-  ];
+  const m5 = Array.from({ length: 66 }, (_, i) => ({
+    time: first + i * 5 * 60_000,
+    open: 100,
+    high: i === 65 ? 999 : 110,
+    low: i === 65 ? 1 : 90,
+    close: 100,
+    closeTime: first + (i + 1) * 5 * 60_000,
+  }));
   const base = { symbol: "MUUSDT", candles: h4Bull(), daily: [], weekly: [], price: 118, time: tCut, m5 };
   const rNo = analyzeBias(base);
   const rYes = analyzeBias({ ...base, analysisTime: tAnalysis });
   const pmh = (liq) => liq.buySide.find((x) => x.type === "PRE_MARKET_HIGH");
   const pml = (liq) => liq.sellSide.find((x) => x.type === "PRE_MARKET_LOW");
-  // 不传 analysisTime → 09:25 K 尚未收盘，盘前区间不含极端值
-  assert.equal(pmh(rNo.liquidity).price, 110);
-  assert.equal(pml(rNo.liquidity).price, 90);
+  // 不传 analysisTime → 盘前尚未完成；形成中的高低会重绘，不得提前注入扫损池
+  assert.equal(pmh(rNo.liquidity), undefined);
+  assert.equal(pml(rNo.liquidity), undefined);
   // 传 09:30 analysisTime → 最后一根盘前 5m 已收盘，精确纳入
   assert.equal(pmh(rYes.liquidity).price, 999);
   assert.equal(pml(rYes.liquidity).price, 1);

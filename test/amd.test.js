@@ -1,171 +1,104 @@
-/**
- * AMD（Accumulation / Manipulation / Distribution）阶段判定单元测试
- */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { computeAmdStage } from "../indicators/amd.js";
+import { resolveInstrumentProfile } from "../indicators/instrumentProfile.js";
 
-const NOW = 1000000;
-const WINDOW = 24 * 60 * 60 * 1000;
-// 5m K 线工厂：交替 100/100.5 折返（ER ≈ 0.02，横盘）；单边 100→100.47（ER = 1）
-const mkM5 = (closes, baseTime = NOW - 100 * 300000) =>
-  closes.map((c, i) => ({ time: baseTime + i * 300000, closeTime: baseTime + (i + 1) * 300000, close: c, high: c, low: c }));
-const CHOP = mkM5(Array.from({ length: 48 }, (_, i) => (i % 2 ? 100.5 : 100)));
-const TREND = mkM5(Array.from({ length: 48 }, (_, i) => 100 + (i / 47) * 0.47));
-const RANGE = { high: 101, low: 99, rangeType: "IMPULSE_BULLISH" };
+const PROFILE = resolveInstrumentProfile("BTCUSDT", { BTCUSDT: "COIN" });
+const NOW = Date.UTC(2026, 7, 7, 13, 45); // 09:45 ET，交易日 2026-08-07
+const ACTIVE_FROM = Date.UTC(2026, 7, 7, 4, 0); // Asia 00:00 ET 完成
+const SESSION = {
+  name: "ASIA", completed: true, tradingDayId: "2026-08-07",
+  activeFrom: ACTIVE_FROM, high: 105, low: 95,
+};
+const IDENTITY = { originRangeId: "DR_AMD", rangeId: "DR_AMD", tradingDayId: "2026-08-07" };
+const ssl = { type: "ASIA_LOW", side: "SSL", tier: 2, reclaimed: true, key: "ssl", time: Date.UTC(2026, 7, 7, 11), closedTime: Date.UTC(2026, 7, 7, 11, 5), ...IDENTITY };
+const bsl = { type: "ASIA_HIGH", side: "BSL", tier: 2, reclaimed: true, key: "bsl", time: Date.UTC(2026, 7, 7, 11), closedTime: Date.UTC(2026, 7, 7, 11, 5), ...IDENTITY };
 
-test("最近窗口内有位移 → DISTRIBUTION（方向 = 位移方向）", () => {
+function confirmedSequence(sweep, direction = sweep.side === "SSL" ? "UP" : "DOWN") {
+  return {
+    id: `seq-${sweep.key}`,
+    status: "ICT_CONFIRMED",
+    primarySweep: sweep,
+    direction,
+    confirmedAt: sweep.closedTime,
+    mssAt: sweep.closedTime + 10 * 60_000,
+    confirmationFvg: { type: "FVG" },
+    originRangeId: sweep.originRangeId,
+    rangeId: sweep.rangeId,
+    tradingDayId: sweep.tradingDayId,
+  };
+}
+
+test("Session Range 未完成时保持 UNSET，不用 ER/ATR 伪造积累", () => {
+  const r = computeAmdStage({ profile: PROFILE, sessionRange: { ...SESSION, completed: false }, now: NOW });
+  assert.equal(r.stage, "UNSET");
+});
+
+test("当日 Asia Range 完成且尚无 raid → ACCUMULATION", () => {
+  const r = computeAmdStage({ profile: PROFILE, sessionRange: SESSION, now: NOW });
+  assert.equal(r.stage, "ACCUMULATION");
+  assert.equal(r.tradingDayId, "2026-08-07");
+  assert.match(r.reason, /等待流动性 raid/);
+});
+
+test("当日扫 SSL 收回但因果链未闭合 → MANIPULATION，预期向上", () => {
+  const r = computeAmdStage({ profile: PROFILE, sessionRange: SESSION, sweeps: [ssl], bias: "BULLISH", now: NOW });
+  assert.equal(r.stage, "MANIPULATION");
+  assert.equal(r.direction, "BULLISH");
+});
+
+test("孤立 displacement 不能把 MANIPULATION 升级成 DISTRIBUTION", () => {
   const r = computeAmdStage({
-    displacement: { time: NOW - 1000, direction: "UP", ratio: 2.4 },
-    sweep: null,
-    structure: { direction: "BULLISH" },
-    windowMs: WINDOW,
-    now: NOW,
+    profile: PROFILE, sessionRange: SESSION, sweeps: [ssl], bias: "BULLISH", now: NOW,
+    displacement: { time: ssl.closedTime + 1000, direction: "UP", ratio: 3 },
   });
+  assert.equal(r.stage, "MANIPULATION");
+});
+
+test("同一 raid 的位移 MSS + 同一位移 FVG → DISTRIBUTION", () => {
+  const seq = confirmedSequence(ssl);
+  const r = computeAmdStage({ profile: PROFILE, sessionRange: SESSION, sweeps: [ssl], liquiditySequences: [seq], bias: "BULLISH", now: NOW });
   assert.equal(r.stage, "DISTRIBUTION");
   assert.equal(r.direction, "BULLISH");
-  assert.match(r.reason, /2\.4/);
+  assert.equal(r.liquiditySequenceId, seq.id);
 });
 
-test("最近窗口内仅扫损（BSL 上方收回）→ MANIPULATION（诱多 → 看跌）", () => {
-  const r = computeAmdStage({
-    displacement: null,
-    sweep: { time: NOW - 2000, side: "BSL" },
-    structure: { direction: "BULLISH" },
-    windowMs: WINDOW,
-    now: NOW,
-  });
+test("确认链方向与 HTF Bias 冲突 → 保持 MANIPULATION，不生成方向", () => {
+  const r = computeAmdStage({ profile: PROFILE, sessionRange: SESSION, sweeps: [bsl], liquiditySequences: [confirmedSequence(bsl)], bias: "BULLISH", now: NOW });
   assert.equal(r.stage, "MANIPULATION");
-  assert.equal(r.direction, "BEARISH");
-  assert.match(r.reason, /上方/);
+  assert.match(r.reason, /冲突/);
 });
 
-test("扫损 SSL（下方收回）→ MANIPULATION（诱空 → 看涨）", () => {
-  const r = computeAmdStage({
-    displacement: null,
-    sweep: { time: NOW - 2000, side: "SSL" },
-    structure: { direction: "BEARISH" },
-    windowMs: WINDOW,
-    now: NOW,
-  });
+test("跨交易日 raid 不得与今天 Session Range 拼接", () => {
+  const old = { ...ssl, key: "old", tradingDayId: "2026-08-06", time: Date.UTC(2026, 7, 6, 11), closedTime: Date.UTC(2026, 7, 6, 11, 5) };
+  const r = computeAmdStage({ profile: PROFILE, sessionRange: SESSION, sweeps: [old], liquiditySequences: [confirmedSequence(old)], bias: "BULLISH", now: NOW });
+  assert.equal(r.stage, "ACCUMULATION");
+});
+
+test("更新的第二次 raid 必须等待自己的 MSS/FVG，不能复用旧链", () => {
+  const newer = { ...bsl, key: "new", time: bsl.time + 60 * 60_000, closedTime: bsl.closedTime + 60 * 60_000 };
+  const r = computeAmdStage({ profile: PROFILE, sessionRange: SESSION, sweeps: [ssl, newer], liquiditySequences: [confirmedSequence(ssl)], bias: "BULLISH", now: NOW });
   assert.equal(r.stage, "MANIPULATION");
-  assert.equal(r.direction, "BULLISH");
-  assert.match(r.reason, /下方/);
-});
-
-test("位移与扫损都发生：位移更新 → DISTRIBUTION 胜出", () => {
-  const r = computeAmdStage({
-    displacement: { time: NOW - 1000, direction: "DOWN", ratio: 1.8 },
-    sweep: { time: NOW - 5000, side: "SSL" },
-    structure: { direction: "BEARISH" },
-    windowMs: WINDOW,
-    now: NOW,
-  });
-  assert.equal(r.stage, "DISTRIBUTION");
   assert.equal(r.direction, "BEARISH");
 });
 
-test("扫损更新于位移之后 → MANIPULATION 胜出（刚扫完、分发未确认）", () => {
+test("AMD 不得把旧 Range 的确认链嫁接到当前 raid", () => {
+  const oldRangeSequence = { ...confirmedSequence(ssl), originRangeId: "DR_OLD", rangeId: "DR_OLD" };
   const r = computeAmdStage({
-    displacement: { time: NOW - 5000, direction: "UP", ratio: 2 },
-    sweep: { time: NOW - 1000, side: "BSL" },
-    structure: { direction: "BULLISH" },
-    windowMs: WINDOW,
+    profile: PROFILE,
+    sessionRange: SESSION,
+    sweeps: [ssl],
+    liquiditySequences: [oldRangeSequence],
+    bias: "BULLISH",
     now: NOW,
   });
   assert.equal(r.stage, "MANIPULATION");
+  assert.equal(r.liquiditySequenceId, null);
 });
 
-test("无操纵/分发证据 + 横盘（ER<0.25）+ 现价在区间内 + 无推进 → ACCUMULATION", () => {
-  const r = computeAmdStage({
-    displacement: null,
-    sweep: null,
-    structure: { direction: "BULLISH" },
-    range: RANGE,
-    mssEvents: [],
-    m5: CHOP,
-    price: 100.2,
-    windowMs: WINDOW,
-    now: NOW,
-  });
-  assert.equal(r.stage, "ACCUMULATION");
-  assert.equal(r.direction, "BULLISH");
-  assert.match(r.reason, /区间震荡 ER/);
-  assert.equal(r.evidenceTime, null);
-});
-
-test("证据过旧（超出窗口）+ 横盘在区间内 → ACCUMULATION", () => {
-  const r = computeAmdStage({
-    displacement: { time: NOW - WINDOW - 1000, direction: "UP", ratio: 2 },
-    sweep: null,
-    structure: { direction: "NEUTRAL" },
-    range: RANGE,
-    mssEvents: [],
-    m5: CHOP,
-    price: 100.2,
-    windowMs: WINDOW,
-    now: NOW,
-  });
-  assert.equal(r.stage, "ACCUMULATION");
-  assert.equal(r.direction, "NEUTRAL");
-});
-
-test("无操纵/分发证据 + 单边推进（ER=1）→ UNSET（不误标积累）", () => {
-  const r = computeAmdStage({
-    displacement: null,
-    sweep: null,
-    structure: { direction: "BULLISH" },
-    range: RANGE,
-    mssEvents: [],
-    m5: TREND,
-    price: 100.2,
-    windowMs: WINDOW,
-    now: NOW,
-  });
-  assert.equal(r.stage, "UNSET");
-});
-
-test("横盘但现价冲出区间 → UNSET", () => {
-  const r = computeAmdStage({
-    displacement: null,
-    sweep: null,
-    structure: { direction: "BULLISH" },
-    range: RANGE,
-    mssEvents: [],
-    m5: CHOP,
-    price: 102,
-    windowMs: WINDOW,
-    now: NOW,
-  });
-  assert.equal(r.stage, "UNSET");
-});
-
-test("横盘在区间内但 4h 内有 5m MSS 推进 → UNSET（有结构推进不算积累）", () => {
-  const r = computeAmdStage({
-    displacement: null,
-    sweep: null,
-    structure: { direction: "BULLISH" },
-    range: RANGE,
-    mssEvents: [{ time: NOW - 1000, type: "MSS" }],
-    m5: CHOP,
-    price: 100.2,
-    windowMs: WINDOW,
-    now: NOW,
-  });
-  assert.equal(r.stage, "UNSET");
-});
-
-test("无区间/数据不足（m5 为空）→ UNSET（无积累证据）", () => {
-  const r = computeAmdStage({
-    displacement: null,
-    sweep: null,
-    structure: { direction: "BULLISH" },
-    range: null,
-    mssEvents: [],
-    m5: [],
-    price: 100.2,
-    windowMs: WINDOW,
-    now: NOW,
-  });
-  assert.equal(r.stage, "UNSET");
+test("股票关联使用 PRE_MARKET 同日模型，不接收 Crypto Asia Range", () => {
+  const equity = resolveInstrumentProfile("MUUSDT", { MUUSDT: "EQUITY" });
+  const wrong = computeAmdStage({ profile: equity, sessionRange: SESSION, now: NOW });
+  assert.equal(wrong.stage, "UNSET");
+  assert.equal(wrong.sessionModel, "US_EQUITY");
 });

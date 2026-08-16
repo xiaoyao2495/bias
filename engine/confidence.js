@@ -1,27 +1,14 @@
 /**
  * confidence.js — V2.3 Bias Confidence（成功概率评分，不是 Entry 信号）
  *
- * V2.3.1 初版（假设版）：Liquidity/Location/PD Array 各加分、LATE_IMPULSE 罚分。
- * V2.3.3 单变量验证（BTC+ETH 2025 双标的，控制目标距离分桶）推翻了初版假设：
+ * 方向可信度与入场位置分层：Premium/Discount 只决定执行位置，不给方向评分加减分。
+ * 旧版 40%/60% LATE_IMPULSE 是样本拟合标签，不是 ICT 课程位置，因此已移除。
  *
- *   单变量胜率（窗口 30 根 4H，WIN=触及 Draw 或 ±5%）：
- *     LATE_IMPULSE        BTC 72.7% / ETH 76.3%  ← 强正因子（趋势惯性，目标近）
- *     DISCOUNT_VALID      BTC 30.4% / ETH 28.6%  ← 负因子（回撤位未来 5 天易破保护位）
- *     PREMIUM_VALID       BTC 22.2% / ETH 20.7%  ← 负因子（对称）
- *     PD array aligned    BTC 68.0% / ETH 66.3%  ← 最强正因子（未对齐近 0%）
- *     CONTINUATION        BTC 70.0% / ETH 66.1%  ← 正因子（弱-中）
- *
- * 注意：这与 V1.9"不追高（LATE_IMPULSE→WAIT）"不冲突——V1.9 是入场时机层，
- * 这里衡量的是"Bias 方向在未来 N 根内触及目标"的惯性层，两个维度。
- *
- * V2.3 终版权重（数据驱动）：
- *
- *   Confidence = Base(Scenario) + Alignment(HTF) + Quality(PD/Liquidity) ± 位置因子
+ *   Confidence = Base(Scenario) + Alignment(HTF) + Quality(PD/Liquidity) + Timing/Risk
  *
  *   Base        : CONTINUATION +25 / REVERSAL_ATTEMPT +5 / TRANSITION +10（结构确认但 HTF 中性 +20）
  *   Alignment   : HTF 同向 +15（CONTINUATION 必触发），HTF 反向 -10
  *   Quality     : PD array aligned +25（最强）、Liquidity +10
- *   位置因子    : LATE_IMPULSE +15（趋势惯性）、VALID 折价/溢价位 -10（回撤/反抽）
  *   时机因子    : ICT 固定 Session 内 +10（纽约当地钟表时间，自动处理 DST）
  *   微调        : 距目标 <2% +5（近目标惯性）、Wide range -10（防御）
  *
@@ -41,7 +28,7 @@ export function computeConfidence({ bias, effectiveBias, structure, structureSta
     structureConfirmed: structure.direction !== "NEUTRAL",
     protectedValid: structureStatus === "VALID",
     liquidityClear: !!(draw && draw.primary),
-    locationValid: location.context === "DISCOUNT_VALID" || location.context === "PREMIUM_VALID",
+    locationValid: bias === "BULLISH" ? location.location === "DISCOUNT" : bias === "BEARISH" ? location.location === "PREMIUM" : false,
     // aligned = 有顺位 primary 执行区 且 价格仍在区间内/紧贴（未远离已填充区），
     // 避免"价格已跑远/已填充"的执行区仍给 +25 最强正因子导致信心度虚高
     pdArrayAligned: !!(pdArray && pdArray.primary && price != null && withinRange(price, pdArray.primary)),
@@ -97,23 +84,13 @@ export function computeConfidence({ bias, effectiveBias, structure, structureSta
     factors.push({ name: "Liquidity target", value: "+10" });
   }
 
-  // 4. 位置因子（数据修正）：LATE_IMPULSE 强惯性为正，VALID 回撤/反抽位为负
-  const lateImpulse = location.context === "LATE_IMPULSE";
-  if (lateImpulse) {
-    score += 15;
-    factors.push({ name: "Late impulse momentum", value: "+15" });
-  } else if (checks.locationValid) {
-    score -= 10;
-    factors.push({ name: "Retrace location (weak)", value: "-10" });
-  }
-
-  // 5. ICT 时机因子：只认课程固定 Session；数据驱动活跃窗口仅供市场活跃度展示。
+  // 4. ICT 时机因子：只认课程固定 Session；数据驱动活跃窗口仅供市场活跃度展示。
   if (ictSession) {
     score += 10;
     factors.push({ name: "ICT Session active", value: "+10" });
   }
 
-  // 6. 微调：近目标惯性 +5；宽区间防御 -10
+  // 5. 微调：近目标惯性 +5；宽区间防御 -10
   const dist = drawDist(bias, price, draw);
   if (dist != null && dist < NEAR_DRAW_PCT) {
     score += 5;

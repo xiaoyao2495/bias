@@ -6,7 +6,7 @@
  *
  *   RETRACE — 回踩同向 5m FVG/OB 后，5m 收盘收回关键位置或出现同向结构确认
  *   CHAIN   — 扫损 → 5m MSS（位移确认）→ 回踩对应执行区 → 5m 入场确认
- *   KEY_MSS — 4H 执行区内扫短线流动性 → 5m MSS；仅作 WATCH，位移是加分项
+ *   KEY_MSS — 4H 执行区内扫短线流动性 → 位移确认的 5m MSS；仅作 WATCH
  *
  * 一般结构证据（不直接产生入场）：MSS/BOS 仅建立"结构已转移/延续"的证据。
  * 关键位置的扫损后 MSS 可单独提示，但不会升级成可直接执行的入场信号。
@@ -24,8 +24,10 @@
  */
 import { detectStructureEvents, scanStructureEvents } from "../indicators/mss.js";
 import { findDisplacements } from "../indicators/displacement.js";
+import { buildLiquiditySequences, LIQUIDITY_SEQUENCE_POLICIES, LIQUIDITY_SEQUENCE_STATUS } from "../indicators/liquiditySequence.js";
 import { annotateFvgQuality, findFvgs, findOrderBlocks, annotatePDArray, isExecutableFvg } from "../indicators/pdArray.js";
 import { marketNow } from "../utils/marketClock.js";
+import { isExecutionSessionForProfile, resolveInstrumentProfile, tradingDayIdAt } from "../indicators/instrumentProfile.js";
 
 // ---- 常量 ----
 const ZONE_AGE_MAX = 60; // 执行区最大年龄（根 5m = 5 小时，太旧价值低）
@@ -59,12 +61,13 @@ export function computeM5Context(m5, price) {
   const displacements = findDisplacements(closed);
   const structure = detectStructureEvents(closed, { price, left: 1, right: 1, displacements });
   const fvgs = findFvgs(closed);
-  const obs = findOrderBlocks(closed, { displacements });
   const events = scanStructureEvents(closed, { lookback: 50, left: 1, right: 1 });
+  const obs = findOrderBlocks(closed, { displacements, structureEvents: events });
   // annotatePDArray 需要 range（dealing range）做 PREMIUM/DISCOUNT 标注；
   // 机会扫描只用 age/status，传 null 即可（location 为 null，不影响）。
   // ZONE_AGE_MAX=60，至少保留 80 个最近区域；旧版只留40个会在高波动时提前截掉仍在年龄窗内的 FVG。
-  const pd = annotatePDArray({ fvg: fvgs.slice(-80), ob: obs.slice(-80) }, null, closed);
+  const activeObs = obs.filter((item) => item.executable === true);
+  const pd = annotatePDArray({ fvg: fvgs.slice(-80), ob: activeObs.slice(-80) }, null, closed);
   pd.fvg = annotateFvgQuality(pd.fvg, closed, { displacements, structureEvents: events });
   return {
     direction: structure.direction,
@@ -90,9 +93,20 @@ export function scanOpportunities({ symbol, env, m5 }) {
   env = env?.cur ? { ...env, ...env.cur } : env;
   const bias = env?.bias;
   if (bias !== "BULLISH" && bias !== "BEARISH") return [];
-  // ICT 2022 时间与价格并重：5m 入场机会只在固定 Killzone 内产生。
-  // 扫损是独立市场事件，仍由 sweep 通道全天通报，不受此门槛影响。
-  if (!env.ictSession) return [];
+  // 5m 触发只能执行在已确认、仍 ACTIVE 的 4H 推动区间内；RECENT 观察高低点
+  // 不得借 AMD/Direction WATCH 绕过 Range 门禁生成 CHAIN/RETRACE/KEY_MSS。
+  if (env.dealingRangeReady !== true) return [];
+  const profile = env.instrumentProfile || resolveInstrumentProfile(symbol);
+  const analysisTime = env.analysisTime ?? env.priceTime ?? (m5 || []).at(-1)?.closeTime ?? marketNow();
+  // ICT 2022 时间与价格并重，但执行窗口必须服从品种制度：
+  // US 股票关联只做 NY；24×7 Crypto 只做 London / NY。Asia 用于形成区间，不直接执行。
+  if (!isExecutionSessionForProfile(profile, env.ictSession, analysisTime)) return [];
+  // 机会必须属于同一交易日完整交付链；旧 AMD 状态、跨日证据或仅有位移都不能放行。
+  const tradingDayId = tradingDayIdAt(analysisTime, profile);
+  if (env.amd?.stage !== "DISTRIBUTION"
+    || env.amd.direction !== bias
+    || env.amd.tradingDayId !== tradingDayId
+    || !env.amd.liquiditySequenceId) return [];
   if (!m5 || m5.length < 20) return [];
 
   const price = env.price;
@@ -144,12 +158,15 @@ function finalizeOpportunities(opps, symbol, env) {
 
 /**
  * 关键位置 MSS：4H 同向执行区内先扫短线逆向流动性，随后出现与 4H Bias 一致的
- * 已收盘 5m MSS。位移/FVG 是质量加分，不再是这一档 WATCH 提示的硬门槛。
+ * 已收盘且由 displacement 交付的 5m MSS。普通贴线收破只叫 STRUCTURE_BREAK，
+ * 不以 KEY_MSS 名义通知。
  */
 export function detectKeyPositionMss({ env, ctx, bias }) {
   const expected = bias === "BULLISH" ? "UP" : "DOWN";
   const event = [...(ctx.events || [])].reverse().find(
-    (e) => e.type === "MSS" && e.direction === expected && e.confirmed && isRecentKeyMss(e, ctx.candles || [])
+    (e) => e.type === "MSS" && e.direction === expected && e.confirmed
+      && e.confirmedByDisplacement === true && e.ictMss !== false
+      && isRecentKeyMss(e, ctx.candles || [])
   );
   if (!event) return null;
   const sweep = findLocalSweepBeforeMss(ctx.candles || [], event, bias);
@@ -175,7 +192,7 @@ export function detectKeyPositionMss({ env, ctx, bias }) {
       text: `5m MSS ${expected} 收盘确认`,
     },
     displacementConfirmed: event.confirmedByDisplacement === true,
-    trigger: `4H关键执行区 → 扫${sweep.side} → 5m MSS ${expected}${event.confirmedByDisplacement ? "（位移确认）" : "（普通确认）"}`,
+    trigger: `4H关键执行区 → 扫${sweep.side} → 5m MSS ${expected}（位移确认）`,
     key: `KEY_MSS_${bias}_${event.level}_${event.time}`,
     time: event.time,
   };
@@ -260,10 +277,10 @@ function collectZones(ctx, bias) {
     if (it.direction !== bias) continue; // 只做同向执行区（BULLISH → 多头 FVG/OB）
     if (it.age > ZONE_AGE_MAX) continue;
     const executionStatus = it.executionStatus || it.status;
-    // 5m FVG 必须由位移产生并通过 ATR/tick 动态宽度；收盘填平才彻底失效。
-    // 单纯 wick 填平保留为 WICK_FILLED，供强拒绝后的回收确认使用。
+    // 这里是交易执行层，允许用 ATR/tick 宽度排除过窄区域；该门槛不参与上游
+    // FVG 的 ictValid 或 L3/HTF 因果确认。wick 完全穿越仍表示原缺口已填补。
     if (it.type.includes("FVG") && !isExecutableFvg(it)) continue;
-    if (!it.type.includes("FVG") && it.status === "FILLED") continue;
+    if (!it.type.includes("FVG") && (it.ict !== true || it.executable === false || it.status === "INVALIDATED")) continue;
     if (executionStatus === "CE_REACHED" && it.age > 12) continue;
     const top = it.top ?? it.high;
     const bottom = it.bottom ?? it.low;
@@ -284,12 +301,18 @@ function collectZones(ctx, bias) {
       widthPct: it.widthPct ?? null,
       widthAtr: it.widthAtr ?? null,
       // 来源字段（CHAIN 精确匹配 + 审计）：
-      //   index — FVG：确认 K 索引（findFvgs 的 i）；OB：推动 OB 的位移 K 索引（位移驱动）或突破 K 索引（fallback）
+      //   index — FVG：确认 K 索引；OB/Breaker：创建或激活该区域的结构位移 K 索引
       //   time — FVG：中间根开盘；OB：OB 所在 K 开盘
       //   displacement — 仅 OB 有意义（位移驱动生成）；FVG 无此字段 → false
       index: it.index,
       time: it.time,
       displacement: it.displacement === true,
+      kind: it.kind ?? null,
+      sourceObId: it.sourceObId ?? null,
+      originRangeId: it.originRangeId ?? it.rangeId ?? null,
+      tradingDayId: it.tradingDayId ?? null,
+      displacementId: it.displacementId ?? null,
+      structureEventId: it.structureEventId ?? null,
       age: it.age,
       status: it.status,
     });
@@ -387,29 +410,45 @@ function near(a, b) {
  * 信号 2 — 完整链条：扫损 → 5m MSS 转向 → 回踩同向执行区。
  * 只认顺 Bias 链：BULLISH 需 SSL 被扫（下方流动性扫掉 → 向上反转）→ MSS UP；
  * BEARISH 需 BSL 被扫 → MSS DOWN。sweep 由 biasMonitor 已计算（env.sweep）。
- * P1：MSS 突破腿必须为位移确认（BODY + VOLUME，confirmedByDisplacement=true）——
+ * P1：MSS 突破腿必须为价格位移确认（大实体、单边收盘交付；成交量只作辅助证据）——
  * 低动能、贴线式结构转移不构成机构链条，否则 扫损→MSS→回踩 会频繁误报。
  * P1：CHAIN 执行区必须由该 MSS 位移腿产生（linkedToMss 按索引/价格精确匹配），
  * 普通 RETRACE 仍可用全部有效执行区，但高质量 CHAIN 不用旧 FVG/OB 拼凑。
  */
-function detectChain({ env, ctx, bias, price, zones }) {
-  const sweep = env.sweep;
-  if (!sweep) return null;
-  const sweepTime = sweep.time;
-  if (!sweepTime || marketNow() - sweepTime > SWEEP_WINDOW_MS) return null;
-  const expectedMssDir = sweep.side === "BSL" ? "DOWN" : "UP"; // 扫 BSL → 预期向下跌破；扫 SSL → 预期向上突破
-  const dirOk = bias === "BULLISH" ? expectedMssDir === "UP" : expectedMssDir === "DOWN";
-  if (!dirOk) return null; // 扫损方向与 4H bias 相反 → 反势链，环境不顺 → 不报
-  const mss = ctx.events.find(
-    (e) => e.type === "MSS" && e.direction === expectedMssDir && e.time >= sweepTime && e.confirmedByDisplacement
-  );
-  if (!mss) return null;
+export function detectChain({ env, ctx, bias, price, zones }) {
+  const expectedSide = bias === "BULLISH" ? "SSL" : "BSL";
+  // CHAIN 只消费 biasMonitor 在事件形成轮冻结的正式 sequence。若该身份对象缺失，
+  // 不能在机会扫描时用“当前 Range + 历史 ctx.events”事后重建一条更漂亮的链。
+  const sequences = Array.isArray(env.liquiditySequences) ? env.liquiditySequences : [];
+  const expectedRangeId = env.range?.rangeId ?? env.rangeLifecycle?.rangeId ?? null;
+  const expectedTradingDayId = env.amd?.tradingDayId ?? null;
+  const sequence = [...sequences]
+    .filter((item) => item?.side === expectedSide
+      && item.status === LIQUIDITY_SEQUENCE_STATUS.ICT_CONFIRMED
+      && !!expectedRangeId && item.originRangeId === expectedRangeId
+      && !!expectedTradingDayId && item.tradingDayId === expectedTradingDayId
+      && item.id === env.amd?.liquiditySequenceId
+      && item.firstMss?.confirmedByDisplacement
+      && Number.isFinite(Number(item.confirmedAt))
+      && marketNow() - Number(item.confirmedAt) <= SWEEP_WINDOW_MS)
+    .sort((a, b) => Number(b.confirmedAt) - Number(a.confirmedAt))[0] || null;
+  if (!sequence) return null;
+  const sweep = sequence.primarySweep || sequence.sweeps?.at(-1) || env.sweep;
+  const sweepTime = sequence.confirmedAt;
+  const expectedMssDir = sequence.direction;
+  const mss = sequence.firstMss;
   // 且价格已回踩该 MSS 位移腿产生的执行区，并出现新的 5m 入场确认
   if (!zones.length) return null;
   let matched = null;
   for (const zone of zones) {
     const notInvalidated = bias === "BULLISH" ? price > zone.bottom : price < zone.top;
-    if (!linkedToMss(zone, mss) || !notInvalidated) continue;
+    const exactSequenceFvg = sequence.confirmationFvg
+      && zone.type === "FVG"
+      && zone.id === sequence.confirmationFvg.id
+      && near(zone.top, sequence.confirmationFvg.top)
+      && near(zone.bottom, sequence.confirmationFvg.bottom)
+      && (sequence.confirmationFvg.time == null || zone.time === sequence.confirmationFvg.time);
+    if ((!linkedToMss(zone, mss) && !exactSequenceFvg) || !notInvalidated) continue;
     const confirmation = confirmExecutionZone({ ctx, zone, bias, afterTime: mss.time });
     if (confirmation) {
       matched = { zone, confirmation };
@@ -426,6 +465,8 @@ function detectChain({ env, ctx, bias, price, zones }) {
     zone: { type: z.type, top: z.top, bottom: z.bottom, index: z.index, displacement: z.displacement, id: z.id, quality: z.quality, executionStatus: z.executionStatus },
     confirmation,
     mssIndex: mss.atIndex,
+    liquiditySequenceId: sequence.id,
+    sweepExtreme: sequence.sweptPrice,
     trigger: `扫损${sweep.side === "BSL" ? "BSL" : "SSL"} → 5m MSS（位移确认）${expectedMssDir === "UP" ? "向上" : "向下"} → 回踩 ${z.type} → ${confirmation.text}`,
     key: `CHAIN_${bias}_${z.id}_${sweep.key || sweepTime}`,
     time: confirmation.time,
@@ -495,7 +536,7 @@ function confirmExecutionZone({ ctx, zone, bias, afterTime = 0 }) {
  */
 function buildTradePlan(op, env) {
   const entry = Number(op.confirmation?.price ?? env.price);
-  const sweptRaw = env.sweep?.sweptPrice;
+  const sweptRaw = op.sweepExtreme ?? env.sweep?.sweptPrice;
   const swept = sweptRaw == null ? NaN : Number(sweptRaw);
   const localSweptRaw = op.localSweep?.sweptPrice;
   const localSwept = localSweptRaw == null ? NaN : Number(localSweptRaw);

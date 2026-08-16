@@ -20,13 +20,13 @@ import { buildDecision } from "./decision.js";
  *   BEARISH : Structure = BEARISH（LH + LL）
  *   NEUTRAL : 其他
  *
- * Execution State（Location + V1.9 Location Context 只影响执行，不影响 Bias）：
- *   BULLISH : DISCOUNT_VALID → READY（可找多），PREMIUM → WAIT（等回撤至折扣区），LATE_IMPULSE → WAIT（推动末端不追）
- *   BEARISH : PREMIUM_VALID  → READY（可找空），DISCOUNT → WAIT（等回撤至溢价区），LATE_IMPULSE → WAIT
+ * Execution State（严格按 50% Equilibrium 的 Premium/Discount，只影响执行、不影响 Bias）：
+ *   BULLISH : DISCOUNT → READY；PREMIUM / AT_EQ → WAIT
+ *   BEARISH : PREMIUM  → READY；DISCOUNT / AT_EQ → WAIT
+ * 是否追价由实际 Draw、失效位和 planR 决定，不使用任意 40%/60% 区间阈值。
  *
- * Draw Target：
- *   BULLISH → { side: "BSL", target: primaryBuyDraw }（优先级 PWH > PDH > EQH）
- *   BEARISH → { side: "SSL", target: primarySellDraw }（优先级 PWL > PDL > EQL）
+ * Draw Target：按 dealing range 的 ERL/IRL、距离、未消费状态与汇聚动态评分；不存在
+ * “PWH 永远优先于 PDH”这类课程固定顺序。
  *
  * Invalidation（不是止损，是"当前 Bias 何时不成立"）：
  *   BULLISH : 跌破 protectedLow（最近 HL）→ { type: "BREAK_PROTECTED_LOW", price }
@@ -35,7 +35,7 @@ import { buildDecision } from "./decision.js";
  * 第一版明确不做：MSS / BOS 分类 / Displacement / 5m Entry / Gate / Notification / Score / AI 判断
  */
 
-export function computeDailyBias({ structure, liquidity, location, price, structurePrice, pdArray, htfDirection, htfContext, reversalEvidence, ictSession, internalSwing }) {
+export function computeDailyBias({ structure, liquidity, location, price, structurePrice, pdArray, htfDirection, htfContext, reversalEvidence, structureEvents = [], ictSession, internalSwing }) {
   const reason = [];
   const direction = structure.direction;
   // 4H 结构只能由已收盘 4H 确认；price 可继续使用最新 5m 收盘价计算执行空间。
@@ -43,7 +43,7 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
   const status = validateProtectedStructure(structure, confirmedPrice);
   let structureStatus = status.status;
 
-  // P0-1（ICT 2022）：MSS = 打破最近反方向 swing → 结构转移，不等 HH/HL 重排。
+  // 反势收盘打破最近 swing 会使旧结构失效；只有 displacement 交付时 semanticType 才是 ICT MSS。
   // 4H 结构 BULLISH 时，最近 swing low（lastLow，通常比 protectedLow 浅的 HL）被价格跌破
   // 即为结构转移；validateProtectedStructure 只查深位（protectedLow = 最后一个 HH 之前的
   // 位移起点），会滞后一根 4H（mss.js 已按"最近 swing"检测，4H bias 层此前不一致）。
@@ -74,7 +74,7 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
       }
     : null;
 
-  // 2. Draw Target（V1.5 Liquidity Audit：Primary + Alternative + Reason，按 ICT 优先级）
+  // 2. Draw Target：ERL/IRL 上下文动态评分，不使用固定类型优先级。
   let draw = null;
   if (structureBias === "BULLISH" || structureBias === "BEARISH") {
     const ranked = rankLiquidityTargets(structure, liquidity, structureBias, price);
@@ -91,18 +91,16 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
   let effectiveBias = structureStatus === "INVALIDATED" ? "NEUTRAL" : structureBias;
   if (effectiveBias !== "NEUTRAL" && narrativeConflict && !reversalEvidence?.confirmed) effectiveBias = "NEUTRAL";
 
-  // 3. Execution State：Location + Location Context（V1.9），且基于有效方向（失效 → NONE）
+  // 3. Execution State：只按 50% EQ 的 Premium/Discount，且基于有效方向（失效 → NONE）。
+  // context 是兼容/审计字段，旧状态中的 LATE_IMPULSE 也不得覆盖课程位置。
   const loc = location.location;
-  const ctx = location.context;
   let executionState = "NONE";
   if (effectiveBias === "BULLISH") {
-    if (ctx === "LATE_IMPULSE") executionState = "WAIT"; // V1.9：接近目标（推动末端），不追多
-    else if (loc === "DISCOUNT") executionState = "READY";
-    else if (loc === "PREMIUM") executionState = "WAIT";
+    if (loc === "DISCOUNT") executionState = "READY";
+    else if (loc === "PREMIUM" || loc === "AT_EQ") executionState = "WAIT";
   } else if (effectiveBias === "BEARISH") {
-    if (ctx === "LATE_IMPULSE") executionState = "WAIT"; // V1.9：接近目标（推动末端），不追空
-    else if (loc === "PREMIUM") executionState = "READY";
-    else if (loc === "DISCOUNT") executionState = "WAIT";
+    if (loc === "PREMIUM") executionState = "READY";
+    else if (loc === "DISCOUNT" || loc === "AT_EQ") executionState = "WAIT";
   }
 
   // Reason（审计用：说清楚每个字段的依据）
@@ -113,10 +111,9 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
       reason.push(`Protected low broken by 4H close (${confirmedPrice} < ${brokenLevel}) — structure INVALIDATED`);
     } else if (provisionalStructureBreak) {
       reason.push(`Live price below 4H swing ${brokenLevel ?? lastLow.price} — provisional only, awaiting 4H close`);
-    } else if (ctx === "LATE_IMPULSE") {
-      reason.push(`Price in ${loc} near range target (LATE_IMPULSE) — execution WAIT (avoid chasing late impulse)`);
     } else if (loc === "DISCOUNT") reason.push("Price in discount — execution READY (look for longs)");
     else if (loc === "PREMIUM") reason.push("Price in premium — execution WAIT (wait for discount retracement)");
+    else if (loc === "AT_EQ") reason.push("Price at equilibrium — execution WAIT (no premium/discount advantage)");
     else reason.push(`Price location unknown (${loc})`);
   } else if (structureBias === "BEARISH") {
     reason.push("4H Lower High Lower Low");
@@ -125,10 +122,9 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
       reason.push(`Protected high broken by 4H close (${confirmedPrice} > ${brokenLevel}) — structure INVALIDATED`);
     } else if (provisionalStructureBreak) {
       reason.push(`Live price above 4H swing ${brokenLevel ?? lastHigh.price} — provisional only, awaiting 4H close`);
-    } else if (ctx === "LATE_IMPULSE") {
-      reason.push(`Price in ${loc} near range target (LATE_IMPULSE) — execution WAIT (avoid chasing late impulse)`);
     } else if (loc === "PREMIUM") reason.push("Price in premium — execution READY (look for shorts)");
     else if (loc === "DISCOUNT") reason.push("Price in discount — execution WAIT (wait for premium retracement)");
+    else if (loc === "AT_EQ") reason.push("Price at equilibrium — execution WAIT (no premium/discount advantage)");
     else reason.push(`Price location unknown (${loc})`);
   } else {
     reason.push("Structure not confirmed (HH/HL or LH/LL missing)");
@@ -152,16 +148,23 @@ export function computeDailyBias({ structure, liquidity, location, price, struct
   //   internalSwing 缺失（历史扫描/未传 1h 数据）时回退 4H 位，行为不变。
   const riskLine = computeRiskLine(effectiveBias, structureProtection, mssInvalidation, internalSwing, price);
 
-  // V1.4.1 MSS 事件化（P0）：结构失效 = 一次市场结构转移（MSS）。
+  // 结构失效事件化：普通收破 = STRUCTURE_BREAK；位移交付 = MSS。
   // 事件 schema 与 indicators/mss.js 统一：{ type, direction, level, price, confirmed }
   //   type      = "MSS"（最近 swing 被反势打破 = 结构转移；顺势 BOS 由 mss.js 按最近 swing 判定）
   //   direction = 突破方向：BULLISH 结构跌破低点 → DOWN；BEARISH 突破高点 → UP
   // P0-1：level 用实际被打破的最近 swing（brokenLevel），与 5m 层 mss.js 语义一致
   let mss = null;
   if (structureStatus === "INVALIDATED" && brokenLevel != null) {
+    const expectedDirection = direction === "BULLISH" ? "DOWN" : "UP";
+    const matchedEvent = [...(structureEvents || [])].reverse().find((event) =>
+      event.type === "MSS" && event.direction === expectedDirection
+      && Math.abs(event.level - brokenLevel) / Math.max(Math.abs(brokenLevel), 1e-9) < 0.0005) || null;
     mss = {
-      type: "MSS", // 统一结构事件类型（与 mss.js 一致），不再用 BREAK_PROTECTED_*
-      direction: direction === "BULLISH" ? "DOWN" : "UP", // 突破方向，与 mss.js UP/DOWN 一致
+      type: "MSS", // 兼容旧 schema；消费方应显示 semanticType
+      semanticType: matchedEvent?.semanticType || "STRUCTURE_BREAK",
+      ictMss: matchedEvent?.ictMss === true,
+      confirmedByDisplacement: matchedEvent?.confirmedByDisplacement === true,
+      direction: expectedDirection,
       level: brokenLevel,
       price: confirmedPrice,
       confirmed: true, // 4H 保护位穿透按传入价格（收盘/实时）判定，视为已确认事件

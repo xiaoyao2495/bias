@@ -6,14 +6,16 @@
  *   BOS（Break of Structure，顺势突破 → 趋势延续）：
  *     BULLISH : close > 最近 Swing High（lastHigh）→ BOS_UP
  *     BEARISH : close < 最近 Swing Low（lastLow） → BOS_DOWN
- *   MSS（Market Structure Shift，反势打破 → 趋势转移的第一迹象）：
- *     BULLISH : close < 最近 Swing Low（lastLow） → MSS_DOWN
- *     BEARISH : close > 最近 Swing High（lastHigh）→ MSS_UP
+ *   反势结构破坏（structure break）：
+ *     BULLISH : close < 最近 Swing Low（lastLow） → STRUCTURE_BREAK_DOWN
+ *     BEARISH : close > 最近 Swing High（lastHigh）→ STRUCTURE_BREAK_UP
+ *   ICT MSS：上述反势收盘破坏还必须由 displacement 交付。普通贴线收破仍会让旧结构
+ *   失效，但语义字段 semanticType=STRUCTURE_BREAK，不冒充课程意义上的 MSS。
  *
  * 触发基准用"最近 swing"（lastHigh / lastLow），与 V1.4 的 protectedLow/High 职责分开：
  *   protectedLow/High（最后一个 HH/LL 前的结构启动位）仅保留在 structureLayer 中供 4H
  *   失效位审计，不再作为 MSS 触发基准——否则最新 HL/LH 在最后一个 HH/LL 之后时，
- *   MSS 会被推迟到更深的位（ICT 中 MSS = 打破最近反方向 swing）。
+ *   结构破坏会被推迟到更深的位；MSS 还需要该突破由 displacement 交付。
  *
  * 收盘确认（ICT：close beyond 才算结构转移）：
  *   - swing 判定只用已收盘 K（进行中 K 不参与 Pivot 右侧确认——其 high/low 实时变动
@@ -28,10 +30,11 @@
  *
  * 位移确认（P1）：close beyond 只是"最小结构转移"，ICT 2022 更关注"带位移"的结构转移。
  * 每个事件额外输出 confirmedByDisplacement：
- *   触发 K（或紧邻前一已收盘根）为同向位移 K（BODY + VOLUME，见 displacement.js；
+ *   触发 K（或紧邻前一已收盘根）为同向位移 K（大实体 + 单边收盘交付，见 displacement.js；
  *   FVG/结构突破为标签）且位移 K 收盘跨越本次被突破的 swing 位 → true；
  *   否则（低动能、贴线式突破）→ false。
- * CHAIN 链至少要求 MSS 突破腿为位移确认（实体扩张 + 量能），过滤噪音结构转移。
+ * CHAIN 链至少要求 MSS 突破腿为位移确认；FVG 若由下一根 K 才形成，则单独等待该
+ * 三根结构确认，不能反过来延迟或否定位移 K 收盘时已经成立的 MSS。
  */
 
 import { findSwings, analyzeSwings } from "./swing.js";
@@ -41,7 +44,21 @@ import { marketNow } from "../utils/marketClock.js";
 
 function mkEvent(type, direction, level, price, swingIndex, reason, confirmed, realtime, confirmedByDisplacement) {
   // 事件基准均为最近 swing（lastHigh/lastLow）→ INTERNAL；external 位只存在于 structureLayer 审计
-  return { type, direction, level, levelType: "INTERNAL", price, swingIndex, reason, confirmed, realtime, confirmedByDisplacement };
+  const ictMss = type === "MSS" && confirmed === true && confirmedByDisplacement === true;
+  return {
+    type,
+    semanticType: type === "MSS" ? (ictMss ? "MSS" : "STRUCTURE_BREAK") : type,
+    ictMss,
+    direction,
+    level,
+    levelType: "INTERNAL",
+    price,
+    swingIndex,
+    reason,
+    confirmed,
+    realtime,
+    confirmedByDisplacement,
+  };
 }
 
 /**
@@ -62,46 +79,57 @@ function mkEvent(type, direction, level, price, swingIndex, reason, confirmed, r
  *   lastEvent: Object|null                      // 最近一次事件（消息层直接渲染）
  * }}
  */
-export function detectStructureEvents(candles, { price, left = 2, right = 2, displacements } = {}) {
+export function detectStructureEvents(candles, {
+  price,
+  left = 2,
+  right = 2,
+  displacements,
+  precomputedStructure = null,
+  displacementMap = null,
+  endIndex = null,
+} = {}) {
   const now = marketNow();
   // 修复（等待 K 收盘）：swing 判定只用已收盘 K。
   // 进行中 K 的 high/low/close 会随实时成交变动，若参与 Pivot 右侧确认，
   // 会使倒数第 2 根的 swing 状态随实时价漂移（同一根 K 时而确认时而否决），
   // 进而污染 lastHigh/lastLow 与 MSS/BOS 判定。swing 必须收盘确认；
   // 未收盘 K 仅经 price 提供"实时触发"，事件以 realtime 标注，收盘后转 confirmed。
-  const closed = candles.filter((k) => !k.closeTime || k.closeTime <= now);
-  const labeled = analyzeSwings(findSwings(closed, left, right));
-  const structure = buildStructure(labeled);
-  const last = candles[candles.length - 1];
-  const lastClosed = !last || !last.closeTime || last.closeTime <= now;
+  // 生命周期冷重建会逐根调用本函数。它已经增量维护了当根可见的 swing/structure，
+  // 并预计算了位移索引；传入这些只读上下文可避免 5000 根历史出现 O(n²) 重扫。
+  const replayIndex = Number.isInteger(endIndex) ? Math.min(endIndex, candles.length - 1) : null;
+  const closed = precomputedStructure ? null : candles.filter((k) => !k.closeTime || k.closeTime <= now);
+  const labeled = precomputedStructure ? null : analyzeSwings(findSwings(closed, left, right));
+  const structure = precomputedStructure || buildStructure(labeled);
+  const last = replayIndex == null ? candles[candles.length - 1] : candles[replayIndex];
+  const lastClosed = replayIndex != null || !last || !last.closeTime || last.closeTime <= now;
 
-  // 判定价：优先实时 price（进行中提示），缺省末根 close（收盘确认）
-  const p = price != null ? price : last ? last.close : null;
+  // 判定价：已收盘事件只能使用该 K 的 close。price 仅用于末根仍进行中时的实时预警，
+  // 防止调用方把最新成交价与“已收盘数组”一起传入后伪造 confirmed MSS/BOS。
+  const p = lastClosed ? (last ? last.close : null) : price != null ? price : last ? last.close : null;
 
-  // 位移确认索引（index → {index, dir, confirmationIndex, close, fvg}）：触发事件的那根已收盘 K
-  // （或紧邻前一已收盘根）为同向位移 K（BODY + VOLUME，FVG/结构突破为标签）→ 该事件"带位移"。
-  // P1 防前视：位移 K 的 FVG 可能由"下一根"确认（中间根位移）——逐根历史扫描若读完整
-  // 数组预计算结果，会在确认 K 到来之前就提前打标。只有 confirmationIndex <= 当前
-  // 已收盘索引（lastIdx）时该位移才成立；进行中 K（realtime）同理不可确认位移。
-  // P1 位移保存突破事件：位移 K 的 MSS/BOS 在确认点（confirmationIndex）即成立，不要求
-  // 确认 K 再次收在 swing 外——确认 K 可能收回 swing 内（位移 K 的突破依然真实发生过）。
-  const dispSet = new Map();
-  const dispList = displacements ?? findDisplacements(closed);
-  for (const d of dispList) {
-    dispSet.set(d.index, {
-      index: d.index,
-      dir: d.direction,
-      confirmationIndex: d.confirmationIndex,
-      close: d.close,
-      fvg: d.fvg,
-    });
+  // 位移索引（index → {index, dir, confirmationIndex, close, fvg}）：触发事件的那根已收盘 K
+  // （或紧邻前一已收盘根）为同向位移 K → 该事件"带位移"。位移在自身收盘确认；
+  // confirmationIndex 只表示其关联三根 FVG 的确认 K，不能用它延迟 MSS。
+  // 防前视：若 FVG 需要下一根确认，在该根到来前只附加 displacement，不附加 displacementFvg。
+  const dispSet = displacementMap || new Map();
+  if (!displacementMap) {
+    const dispList = displacements ?? findDisplacements(closed);
+    for (const d of dispList) {
+      dispSet.set(d.index, {
+        index: d.index,
+        dir: d.direction,
+        confirmationIndex: d.confirmationIndex,
+        close: d.close,
+        fvg: d.fvg,
+      });
+    }
   }
-  const lastIdx = closed.length - 1;
+  const lastIdx = replayIndex == null ? closed.length - 1 : replayIndex;
   const dNear = (dir) => {
     const d0 = dispSet.get(lastIdx);
     const d1 = dispSet.get(lastIdx - 1);
-    if (d0 && d0.dir === dir && d0.confirmationIndex <= lastIdx) return d0;
-    if (d1 && d1.dir === dir && d1.confirmationIndex <= lastIdx) return d1;
+    if (d0 && d0.dir === dir) return d0;
+    if (d1 && d1.dir === dir) return d1;
     return null;
   };
   // 位移腿绑定（P1）：位移必须实际跨越被突破的 swing 位——位移 K 收盘在 swing 另一侧。
@@ -123,10 +151,15 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
   function attachDisplacement(event, d) {
     if (!d) return event;
     event.confirmedByDisplacement = true;
+    if (event.type === "MSS" && event.confirmed) {
+      event.semanticType = "MSS";
+      event.ictMss = true;
+    }
     event.atIndex = d.index;
     event.displacementIndex = d.index;
-    event.displacementConfirmationIndex = d.confirmationIndex;
-    event.displacementFvg = d.fvg;
+    const fvgConfirmed = d.fvg && d.confirmationIndex <= lastIdx;
+    event.displacementConfirmationIndex = fvgConfirmed ? d.confirmationIndex : null;
+    event.displacementFvg = fvgConfirmed ? d.fvg : null;
     return event;
   }
 
@@ -136,8 +169,8 @@ export function detectStructureEvents(candles, { price, left = 2, right = 2, dis
   const lastLow = structure.lastLow;
 
   // BOS：顺趋势（或 NEUTRAL 首次突破）打破最近 swing
-  // P1：broke 分支用当前 p 判定（收盘确认/实时）；dispBroke 分支是"位移已确认（confirmationIndex
-  // 已到）但确认 K 收盘已收回 swing 内"——位移 K 的突破真实发生过，事件仍成立（price 用位移 K
+  // P1：broke 分支用当前 p 判定（收盘确认/实时）；dispBroke 分支是"上一根位移已确认，
+  // 但当前 K 收盘已收回 swing 内"——位移 K 的突破真实发生过，事件仍成立（price 用位移 K
   // 收盘价，atIndex 标位移 K 而非确认 K）。
   if (lastHigh && (direction === "BULLISH" || direction === "NEUTRAL")) {
     const d = dNear("UP");
@@ -241,11 +274,19 @@ export function scanStructureEvents(candles, { lookback = 50, left = 2, right = 
       last.price = e.price;
       last.lastSeenAt = e.atIndex;
       last.lastSeenTime = e.time;
-      if (e.confirmedByDisplacement) {
+      // 只允许“原突破腿的 FVG 延后一根确认”补齐位移证据；更晚的新位移不能回头
+      // 美化第一次普通收破，否则会事后拼出并不存在的 Sweep→MSS 因果链。
+      if (e.confirmedByDisplacement && e.displacementIndex === last.atIndex) {
         last.confirmedByDisplacement = true;
+        if (last.type === "MSS") {
+          last.semanticType = "MSS";
+          last.ictMss = true;
+        }
         last.displacementIndex = e.displacementIndex;
         last.displacementConfirmationIndex = e.displacementConfirmationIndex;
         last.displacementFvg = e.displacementFvg;
+      } else if (e.confirmedByDisplacement) {
+        last.laterDisplacementAt = e.displacementIndex;
       }
       continue;
     }

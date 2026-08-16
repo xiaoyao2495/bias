@@ -203,6 +203,21 @@ test("detectSweepEvents: 两轮轮询之间的多个独立扫损事件全部返�
   assert.equal(detectSweeps([...bars, liveK(109, 110, 108, 109)], [{ type: "PDH", price: 105 }, { type: "PWH", price: 110 }], [], 109).key, `${bars[48].time}_BSL`);
 });
 
+test("外部资产休市 K 不生成或消费扫损事件", () => {
+  const bars = Array.from({ length: 50 }, (_, i) => normal(i));
+  bars[48] = closedK(48, 104, 106, 103, 104);
+  const input = [...bars, liveK(104, 105, 103, 104)];
+  const blocked = detectSweepEvents(input, [{ type: "PDH", price: 105 }], [], 104, 48, null, {
+    eventTimeAllowed: () => false,
+  });
+  assert.deepEqual(blocked, []);
+  const allowed = detectSweepEvents(input, [{ type: "PDH", price: 105 }], [], 104, 48, null, {
+    eventTimeAllowed: (time) => time === bars[48].time,
+  });
+  assert.equal(allowed.length, 1);
+  assert.equal(allowed[0].tier, 2);
+});
+
 test("detectSweepEvents: 同价位不同来源合并为一个流动性池", () => {
   const bars = Array.from({ length: 50 }, (_, i) => normal(i));
   bars[48] = closedK(48, 104, 107, 103, 104);
@@ -254,18 +269,19 @@ test("L1：首根恰好收在流动性位时，后续继续刺破不得生成第
 });
 
 test("三级事件：收回后有位移主导 MSS 与 FVG=L3，否则保持L2", () => {
-  const raid = { key: "raid", baseKey: "raid", reclaimed: true, tier: 2, stage: "RECLAIMED_RAID" };
+  const identity = { originRangeId: "DR_L3", rangeId: "DR_L3", tradingDayId: "2026-08-16" };
+  const raid = { key: "raid", baseKey: "raid", reclaimed: true, tier: 2, stage: "RECLAIMED_RAID", ...identity };
   assert.equal(classifyLiquidityEvent(raid).tier, 2);
   const confirmed = classifyLiquidityEvent({
     ...raid,
-    mss5m: { lastEvent: { type: "MSS", confirmedByDisplacement: true, displacementFvg: { bottom: 99, top: 100 } } },
-    confirmationFvg: { bottom: 99, top: 100, executable: true, quality: "STRUCTURE" },
+    mss5m: { lastEvent: { type: "MSS", confirmedByDisplacement: true, displacementId: "DISP_L3", displacementFvg: { bottom: 99, top: 100 }, ...identity } },
+    confirmationFvg: { bottom: 99, top: 100, ictValid: true, executable: false, executionQuality: "THIN", quality: "STRUCTURE", displacementId: "DISP_L3", ...identity },
   });
   assert.equal(confirmed.tier, 3);
   assert.equal(confirmed.stage, "ICT_2022_CONFIRMED");
   assert.match(confirmed.key, /ICT_2022_CONFIRMED$/);
-  const filled = classifyLiquidityEvent({ ...confirmed, confirmationFvg: { executable: false }, baseKey: "raid" });
-  assert.equal(filled.tier, 2, "FVG已收盘填平或未通过动态宽度时不得维持L3");
+  const filled = classifyLiquidityEvent({ ...confirmed, confirmationFvg: { ictValid: false, executionStatus: "FILLED" }, baseKey: "raid" });
+  assert.equal(filled.tier, 2, "只有FVG被实际填补时才不得维持L3；ATR过窄不影响课程确认");
 });
 
 test("1H swing 在右侧确认 K 收盘前不可被扫", () => {
@@ -304,16 +320,16 @@ test("detectSweeps: 流动性位无形成时间 → 不产生 levelTime/levelDat
 // —— Judas Swing（ICT 2022）：NY Open 窗口判定 ——
 // 窗口 = 美股开盘后 90 分钟（北京时间）：夏令时（4-10 月）21:30-23:00，冬令时 22:30-24:00
 
-test("isJudasWindow: 夏令时 北京 21:35（2026-08 月中）→ true", () => {
-  assert.equal(isJudasWindow(new Date("2026-08-08T13:35:00Z")), true); // 北京 21:35
+test("isJudasWindow: 夏令时工作日 北京 21:35 → true", () => {
+  assert.equal(isJudasWindow(new Date("2026-08-12T13:35:00Z")), true); // 北京 21:35
 });
 
 test("isJudasWindow: 夏令时 北京 21:30 整 → true（含边界）", () => {
-  assert.equal(isJudasWindow(new Date("2026-08-08T13:30:00Z")), true); // 北京 21:30
+  assert.equal(isJudasWindow(new Date("2026-08-12T13:30:00Z")), true); // 北京 21:30
 });
 
 test("isJudasWindow: 夏令时 北京 23:00 → false（窗口已过）", () => {
-  assert.equal(isJudasWindow(new Date("2026-08-08T15:00:00Z")), false); // 北京 23:00
+  assert.equal(isJudasWindow(new Date("2026-08-12T15:00:00Z")), false); // 北京 23:00
 });
 
 test("isJudasWindow: 冬令时 北京 22:35（2026-01 月中）→ true", () => {
@@ -334,13 +350,20 @@ test("detectSweeps: 传入 bias 时返回 judas 字段（默认 false，不改�
 });
 
 test("P1-4：历史扫损按事件 K 时间判断 Judas，不受程序运行时间影响", () => {
-  const inside = Date.parse("2026-08-08T13:35:00Z"); // 北京 21:35，夏令时 NY Open
-  const outside = Date.parse("2026-08-08T12:00:00Z"); // 北京 20:00
+  const inside = Date.parse("2026-08-12T13:35:00Z"); // 北京 21:35，夏令时 NY Open
+  const outside = Date.parse("2026-08-12T12:00:00Z"); // 北京 20:00
   const event = (time) => ({ time, open: 113, high: 114, low: 110, close: 112, closeTime: time + M5 });
   const level = [{ type: "EQL", price: 111 }];
 
   assert.equal(detectSweeps([event(inside)], [], level, undefined, 48, "BULLISH").judas, true);
   assert.equal(detectSweeps([event(outside)], [], level, undefined, 48, "BULLISH").judas, false);
+});
+
+test("isJudasWindow: 美国DST切换前后都按纽约当地09:30，不用月份近似", () => {
+  assert.equal(isJudasWindow(new Date("2026-03-06T14:30:00Z")), true); // EST 09:30
+  assert.equal(isJudasWindow(new Date("2026-03-09T13:30:00Z")), true); // EDT 09:30
+  assert.equal(isJudasWindow(new Date("2026-03-09T14:59:00Z")), true); // EDT 10:59
+  assert.equal(isJudasWindow(new Date("2026-03-09T15:00:00Z")), false); // EDT 11:00
 });
 
 test("P1-4：实时扫损同样按当前 5m K 开盘时间判断 Judas", () => {

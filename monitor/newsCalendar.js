@@ -25,6 +25,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProxyAgent, request } from "undici";
 import { marketNow } from "../utils/marketClock.js";
+import { INSTRUMENT_KIND, resolveInstrumentProfile } from "../indicators/instrumentProfile.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR = join(__dirname, "..", "data", "cache");
@@ -42,8 +43,6 @@ const proxyAgent = PROXY ? new ProxyAgent(PROXY) : null;
 
 // 恒标注消息面的主币（宏观数据直接驱动）
 const ALWAYS_NEWS = new Set(["BTCUSDT", "ETHUSDT"]);
-// 股票代币类型（Binance fapi underlyingType；KR_EQUITY = 韩股）
-const STOCK_TYPES = new Set(["EQUITY", "KR_EQUITY"]);
 
 // 只看美国高影响事件（FOMC / CPI / NFP / PCE / GDP 等均在此列）
 const NEWS_COUNTRY = "USD";
@@ -186,7 +185,7 @@ export function filterUpcomingEvents(events, now = marketNow(), hours = NEWS_HOU
 /** 该合约是否标注消息面窗口（纯函数）：BTCUSDT/ETHUSDT 恒是；其余看 exchangeInfo 类型 */
 export function isNewsRelevantSymbol(symbol, exchInfo = {}) {
   if (ALWAYS_NEWS.has(symbol)) return true;
-  return STOCK_TYPES.has(exchInfo[symbol]);
+  return resolveInstrumentProfile(symbol, exchInfo).kind === INSTRUMENT_KIND.EQUITY_LINKED;
 }
 
 /**

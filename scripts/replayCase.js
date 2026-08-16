@@ -18,16 +18,15 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getHistory } from "../data/binance.js";
-import { analyzeBias } from "../engine/analyzeBias.js";
+import { analyzeReplayPoint, loadReplayHistory, REPLAY_HISTORY_COUNTS } from "../engine/replayPipeline.js";
 import { formatReport } from "../report/formatter.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CASES_DIR = join(__dirname, "..", "cases");
 
 // 回放需要覆盖回放时间之前的足够历史：
-//   4H 3000 根 ≈ 500 天；1D 2000 根 ≈ 5.5 年（保证 2025 年回放点的 HTF 方向可稳定判定）；1W 400 根 ≈ 7.7 年
-const HISTORY = { "4h": 3000, "1d": 2000, "1w": 400 };
+// 与 Monitor / Historical Scanner 使用同一个 4H 冷启动窗口；否则同一 cutoff 虽可能
+// 得到相同 Range ID，生命周期 version/selectedAt 仍会因历史起点不同而漂移。
 
 const symbol = (process.argv[2] || "BTCUSDT").toUpperCase();
 const replayTime = Date.parse(process.argv[3] || "");
@@ -39,41 +38,26 @@ if (!replayTime) {
   process.exit(1);
 }
 
-/** 截断到回放时间之前已收盘的 K 线 */
-function sliceToTime(candles, time) {
-  return candles.filter((k) => k.closeTime <= time);
-}
-
 async function main() {
   console.error(`[replay] ${symbol} @ ${new Date(replayTime).toISOString()} 拉取历史数据...`);
 
-  const [h4, daily, weekly] = await Promise.all([
-    getHistory(symbol, "4h", HISTORY["4h"]),
-    getHistory(symbol, "1d", HISTORY["1d"]),
-    getHistory(symbol, "1w", HISTORY["1w"]),
-  ]);
-
-  const candles4h = sliceToTime(h4, replayTime);
-  const day = sliceToTime(daily, replayTime);
-  const week = sliceToTime(weekly, replayTime);
+  const history = await loadReplayHistory({
+    symbol,
+    earliestCutoff: replayTime,
+    h4Count: REPLAY_HISTORY_COUNTS.h4,
+    dailyCount: REPLAY_HISTORY_COUNTS.daily,
+    weeklyCount: REPLAY_HISTORY_COUNTS.weekly,
+  });
+  const point = analyzeReplayPoint({ symbol, cutoff: replayTime, history });
+  const candles4h = point.input.candles;
 
   if (candles4h.length < 60) {
     console.error(`[replay] 回放时间 ${new Date(replayTime).toISOString()} 超出数据范围（4H 仅 ${candles4h.length} 根），无法计算`);
     process.exit(1);
   }
 
-  const price = candles4h[candles4h.length - 1].close;
-
-  // 共用分析链路（与实时监控/历史扫描一致，engine/analyzeBias.js）：
-  // 内部按 replayTime 截断日/周线并注入 htfDirection，保证回放与实时结果一致；
-  // 后续指标/confidence 更新只需改 analyzeBias 一处，回放/审计自动同步
-  const { structure, liquidity, location, pdArray, bias } = analyzeBias({
-    candles: candles4h,
-    daily: day,
-    weekly: week,
-    price,
-    time: replayTime,
-  });
+  const { structure, liquidity, location, pdArray, bias } = point.result;
+  console.error(`[replay] profile=${point.profile.sessionModel} HTF=${liquidity.htfLiquiditySource} marketDay=${point.marketDayId} ictDay=${point.ictTradingDayId}`);
 
   const report = formatReport({ symbol, replayTime, structure, liquidity, location, pdArray, bias });
 

@@ -38,8 +38,8 @@ test("isNewsRelevantSymbol: BTCUSDT/ETHUSDT 恒标注；EQUITY/KR_EQUITY 股票�
   assert.equal(isNewsRelevantSymbol("SKHYNIXUSDT", exch), true);
   assert.equal(isNewsRelevantSymbol("DOGEUSDT", exch), false);
   assert.equal(isNewsRelevantSymbol("XAUUSDT", exch), false);
-  // exchangeInfo 拉取失败（空对象）时只剩 BTC/ETH 恒标注
-  assert.equal(isNewsRelevantSymbol("MUUSDT", {}), false);
+  // exchangeInfo 拉取失败时，统一 InstrumentProfile 的保守股票白名单仍能识别已知标的
+  assert.equal(isNewsRelevantSymbol("MUUSDT", {}), true);
 });
 
 test("newsLineFor: 不相关合约 → null（即使有事件）", () => {

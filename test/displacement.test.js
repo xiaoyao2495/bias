@@ -1,8 +1,8 @@
 /**
- * displacement.test.js — 位移 K 检测（ICT 2022：BODY + VOLUME）
+ * displacement.test.js — 位移 K 检测（ICT 2022：价格的快速单边交付）
  *
  * 覆盖 findDisplacements：
- *   门槛：BODY（实体 ≥ 阈值倍 × 前 lookback 根平均实体）+ VOLUME（量 ≥ 阈值倍 × 前均量）
+ *   门槛：实体扩张 + 高实体占比 + 收盘靠近推动端；VOLUME 默认只作辅助证据
  *   标签：structureBreak（收盘越过最近 Swing，可空）/ fvg（同向缺口，可空）
  *   fixture 无量 → 跳过量门槛，退化为纯实体判定。
  */
@@ -108,8 +108,17 @@ test("无 FVG 仍为位移 → fvg=null（FVG 降级为标签）", () => {
   assert.deepEqual(out[0].structureBreak, { type: "BOS", direction: "UP", level: 103.5, swingIndex: 8 });
 });
 
-test("VOLUME 门槛：实体达标但量不足 → 非位移（BODY + VOLUME 缺一不可）", () => {
+test("成交量默认只作辅助证据：低量不否决价格位移；可显式开启量能门槛", () => {
   const c = upScenario().map((x, i) => ({ ...x, quoteVol: i === 20 ? 50 : 100 })); // 位移 K 量 0.5x
+  const out = findDisplacements(c);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].volumeRatio, 0.5);
+  assert.deepEqual(findDisplacements(c, { requireVolume: true }), []);
+});
+
+test("位移价格交付：大实体但长影线/收盘不靠近推动端 → 不算 displacement", () => {
+  const c = upScenario();
+  c[20] = { ...c[20], open: 100, close: 106, high: 112, low: 94 }; // body 6，但仅占 range 1/3
   assert.deepEqual(findDisplacements(c), []);
 });
 

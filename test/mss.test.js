@@ -15,6 +15,18 @@ function mk(h, l, i, closed = true) {
   return { time: i, open: o, high: h, low: l, close: o, closeTime: closed ? now - 1 : now + 100000 };
 }
 
+function withClosedPrice(candles, price) {
+  const last = candles.at(-1);
+  return [...candles, {
+    time: Number(last.time) + 1,
+    closeTime: now - 1,
+    open: last.close,
+    high: Math.max(last.close, price),
+    low: Math.min(last.close, price),
+    close: price,
+  }];
+}
+
 // BULLISH 结构：LOW99(LL) → HIGH115(HH) → LOW108(HL) → HIGH120(HH)
 const bullish = [
   mk(102, 100, 0), mk(102, 100, 1), mk(102, 99, 2), mk(102, 100, 3), mk(103, 101, 4),
@@ -40,7 +52,7 @@ const neutral = [
 ];
 
 test("BULLISH：突破最近 Swing High → BOS_UP（趋势延续，收盘确认）", () => {
-  const r = detectStructureEvents(bullish, { price: 121 });
+  const r = detectStructureEvents(withClosedPrice(bullish, 121));
   assert.equal(r.direction, "BULLISH");
   assert.equal(r.structureStatus, "VALID");
   assert.equal(r.lastEvent.type, "BOS");
@@ -52,10 +64,12 @@ test("BULLISH：突破最近 Swing High → BOS_UP（趋势延续，收盘确认
 });
 
 test("BULLISH：跌破最近 Swing Low（lastLow）→ MSS_DOWN（趋势转移）", () => {
-  const r = detectStructureEvents(bullish, { price: 107 });
+  const r = detectStructureEvents(withClosedPrice(bullish, 107));
   assert.equal(r.lastEvent.type, "MSS");
   assert.equal(r.lastEvent.direction, "DOWN");
   assert.equal(r.lastEvent.level, 108); // MSS 基准 = 最近 swing low，非 protectedLow
+  assert.equal(r.lastEvent.semanticType, "STRUCTURE_BREAK");
+  assert.equal(r.lastEvent.ictMss, false);
   assert.equal(r.structureStatus, "INVALIDATED");
   assert.equal(r.structureLayer.internal.lastLow.price, 108);
   assert.equal(r.structureLayer.internal.trend, "BULLISH");
@@ -63,7 +77,7 @@ test("BULLISH：跌破最近 Swing Low（lastLow）→ MSS_DOWN（趋势转移�
 });
 
 test("BEARISH：跌破最近 Swing Low → BOS_DOWN", () => {
-  const r = detectStructureEvents(bearish, { price: 109 });
+  const r = detectStructureEvents(withClosedPrice(bearish, 109));
   assert.equal(r.direction, "BEARISH");
   assert.equal(r.lastEvent.type, "BOS");
   assert.equal(r.lastEvent.direction, "DOWN");
@@ -71,7 +85,7 @@ test("BEARISH：跌破最近 Swing Low → BOS_DOWN", () => {
 });
 
 test("BEARISH：突破最近 Swing High（lastHigh）→ MSS_UP", () => {
-  const r = detectStructureEvents(bearish, { price: 136 });
+  const r = detectStructureEvents(withClosedPrice(bearish, 136));
   assert.equal(r.lastEvent.type, "MSS");
   assert.equal(r.lastEvent.direction, "UP");
   assert.equal(r.lastEvent.level, 125); // MSS 基准 = 最近 swing high（LH），非 protectedHigh 135
@@ -85,7 +99,7 @@ test("MSS 优先于更深的保护位：BULLISH 中最新 HL 后的 HH 场景（
     mk(116, 112, 16), // 回撤低点 112 → HL（最近 swing low）
     mk(115, 113, 17), mk(115, 114, 18),
   ]);
-  const r = detectStructureEvents(data, { price: 111 });
+  const r = detectStructureEvents(withClosedPrice(data, 111));
   assert.equal(r.direction, "BULLISH");
   assert.equal(r.lastEvent.type, "MSS");
   assert.equal(r.lastEvent.direction, "DOWN");
@@ -94,7 +108,7 @@ test("MSS 优先于更深的保护位：BULLISH 中最新 HL 后的 HH 场景（
 });
 
 test("NEUTRAL：结构未确认时突破 swing → BOS（方向建立第一迹象），不触发 MSS", () => {
-  const r = detectStructureEvents(neutral, { price: 110 });
+  const r = detectStructureEvents(withClosedPrice(neutral, 110));
   assert.equal(r.direction, "NEUTRAL");
   assert.equal(r.lastEvent.type, "BOS");
   assert.equal(r.lastEvent.direction, "UP");
@@ -109,7 +123,7 @@ test("价格在结构内 → 无事件", () => {
 
 test("收盘确认：末根已收盘才 confirmed；进行中 K 传实时价 → 仅提示（realtime）", () => {
   // 已收盘末根（index 15 closeTime 过去）：判定用 close，事件 confirmed
-  const closed = detectStructureEvents(bullish, { price: 121 });
+  const closed = detectStructureEvents(withClosedPrice(bullish, 121));
   assert.equal(closed.lastEvent.confirmed, true);
 
   // 进行中末根（closeTime 未来）：判定价=传入实时价，事件仅提示
@@ -122,7 +136,7 @@ test("收盘确认：末根已收盘才 confirmed；进行中 K 传实时价 →
 
 test("修复：进行中 K 不参与 swing 确认，swing 点不漂移", () => {
   // 基准：bullish 最后一个已确认 swing high = 120
-  const rBase = detectStructureEvents(bullish, { price: 121 });
+  const rBase = detectStructureEvents(withClosedPrice(bullish, 121));
   assert.equal(rBase.structureLayer.internal.lastHigh.price, 120);
 
   // 追加两根进行中 K（closeTime 未来），其 high 极高（999/998）——
@@ -141,7 +155,7 @@ test("修复：进行中 K 不参与 swing 确认，swing 点不漂移", () => {
 
 test("修复：已收盘全部时行为不变（swing 正常确认）", () => {
   // 最后两根已收盘：index 15(118) < 14(119) 不构成 swing；lastHigh 仍 120
-  const r = detectStructureEvents(bullish, { price: 121 });
+  const r = detectStructureEvents(withClosedPrice(bullish, 121));
   assert.equal(r.structureLayer.internal.lastHigh.price, 120);
   assert.equal(r.structureLayer.internal.lastLow.price, 108);
   assert.equal(r.lastEvent.type, "BOS");
@@ -215,7 +229,12 @@ test("P1 位移确认：贴线突破（小实体，无位移）→ confirmedByDi
   assert.equal(r.lastEvent.confirmedByDisplacement, false);
 });
 
-test("P1 防前视：中间根位移（FVG 由下一根确认）→ 位移 K 自身不提前打标", () => {
+test("已收盘数组即使误传实时价，也只能按末根close判断，不能伪造confirmed事件", () => {
+  const r = detectStructureEvents(bullish, { price: 999 });
+  assert.equal(r.events.length, 0);
+});
+
+test("位移与FVG确认解耦：中间根位移当根确认结构事件，关联 FVG 等下一根且无前视", () => {
   const tiny = { open: 100, close: 101, high: 102, low: 99 }; // 实体 1
   const data = [
     ...Array(16).fill(tiny),
@@ -225,13 +244,20 @@ test("P1 防前视：中间根位移（FVG 由下一根确认）→ 位移 K 自
     { open: 116, close: 117, high: 118, low: 105 }, // FVG 确认 K：low 105 > idx19.high 102（bullishFvg 分支 2）
   ].map((k, i) => ({ time: i, closeTime: now - 1, ...k }));
   // 模拟 scanStructureEvents：完整数组预计算位移，再逐根切片传入（前视源）。
-  // 位移 K 的 FVG 由下一根（confirmationIndex=21）确认——切片到 idx20 时不得提前打标。
+  // 位移 K 的 FVG 由下一根（confirmationIndex=21）确认。切片到 idx20 时 BOS 已因
+  // displacement 成立，但不得提前携带尚未形成的 displacementFvg。
   const displacements = findDisplacements(data);
   const rPre = detectStructureEvents(data.slice(0, 21), { left: 1, right: 1, displacements });
   assert.equal(rPre.lastEvent.confirmed, true);
-  assert.equal(rPre.lastEvent.confirmedByDisplacement, false, "位移 K 自身（FVG 未确认）不得提前打标");
+  assert.equal(rPre.lastEvent.confirmedByDisplacement, true, "位移在自身收盘确认，不依赖下一根 FVG");
+  assert.equal(rPre.lastEvent.type, "BOS");
+  assert.equal(rPre.lastEvent.semanticType, "BOS");
+  assert.equal(rPre.lastEvent.displacementFvg, null, "第三根未到前不得读取未来 FVG");
+  assert.equal(rPre.lastEvent.displacementConfirmationIndex, null);
   const rOk = detectStructureEvents(data, { left: 1, right: 1, displacements });
-  assert.equal(rOk.lastEvent.confirmedByDisplacement, true, "FVG 确认 K 到达后打标");
+  assert.equal(rOk.lastEvent.confirmedByDisplacement, true);
+  assert.deepEqual(rOk.lastEvent.displacementFvg, displacements.find((d) => d.index === 20).fvg);
+  assert.equal(rOk.lastEvent.displacementConfirmationIndex, 21, "FVG 确认 K 到达后才附加关联区");
 });
 
 test("P1 位移确认：中间根位移（FVG 由下一根确认）且确认 K 收回 swing 内 → 位移 K 的 MSS 仍成立", () => {
@@ -261,6 +287,8 @@ test("P1 位移确认：中间根位移（FVG 由下一根确认）且确认 K �
   assert.equal(r.lastEvent.level, 102);
   assert.equal(r.lastEvent.price, 104, "价格应取位移 K 收盘价（突破发生时），而非收回的确认 K 收盘价");
   assert.equal(r.lastEvent.confirmedByDisplacement, true, "位移确认后不得因确认 K 收回 swing 内而否决");
+  assert.equal(r.lastEvent.semanticType, "MSS");
+  assert.equal(r.lastEvent.ictMss, true);
   // 历史扫描：事件应标在位移 K（closed index 22）而非确认 K，且为位移确认
   const events = scanStructureEvents(data, { lookback: 50, left: 1, right: 1 });
   const mssUp = events.find((e) => e.type === "MSS" && e.direction === "UP" && e.confirmedByDisplacement);
@@ -294,4 +322,25 @@ test("P1: 去重保留首次突破时间（同 level 连续 MSS 不把事件起�
   assert.equal(mssUps[0].atIndex, 22, "事件起点保留首次突破根（不得被推后）");
   assert.equal(mssUps[0].time, data[22].closeTime, "time 保持首次突破时间");
   assert.equal(mssUps[0].lastSeenAt, 24, "持续状态记录最后仍突破的根");
+});
+
+test("首次普通收破后更晚才出现位移，不得事后把第一次结构破坏升级成MSS", () => {
+  const tiny = { open: 100, close: 101, high: 102, low: 99 };
+  const rows = [
+    [100, 100, 100, 100], [100, 105, 100, 105], [104, 104, 98, 100],
+    [100, 100, 99, 100], [100, 102, 99, 101], [98, 99, 97, 98],
+    [101.5, 103, 101.5, 102.2], // 首次贴线收破 102，无位移
+    [102.1, 103, 102, 102.3],
+    [102, 108, 102, 107],       // 更晚的大实体位移
+    [107, 108, 106, 107.5],
+  ];
+  const data = [...Array(16).fill(tiny), ...rows.map(([open, high, low, close]) => ({ open, high, low, close }))]
+    .map((bar, i) => ({ time: i, closeTime: now - 1, ...bar }));
+  const event = scanStructureEvents(data, { lookback: 50, left: 1, right: 1 })
+    .find((item) => item.type === "MSS" && item.direction === "UP");
+  assert.ok(event);
+  assert.equal(event.atIndex, 22);
+  assert.equal(event.confirmedByDisplacement, false);
+  assert.equal(event.semanticType, "STRUCTURE_BREAK");
+  assert.equal(event.laterDisplacementAt, 24);
 });

@@ -10,12 +10,11 @@
  * 用法（经 scripts/scanBias.js CLI）：
  *   node scripts/scanBias.js BTCUSDT --start 2025-01-01 --end 2026-01-01 --step 6
  */
-import { getHistory } from "../data/binance.js";
-import { analyzeBias } from "../engine/analyzeBias.js";
+import { analyzeReplayPoint, loadReplayHistory, REPLAY_HISTORY_COUNTS } from "../engine/replayPipeline.js";
+import { rebuildDealingRangeLifecycle } from "../indicators/dealingRangeLifecycle.js";
+import { resolveInstrumentProfile } from "../indicators/instrumentProfile.js";
 import { evaluateOutcome } from "./evaluator.js";
 
-// 数据窗口：4H 5000 根 ≈ 830 天（覆盖 2025 全年 + 前置历史），1D 2000 根 / 1W 400 根用于 HTF 方向
-const HISTORY = { "4h": 5000, "1d": 2000, "1w": 400 };
 const DEFAULT_WINDOWS = [7, 14, 30];
 
 /**
@@ -31,12 +30,18 @@ const DEFAULT_WINDOWS = [7, 14, 30];
  * @param {function} [p.onProgress] 进度回调（n, total, sample）
  * @returns {Promise<{ samples: Array, meta: Object }>}
  */
-export async function scanHistory({ symbol, startTime, endTime, step = 6, targetPct = 0.05, windows = DEFAULT_WINDOWS, onProgress } = {}) {
-  const [h4, daily, weekly] = await Promise.all([
-    getHistory(symbol, "4h", HISTORY["4h"]),
-    getHistory(symbol, "1d", HISTORY["1d"]),
-    getHistory(symbol, "1w", HISTORY["1w"]),
-  ]);
+export async function scanHistory({ symbol, startTime, endTime, step = 6, targetPct = 0.05, windows = DEFAULT_WINDOWS, onProgress, exchangeInfo = null, instrumentProfile = null, history = null } = {}) {
+  const loaded = history || await loadReplayHistory({
+    symbol,
+    earliestCutoff: startTime,
+    exchangeInfo,
+    instrumentProfile,
+    h4Count: REPLAY_HISTORY_COUNTS.h4,
+    dailyCount: REPLAY_HISTORY_COUNTS.daily,
+    weeklyCount: REPLAY_HISTORY_COUNTS.weekly,
+  });
+  const h4 = loaded.h4 || [];
+  const profile = instrumentProfile || loaded.instrumentProfile || resolveInstrumentProfile(symbol, exchangeInfo || loaded.exchangeInfo || {});
 
   // 样本及其未来窗口都限制在 endTime 之前
   const bars = h4.filter((k) => k.closeTime <= endTime);
@@ -53,11 +58,27 @@ export async function scanHistory({ symbol, startTime, endTime, step = 6, target
   const indices = [];
   for (let i = startIdx; i <= lastUsable; i += step) indices.push(i);
 
+  // Range 状态必须逐根推进，step 只控制“是否输出样本”，不能跳过中间的失效/MSS/位移。
+  const lifecycle = rebuildDealingRangeLifecycle({
+    candles: bars,
+    endIndex: indices.length ? indices.at(-1) - 1 : -1,
+  });
   const samples = [];
   for (let idx = 0; idx < indices.length; idx++) {
     const i = indices[idx];
     const k = bars[i];
-    const sample = analyzeAt(bars, daily, weekly, i, k, targetPct, windows);
+    const { sample } = analyzeAt({
+      symbol,
+      history: { ...loaded, h4: bars },
+      instrumentProfile: profile,
+      exchangeInfo: exchangeInfo || loaded.exchangeInfo,
+      bars,
+      i,
+      k,
+      targetPct,
+      windows,
+      priorRange: i > 0 ? lifecycle.rangesByIndex[i - 1] || null : null,
+    });
     samples.push(sample);
     if (onProgress) onProgress(idx + 1, indices.length, sample);
   }
@@ -72,17 +93,21 @@ export async function scanHistory({ symbol, startTime, endTime, step = 6, target
       targetPct,
       windows,
       sampleCount: samples.length,
+      instrumentKind: profile?.kind || null,
+      sessionModel: profile?.sessionModel || null,
+      htfLiquiditySource: profile?.htfLiquiditySource || null,
+      rangeLifecycleSteps: lifecycle.stepsProcessed,
+      rangeTransitionCount: lifecycle.transitions.length,
     },
   };
 }
 
 /** 在 4H bars[i] 收盘点跑一次完整 Bias 分析 + 未来评估（与 Case Replay / 实时监控共用 analyzeBias） */
-function analyzeAt(bars, daily, weekly, i, k, targetPct, windows) {
-  const candles = bars.slice(0, i + 1); // 已收盘（closeTime <= k.closeTime）
-  const price = k.close;
+export function analyzeAt({ symbol, history, instrumentProfile, exchangeInfo, bars, i, k, targetPct, windows, priorRange = null }) {
   const t = k.closeTime;
-
-  const { structure, location, bias } = analyzeBias({ candles, daily, weekly, price, time: t });
+  const point = analyzeReplayPoint({ symbol, cutoff: t, history, instrumentProfile, exchangeInfo, priorRange, rebuildRangeState: false });
+  const { structure, liquidity, location, dealingRangeReady, rangeCandidate, ictSession, executionSession, bias } = point.result;
+  const price = point.price;
 
   // P0-1：统一使用有效方向（effectiveBias）——MSS/保护位失效后 bias.bias 仍是失效前的
   // 原始方向，实盘展示用 effectiveBias（失效 → NEUTRAL），回测却按旧方向统计 WIN/LOSS，
@@ -101,8 +126,9 @@ function analyzeAt(bars, daily, weekly, i, k, targetPct, windows) {
     windows,
   });
 
-  return {
+  return { sample: {
     time: new Date(t).toISOString().slice(0, 16).replace("T", " "),
+    analysisTime: point.analysisTime,
     price,
     bias: effectiveBias,
     rawBias: bias.bias, // 审计：失效前原始结构方向（与实盘 effectiveBias 逻辑一致）
@@ -115,6 +141,19 @@ function analyzeAt(bars, daily, weekly, i, k, targetPct, windows) {
     execution: bias.executionState,
     location: location.location,
     context: location.context || null,
+    rangeId: location?.rangeId || null,
+    rangeVersion: location?.version || null,
+    rangeStatus: location?.lifecycleStatus || null,
+    rangeTransition: point.result.rangeTransition?.reason || null,
+    dealingRangeReady,
+    rangeCandidateType: rangeCandidate?.rangeType || null,
+    instrumentKind: point.profile.kind,
+    sessionModel: point.profile.sessionModel,
+    htfLiquiditySource: liquidity.htfLiquiditySource,
+    marketDayId: point.marketDayId,
+    ictTradingDayId: point.ictTradingDayId,
+    ictSession: ictSession?.name || null,
+    executionSession: executionSession?.name || null,
     draw: bias.draw && bias.draw.primary ? { type: bias.draw.primary.type, price: bias.draw.primary.price } : null,
     invalidation: bias.invalidation ? bias.invalidation.price : null,
     futures: ev.futures,
@@ -122,7 +161,7 @@ function analyzeAt(bars, daily, weekly, i, k, targetPct, windows) {
     planR: ev.planR, // V2.4：理论盈亏比（|Draw−Entry|/Risk）
     maePct: ev.maePct, // V2.4：最大逆行 %（路径质量）
     mfePct: ev.mfePct, // V2.4：最大顺行 %
-  };
+  }, range: location?.rangeId ? location : null };
 }
 
 function maxWindow(windows) {

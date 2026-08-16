@@ -16,41 +16,37 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getHistory } from "../data/binance.js";
-import { analyzeBias } from "../engine/analyzeBias.js";
+import { analyzeReplayPoint, loadReplayHistory, REPLAY_HISTORY_COUNTS } from "../engine/replayPipeline.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CASES_DIR = join(__dirname, "..", "cases");
-const HISTORY = { "4h": 3000, "1d": 2000, "1w": 400 };
+// 与 Monitor / Scanner / Case Replay 对齐，保证 Range 生命周期从同一历史窗口重建。
 
 const manifest = JSON.parse(readFileSync(join(CASES_DIR, "manifest.json"), "utf8"));
 
-function sliceToTime(candles, time) {
-  return candles.filter((k) => k.closeTime <= time);
-}
-
 /** 与 replayCase.js 完全相同的回放分析流程 */
 async function analyzeOne(symbol, replayTime) {
-  const [h4, daily, weekly] = await Promise.all([
-    getHistory(symbol, "4h", HISTORY["4h"]),
-    getHistory(symbol, "1d", HISTORY["1d"]),
-    getHistory(symbol, "1w", HISTORY["1w"]),
-  ]);
-  const candles4h = sliceToTime(h4, replayTime);
-  const day = sliceToTime(daily, replayTime);
-  const week = sliceToTime(weekly, replayTime);
-
-  const price = candles4h[candles4h.length - 1].close;
-  // 共用分析链路（与 replayCase/实时监控一致，engine/analyzeBias.js）：
-  // 内部按 replayTime 截断日/周线并注入 htfDirection，回放与审计结果一致
-  const { structure, liquidity, location, bias } = analyzeBias({
-    candles: candles4h,
-    daily: day,
-    weekly: week,
-    price,
-    time: replayTime,
+  const history = await loadReplayHistory({
+    symbol,
+    earliestCutoff: replayTime,
+    h4Count: REPLAY_HISTORY_COUNTS.h4,
+    dailyCount: REPLAY_HISTORY_COUNTS.daily,
+    weeklyCount: REPLAY_HISTORY_COUNTS.weekly,
   });
-  return { symbol, replayTime, price, structure, liquidity, location, bias };
+  const point = analyzeReplayPoint({ symbol, cutoff: replayTime, history });
+  const { structure, liquidity, location, bias } = point.result;
+  return {
+    symbol,
+    replayTime,
+    price: point.price,
+    structure,
+    liquidity,
+    location,
+    bias,
+    instrumentProfile: point.profile,
+    marketDayId: point.marketDayId,
+    ictTradingDayId: point.ictTradingDayId,
+  };
 }
 
 function audit(r) {
@@ -113,6 +109,11 @@ function audit(r) {
   return {
     symbol: r.symbol,
     date: new Date(r.replayTime).toISOString().slice(0, 10),
+    instrumentKind: r.instrumentProfile?.kind || null,
+    sessionModel: r.instrumentProfile?.sessionModel || null,
+    htfLiquiditySource: liquidity.htfLiquiditySource || null,
+    marketDayId: r.marketDayId,
+    ictTradingDayId: r.ictTradingDayId,
     structureCheck,
     liquidityCheck,
     locationCheck,
