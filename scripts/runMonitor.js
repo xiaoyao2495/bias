@@ -249,7 +249,7 @@ export function resolveFinalAction(r, prev = null) {
  * @param {number} [p.topN=30]
  * @param {boolean} [p.dryRun] 只计算不推送
  */
-export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {}) {
+export async function runMonitor({ symbols, topN = TOP_N, dryRun = false, prevSymbols = null } = {}) {
   await syncBinanceClock();
   const list = symbols && symbols.length ? symbols : (await getTopVolumeSymbols(topN, { exclude: EXCLUDE_SYMBOLS })).map((t) => t.symbol);
   log(`[runMonitor] 开始，合约数=${list.length}: ${list.join(",")}`);
@@ -411,8 +411,24 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
       log(`[runMonitor] 本轮完成: ${changed.length} 变化 / ${overview.length} 合约`);
     }
     // 流动性扫损是独立事件：首轮及新进入 Top30 的标的也必须推；cur 已合并跨 Top30 的历史去重。
+    // 运行中回归（掉出 Top30 后再次进入）：回归首轮会把 4h10m 窗口内的历史扫损补推
+    // （CHIP/PORTAL/XMR 08/16 延迟补推根因：事件 17:50 发生、19:40 才进列表、19:41 补推）。
+    // 跳过回归首轮的扫损推送，事件静默记入 sweepPushed 防下轮重推；进程首轮（prevSymbols=null）
+    // 保留补推——部署重启后的基线补推（18:55 集中补推 15 条）是合理行为。
+    const returnedSymbols = !isFirstRun && prevSymbols
+      ? new Set(overview.filter((item) => !prevSymbols.has(item.symbol)).map((item) => item.symbol))
+      : new Set();
     for (const item of overview) {
       const pendingSweeps = item.pendingSweeps || [];
+      if (returnedSymbols.has(item.symbol)) {
+        const pushedAt = marketNow();
+        for (const sweep of groupSweepNotifications(pendingSweeps)) {
+          const pushedKeys = sweep.notificationKeys?.length ? sweep.notificationKeys : [sweep.key];
+          for (const key of pushedKeys) nextState[item.symbol].sweepPushed[key] = pushedAt;
+        }
+        if (pendingSweeps.length) log(`[runMonitor] ${item.symbol} 回归 Top30 首轮，跳过 ${pendingSweeps.length} 条历史扫损补推`);
+        continue;
+      }
       for (const sweep of groupSweepNotifications(pendingSweeps)) {
         try {
           await sendNotification(
@@ -466,7 +482,7 @@ export async function runMonitor({ symbols, topN = TOP_N, dryRun = false } = {})
     log(`[runMonitor] 状态已保存（${Object.keys(nextState).length} 合约）`);
   }
 
-  return { firstRun: isFirstRun, changed, overview };
+  return { firstRun: isFirstRun, changed, overview, list };
 }
 
 /**
@@ -492,14 +508,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * @param {number} [p.intervalMs] 覆盖调度间隔（测试用）
  */
 export async function startMonitorLoop({ symbols, intervalMs, dryRun = false } = {}) {
-  await runMonitor({ symbols, dryRun });
+  let prevSymbols = null; // 上轮实际列表；null=进程首轮（保留首轮补推基线），后续轮用于判定"回归首轮"
+  let result = await runMonitor({ symbols, dryRun, prevSymbols });
+  prevSymbols = new Set(result.list || []);
   for (;;) {
     const delay = intervalMs ?? nextDelayMs(new Date(marketNow()));
     const next = new Date(marketNow() + delay);
     log(`[monitor] 下次检测: ${next.toISOString()}（${Math.round(delay / 60000)} 分钟后）`);
     await sleep(delay);
     try {
-      await runMonitor({ symbols, dryRun });
+      result = await runMonitor({ symbols, dryRun, prevSymbols });
+      prevSymbols = new Set(result.list || []);
     } catch (e) {
       log(`[monitor] 本轮失败: ${e.message}，继续下一轮`);
     }
