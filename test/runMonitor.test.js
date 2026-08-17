@@ -71,6 +71,21 @@ test("差异化升级（方案4）：L2 已推后同池 L3 不再单独推，L1�
   assert.deepEqual(pendingSweepEvents([l3], {}, now), [l3]);
 });
 
+test("方案B：同扫损K同价位换位来源（PDL→INTERNAL）不重推，旧格式 key 兼容", () => {
+  const now = 10_000;
+  const base = { legacyKey: "1_SSL", level: 62890.2, tier: 2, time: 1 };
+  const pdl = { ...base, key: "1_SSL_NO_RANGE_PDL_62890.2_RECLAIMED_RAID", baseKey: "1_SSL_NO_RANGE_PDL_62890.2", previousBaseKey: "1_SSL_PDL_62890.2" };
+  const internal = { ...base, key: "1_SSL_NO_RANGE_INTERNAL_LOW_62890.2_RECLAIMED_RAID", baseKey: "1_SSL_NO_RANGE_INTERNAL_LOW_62890.2", previousBaseKey: "1_SSL_INTERNAL_LOW_62890.2" };
+  // 旧格式：PDL 已推 → 同价位换位来源 INTERNAL 被 endsWith 宽松兼容抑制（08/16 BTC 62890.2 重推修复）
+  assert.deepEqual(pendingSweepEvents([internal], { "1_SSL_NO_RANGE_PDL_62890.2_RECLAIMED_RAID": 123 }, now), []);
+  // 新版 key（去 range/type）：精确 key 命中
+  const v2 = { ...base, key: "1_SSL_62890.2_RECLAIMED_RAID", baseKey: "1_SSL_62890.2" };
+  assert.deepEqual(pendingSweepEvents([v2], { "1_SSL_62890.2_RECLAIMED_RAID": 123 }, now), []);
+  // 不同价位各自独立去重，互不影响
+  const v2b = { ...base, level: 62928.5, key: "1_SSL_62928.5_RECLAIMED_RAID", baseKey: "1_SSL_62928.5" };
+  assert.deepEqual(pendingSweepEvents([v2b], { "1_SSL_62890.2_RECLAIMED_RAID": 123 }, now), [v2b]);
+});
+
 test("rangeId key 上线迁移：既有旧 L3 baseKey 可抑制同一历史事件重推", () => {
   const event = {
     tier: 3,

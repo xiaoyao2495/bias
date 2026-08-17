@@ -307,9 +307,12 @@ export function detectSweepEvents(h5m, buySide, sellSide, price, window = 48, bi
     const event = detectSingleSweep(h5m, isBuy ? [lv] : [], isBuy ? [] : [lv], price, window, bias, options);
     if (!event) return;
     const legacyKey = event.key;
-    // rangeId 上线前的 baseKey，用于读取既有 state.sweepPushed，避免部署首轮重推旧 L2/L3。
+    // 兼容 rangeId 上线前的 baseKey（`${time}_${side}_${type}_${price}`）：读既有 state.sweepPushed。
     const previousBaseKey = `${legacyKey}_${lv.type || "LEVEL"}_${lv.price}`;
-    const baseKey = `${legacyKey}_${causalRangeId(event) || "NO_RANGE"}_${lv.type || "LEVEL"}_${lv.price}`;
+    // 事件去重键：只保留 扫损K+侧+价位（去掉 range/type）。
+    // 位来源在日K/亚洲区间边界会切换（PDL/ASIA → INTERNAL，如 08/16 BTC 62890.2 05:51 推、08:02 重推），
+    // key 若含 type/rangeId 会在换位后变化，sweepPushed 挡不住同池同一次扫损的重推。
+    const baseKey = `${legacyKey}_${lv.price}`;
     events.push(classifyLiquidityEvent({ ...event, legacyKey, previousBaseKey, baseKey, key: baseKey }));
   };
   for (const lv of buySide || []) collect(lv, true);

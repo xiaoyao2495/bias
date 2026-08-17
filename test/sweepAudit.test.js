@@ -97,7 +97,7 @@ test("L3 与通知层分别审计 READY、去重和L1过期", () => {
   assert.match(formatSweepAudit(audit), /range=DR_A.*L3:1.*L3_ICT_CONFIRMED/);
 });
 
-test("重启回放：相同 rangeId 的扫损 key 稳定；新区间不会与旧区间共用 key", () => {
+test("重启回放与跨区间：扫损 key 仅含 扫损K+侧+价位，range/位来源变化不改变 key", () => {
   const rows = [
     k(0, 104, 100, 103),
     k(1, 106, 103, 104), // 刺破 105 并收回
@@ -106,9 +106,9 @@ test("重启回放：相同 rangeId 的扫损 key 稳定；新区间不会与旧
   const first = detectSweepEvents(rows, [level], [], null, 48)[0];
   const afterRestart = detectSweepEvents(rows.map((row) => ({ ...row })), [{ ...level }], [], null, 48)[0];
   assert.equal(first.key, afterRestart.key);
-  assert.match(first.key, /DR_STABLE/);
+  assert.match(first.key, /_105_RECLAIMED_RAID$/);
   const newRange = detectSweepEvents(rows, [{ ...level, originRangeId: "DR_NEXT", rangeId: "DR_NEXT" }], [], null, 48)[0];
-  assert.notEqual(first.key, newRange.key);
+  assert.equal(first.key, newRange.key, "换 range 同价位不改变 key（避免跨区间边界重推同一池）");
 });
 
 test("逐根回放：同一池只允许 L1→L2→L3 正向升级且 baseKey 不变", () => {

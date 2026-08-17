@@ -63,10 +63,11 @@ test("Sweep 不得被后来激活的 Range 追溯改名", () => {
   ];
   const before = detectSweepEvents(rows, [{ type: "PDH", price: 105, rangeId: "DR_LATE", rangeActiveFrom: T0 + 900_000 }], [], null)[0];
   assert.equal(before.originRangeId, undefined);
-  assert.match(before.key, /NO_RANGE/);
   const active = detectSweepEvents(rows, [{ type: "PDH", price: 105, rangeId: "DR_ACTIVE", rangeActiveFrom: T0 }], [], null)[0];
   assert.equal(active.originRangeId, "DR_ACTIVE");
-  assert.match(active.key, /DR_ACTIVE/);
+  // 方案B：key 只含 扫损K+侧+价位+stage，不含 range/type——Range 是否激活、何时激活都不改变 key
+  assert.match(before.key, /_105_RECLAIMED_RAID$/);
+  assert.equal(active.key, before.key);
 });
 
 test("FVG 生命周期时间戳单向记录 first touch → CE → fill", () => {

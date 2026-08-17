@@ -112,6 +112,16 @@ export function pendingSweepEvents(sweeps, pushed = {}, now = marketNow()) {
       ...(sweep.sourcePreviousBaseKeys || []),
     ].filter(Boolean))];
     if (baseKeys.some((baseKey) => Object.keys(pushed).some((key) => key.startsWith(`${baseKey}_`) && stageRank(key) >= minStage))) return false;
+    // 宽松兼容（方案B）：旧格式 key（含 range/type，如 `1_SSL_NO_RANGE_PDL_62890.2_RECLAIMED_RAID`）
+    // 与新格式语义 key（`${time}_${side}_${price}_${stage}`）并存。旧 key 的 time/side 在头部、
+    // price/stage 在尾部，用「前缀(时间+侧) + includes(价格+stage)」双匹配锁定同一扫损K同一池，
+    // 抑制旧 state.sweepPushed 对同池重推（含换位来源 PDL→INTERNAL、跨 range 场景）；
+    // includes 而非 endsWith：旧 key 中 price 前紧贴 type（`PDL_62890.2`）无独立分隔下划线，
+    // 且 includes(`_62890.2_...`) 不会把 `_162890.2_...` 误判为 `_62890.2_...`。
+    const eventPrefix = `${sweep.legacyKey || `${sweep.time}_${sweep.side}`}_`;
+    const stageName = sweep.stage || (sweep.key.match(/(?:LIQUIDITY_TAKEN|RECLAIMED_RAID|ICT_2022_CONFIRMED)$/) || [])[0];
+    const priceStageNeedle = `_${sweep.level}_${stageName}`;
+    if (Object.keys(pushed).some((key) => key.startsWith(eventPrefix) && key.includes(priceStageNeedle) && stageRank(key) >= minStage)) return false;
     // 旧 key 只代表旧版“已收回扫损”（现 L2）：按差异化升级策略，legacyKey 命中同样抑制后续 L2/L3；
     // L1 是新事件类型（旧版从不推送），不受 legacyKey 影响。
     return !((sweep.tier ?? 2) >= 2 && sweep.legacyKey && pushed[sweep.legacyKey]);

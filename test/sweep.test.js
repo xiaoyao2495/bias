@@ -236,7 +236,7 @@ test("detectSweepEvents: 同价位不同来源合并为一个流动性池", () =
   assert.equal(events.length, 1);
   assert.equal(events[0].type, "EXTERNAL_HIGH");
   assert.deepEqual(events[0].levelTypes, ["EXTERNAL_HIGH", "PDH", "INTERNAL_HIGH"]);
-  assert.equal(events[0].sourceBaseKeys.length, 3);
+  assert.equal(events[0].sourceBaseKeys.length, 1, "同价位来源 baseKey 相同（扫损K+侧+价位），Set 天然去重");
 });
 
 test("detectSweepEvents: 同价位同 K 但归属不同因果区间 → 仍合并为一个池（COWUSDT 08/15 同价三连报回归）", () => {
@@ -255,7 +255,7 @@ test("detectSweepEvents: 同价位同 K 但归属不同因果区间 → 仍合�
 
   assert.equal(events.length, 1, "同一根 K 扫到同一价位的多个来源应合并为一个流动性池");
   assert.deepEqual(events[0].levelTypes, ["EXTERNAL_HIGH", "PDH", "INTERNAL_HIGH"]);
-  assert.equal(events[0].sourceBaseKeys.length, 3, "合并后保留全部来源 baseKey，任一来源已推都抑制重推");
+  assert.equal(events[0].sourceBaseKeys.length, 1, "baseKey 忽略 range/type：不同因果区间同价位来源 key 相同（任一推过即抑制）");
 });
 
 test("三级事件：刺破未收回=L1，旧 detectSweeps 仍不把它当扫损", () => {
